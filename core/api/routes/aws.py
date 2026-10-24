@@ -2072,6 +2072,10 @@ class AwsPolicyResponse(BaseModel):
     ecr_repo: str = ""              # 정책이 허용한 ECR 리포지토리 이름
     is_academy_account: bool = False  # 학교(AWS Academy) 러너랩 세션인가
     steps: list[str] = []
+    #: 2.0.48 24시간 감시자 Lambda 역할 — 원클릭 셋업을 안 쓰는 사람이 콘솔에서 만들 때(학교 계정은 LabRole 이라 필요 없음)
+    watcher_role: str = ""
+    watcher_trust_json: str = ""
+    watcher_policy_json: str = ""
 
 
 def _policy_steps(unknowns: list[str], academy: bool = False) -> list[str]:
@@ -2375,6 +2379,10 @@ def get_minimum_policy(
         steps=_academy_role_advice(academy)
         + _task_role_note(task)
         + _policy_steps(unknowns, academy),
+        watcher_role=aws_policy.watcher_role_for(exec_role),
+        watcher_trust_json=json.dumps(aws_policy.watcher_trust_policy(), indent=2),
+        watcher_policy_json=json.dumps(aws_policy.watcher_role_policy(account_id or "", partition=(
+            aws_policy.partition_for(resolved_region) if account_id and resolved_region else "")), indent=2, ensure_ascii=False),
     )
 
 

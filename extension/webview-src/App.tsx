@@ -8,6 +8,7 @@ import { usePolling } from "./hooks/usePolling";
 import { BuildMode } from "./components/BuildMode";
 import CodeAgent, { setPendingTargetFolder } from "./components/CodeAgent";
 import type { ExternalTurn } from "./components/CodeAgent";
+import { MonitorBadge, MonitorPage } from "./components/MonitorPage";
 import { HubHome, HubPage, FeatureFrame, AdrPanel, SecurityHub, SecurityScanPanel, PolicyPanel, HUBS, hubOf, isHubView, isFeatureView } from "./components/Hubs";
 import type { HubId, FeatureId, ReadyCtx } from "./components/Hubs";
 import { ShipMode } from "./components/ShipMode";
@@ -220,6 +221,8 @@ const HubRouter: React.FC<{ view: ViewMode; ctx: ReadyCtx; externalTurn?: Extern
   const deploying = view === 'hub:deploy' || view === 'deploy';
   const [deployVisited, setDeployVisited] = useState(deploying);
   const [securityVisited, setSecurityVisited] = useState(view === 'hub:security');
+  const [monitorVisited, setMonitorVisited] = useState(view === 'hub:monitor');
+  useEffect(() => { if (view === 'hub:monitor') setMonitorVisited(true); }, [view]);
   useEffect(() => { if (view === "code") setCodeVisited(true); }, [view]);
   useEffect(() => { if (deploying) setDeployVisited(true); if (view === 'hub:security') setSecurityVisited(true); }, [view, deploying]);
   return <>
@@ -230,7 +233,8 @@ const HubRouter: React.FC<{ view: ViewMode; ctx: ReadyCtx; externalTurn?: Extern
     </div>
     <div hidden={!deploying}>{(deployVisited || deploying) && <FeatureRouter view="hub:deploy" ctx={ctx} onSelectMode={onSelectMode} />}</div>
     <div hidden={view !== 'hub:security'}>{(securityVisited || view === 'hub:security') && <SecurityHub onHome={() => onSelectMode('home')} onHub={h => onSelectMode(`hub:${h}`)} />}</div>
-    {view !== "code" && !deploying && view !== 'hub:security' && <FeatureRouter view={view} ctx={ctx} externalTurn={externalTurn} onSelectMode={onSelectMode} />}
+    <div hidden={view !== 'hub:monitor'}>{(monitorVisited || view === 'hub:monitor') && <MonitorPage active={view === 'hub:monitor'} onOpenDeploy={() => onSelectMode('hub:deploy')} />}</div>
+    {view !== "code" && !deploying && view !== 'hub:security' && view !== 'hub:monitor' && <FeatureRouter view={view} ctx={ctx} externalTurn={externalTurn} onSelectMode={onSelectMode} />}
   </>;
 };
 
@@ -369,7 +373,7 @@ export const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
         .rc-workspace-header button{font:inherit;font-size:12px;cursor:pointer;color:inherit;background:transparent;border:1px solid var(--vscode-panel-border,#333);border-radius:6px;padding:6px 10px}
         .rc-workspace-header .rc-brand{display:flex;align-items:center;gap:8px;border:0;padding-left:0;font-size:15px;font-weight:600}
         .rc-workspace-header .rc-status-toggle{display:flex;align-items:center;gap:7px;color:var(--vscode-descriptionForeground,#aaa);border:0;font-size:11px;padding:6px}
-        .rc-global-nav{display:flex;align-items:center;gap:4px;margin-left:24px}.rc-workspace-header .rc-global-nav button{border:0;padding:9px 14px;color:var(--vscode-descriptionForeground,#929ba7)}.rc-workspace-header .rc-global-nav button[aria-current=page]{background:var(--vscode-list-activeSelectionBackground,#263748);color:var(--vscode-list-activeSelectionForeground,#eef5ff)}
+        .rc-global-nav{display:flex;align-items:center;gap:4px;margin-left:24px}.rc-nav-badge{display:inline-grid;place-items:center;min-width:16px;height:16px;padding:0 4px;margin-left:6px;border-radius:99px;background:var(--vscode-editorWarning-foreground,#cca700);color:var(--vscode-editor-background,#1b1500);font-size:10.5px;font-weight:700;line-height:1;vertical-align:1px}.rc-workspace-header .rc-global-nav button{border:0;padding:9px 14px;color:var(--vscode-descriptionForeground,#929ba7)}.rc-workspace-header .rc-global-nav button[aria-current=page]{background:var(--vscode-list-activeSelectionBackground,#263748);color:var(--vscode-list-activeSelectionForeground,#eef5ff)}
         .rc-workspace-header .rc-quick-button{margin-left:auto;display:flex;align-items:center;gap:7px;border:0;color:var(--vscode-descriptionForeground,#aaa);font-size:11px}.rc-quick-button kbd{font-family:var(--vscode-editor-font-family,monospace);font-size:10px;border:1px solid var(--vscode-panel-border,#444);border-bottom-width:2px;border-radius:4px;padding:0 5px;color:var(--vscode-foreground,#ddd)}
         .rc-workspace-connection{margin-left:0}.rc-workspace-header .rc-connection-button{display:flex;align-items:center;gap:7px;border:0;background:transparent;font-size:11px;color:var(--vscode-descriptionForeground,#aaa)}.rc-connection-dot{height:6px;width:6px;border-radius:50%;background:#d2a760}.rc-connection-dot[data-ready=true]{background:#56bf91}
         .rc-workspace .rc-local-hub-nav,.rc-workspace .rc-mode-nav{display:none!important}.rc-workspace [hidden]{display:none!important}
@@ -382,7 +386,7 @@ export const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
       <section style={{ minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", borderRight: "1px solid var(--vscode-panel-border, #333)" }}>
         <div className="rc-workspace-header">
           <button className="rc-brand" onClick={() => onSelectMode("home")} aria-label="ReCoder 홈"><Icon.Logo size={22} />ReCoder</button>
-          <nav className="rc-global-nav" aria-label="작업 선택">{HUBS.map(h => <button key={h.id} aria-current={activeHub === h.id ? 'page' : undefined} onClick={() => onSelectMode(`hub:${h.id}`)}>{h.title}</button>)}</nav>
+          <nav className="rc-global-nav" aria-label="작업 선택">{HUBS.map(h => <button key={h.id} aria-current={activeHub === h.id ? 'page' : undefined} onClick={() => onSelectMode(`hub:${h.id}`)}>{h.title}{h.id === 'monitor' && <MonitorBadge />}</button>)}</nav>
           <QuickAccess onSelectMode={onSelectMode} />
           <WorkspaceConnection />
           <StatusBadge pending={diagnosticsPending} error={diagnosticsError} compact diagnostics={diagnostics} coreStatus={coreStatus} expanded={showDiagnostics} onToggle={onToggleDiagnostics} />

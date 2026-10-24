@@ -80,6 +80,7 @@ from api.routes import (  # noqa: E402
     github,
     repair,
     ops_alerts as ops_alerts_routes,
+    ops_watch as ops_watch_routes,
     aws_cleanup as aws_cleanup_routes,
     security_checks as security_checks_routes,
     models as models_routes,
@@ -390,6 +391,8 @@ def create_app() -> FastAPI:
     app.include_router(repair.router)
     #: 2.0.25 공격·장애 감지 알림
     app.include_router(ops_alerts_routes.router)
+    #: 2.0.48 모니터 · 24시간 감시자
+    app.include_router(ops_watch_routes.router)
     app.include_router(aws_cleanup_routes.router)
     app.include_router(security_checks_routes.router)
     #: 2.0.36 작업별 AI 공급자·비용 원장·공급자 비교

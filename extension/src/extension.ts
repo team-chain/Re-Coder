@@ -15,6 +15,7 @@ import * as vscode from 'vscode';
 import { activeProjectPath, initActiveProject, pickProjectFolder } from './activeProject';
 import { DiscordWebhook } from './sidebar/discordWebhook';
 import { AlertWatcher } from './ops/alertWatcher';
+import { MonitorDigest } from './ops/monitorDigest';
 import { isAiKeyProvider, isEconomyProvider, recentRoutingWrite, runAiConnectCommand, runEconomyCommand } from './ai/aiKeys';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -128,6 +129,13 @@ export function activate(context: vscode.ExtensionContext): void {
     }, () => ReCoderPanel.showView(context.extensionUri, sidebarProvider, 'operate'));
     context.subscriptions.push(alertWatcher);
     alertWatcher.start();
+
+    // ── 2.0.48 밤사이 요약 — 감시자 기록을 읽어 알리고 Monitor 탭 배지를 갱신한다(실행은 하지 않음) ──
+    const monitorDigest = new MonitorDigest(apiClient, context.globalState,
+        () => ReCoderPanel.showView(context.extensionUri, sidebarProvider, 'hub:monitor'),
+        counts => sidebarProvider.setMonitorBadges(counts));
+    context.subscriptions.push(monitorDigest);
+    monitorDigest.start();
 
     //: 확장이 다시 시작돼도 열려 있던 ReCoder 탭을 새 확장에 다시 연결한다(ReCoderPanel.revive).
     context.subscriptions.push(

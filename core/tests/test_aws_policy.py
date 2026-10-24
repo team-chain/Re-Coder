@@ -262,6 +262,14 @@ def test_passing_an_arn_instead_of_a_name_is_rejected():
 # 근거 없이 늘리지 말 것 — 여기 적는 순간 최소권한 원칙에 구멍이 난다.
 
 PINNED_ACTIONS: dict[str, str] = {
+    "lambda:TagResource":
+        "watcher.install 의 create_function(Tags=…) — 태그를 함께 넣는 생성은 TagResource 로도 인가된다(호출은 하나)",
+    "events:TagResource":
+        "watcher.install 의 put_rule(Tags=…) — 같은 이유",
+    "dynamodb:TagResource":
+        "watcher.install 의 create_table(Tags=…) — 같은 이유",
+    "dynamodb:DescribeTable":
+        "watcher.install 의 table_exists 기다리기(boto3 waiter) — 기다리기가 내부에서 DescribeTable 을 부른다(코드 호출이 아님)",
     "ec2:DescribeInternetGateways":
         "aws_edge.ensure_edge 의 create_load_balancer — ELB 가 인터넷용 ALB 를 만들 때 호출자 권한으로 VPC 의 인터넷 "
         "게이트웨이를 확인한다(우리 코드의 호출이 아니라 기록에 안 보인다, ElasticLoadBalancingFullAccess 와 같은 읽기 권한)",
@@ -809,8 +817,11 @@ def test_policy_and_deploy_path_agree_on_role_names(monkeypatch):
     monkeypatch.delenv(ap.ENV_TASK_ROLE_ARN, raising=False)
     exec_role, task = route._resolve_roles(False, "", "")
     assert (exec_role, task) == (ap.configured_execution_role(), "")
+    #: 2.0.48 — 감시자 Lambda 역할(watcher.role_arn_for 의 기본값)도 배포 경로가 실제로 넘기는 역할이다.
+    import watcher
+    assert ap.watcher_role_for(exec_role) == watcher.ROLE_NAME
     assert authorized(ap.build_policy(["ecs"], "123456789012", "us-east-1", exec_role,
-                                      task_role=task)) == {exec_role}
+                                      task_role=task)) == {exec_role, watcher.ROLE_NAME}
 
     # ② 배포 경로가 환경변수로 다른 역할을 쓰도록 설정된 경우
     monkeypatch.setenv(ap.ENV_EXECUTION_ROLE_ARN, "arn:aws:iam::1:role/MyExec")
@@ -821,7 +832,7 @@ def test_policy_and_deploy_path_agree_on_role_names(monkeypatch):
     assert (exec_role, task) == ("MyExec", "MyTask"), \
         "환경변수로 지정한 역할이 권한표에 반영되지 않는다"
     assert authorized(ap.build_policy(["ecs"], "123456789012", "us-east-1", exec_role,
-                                      task_role=task)) == {"MyExec", "MyTask"}, \
+                                      task_role=task)) == {"MyExec", "MyTask", ap.WATCHER_ROLE}, \
         "설정한 태스크 역할이 PassRole 대상에서 빠졌다 — 등록이 거부된다"
 
     # ③ 학교 계정 자동 판단보다 환경변수가 앞선다 (배포 경로가 그걸 보므로)

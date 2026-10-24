@@ -19,7 +19,7 @@ import { adrStatus } from './adrStatus';
 import { isNotApplicable } from './securityGate';
 import { SecurityFixList } from './SecurityFixList';
 
-export type HubId = "develop" | "deploy" | "security";
+export type HubId = "develop" | "deploy" | "security" | "monitor";
 export type FeatureId =
   | "code" | "build" | "map" | "adr" | "models"
   | "ship" | "deploy" | "replay" | "operate"
@@ -42,6 +42,8 @@ export const HUBS: Array<{ id: HubId; icon: HubIconName; title: string; subtitle
   { id: "develop", icon: "code", title: "Develop", subtitle: "요청부터 코드 적용까지", accent: "#4a9eff" },
   { id: "deploy", icon: "rocket", title: "Deploy", subtitle: "로컬 Docker부터 AWS까지", accent: "#f0b35b" },
   { id: "security", icon: "shield", title: "Security", subtitle: "배포 전 검사와 정책", accent: "#ef6b6b" },
+  //: 2.0.48 — 기능 카드 없이 모니터 화면 하나(App 의 HubRouter 가 그린다)
+  { id: "monitor", icon: "activity", title: "Monitor", subtitle: "밤사이 일 · 승인 대기 · 24시간 감시자", accent: "#4ec9b0" },
 ];
 
 export const FEATURES: FeatureDef[] = [
@@ -102,7 +104,7 @@ export const HubHome: React.FC<{ onSelect: (hub: HubId) => void; ctx: ReadyCtx }
         .rc-home{max-width:920px;margin:clamp(16px,7vh,72px) auto;container-type:inline-size}
         .rc-home h1{font-size:24px;font-weight:600;letter-spacing:-.5px;margin:0 0 10px}
         .rc-home-intro{color:${C.muted};font-size:13px;margin:0 0 30px}
-        .rc-home-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+        .rc-home-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}@container(max-width:900px){.rc-home-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
         @container(max-width:640px){.rc-home-grid{grid-template-columns:1fr}.rc-home-card{min-height:120px!important;padding:20px!important}}
         .rc-home-card{display:flex;flex-direction:column;align-items:flex-start;gap:10px;text-align:left;border:1px solid ${C.line};border-radius:10px;padding:24px;min-height:170px;background:transparent;color:${C.fg};font:inherit;cursor:pointer}
         .rc-home-card:hover{background:${C.card};border-color:var(--vscode-focusBorder,#587fa1)}

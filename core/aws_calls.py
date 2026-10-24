@@ -82,6 +82,8 @@ SKIPPED_DIRS: dict[str, str] = {
     "__pycache__": "빌드 산출물",
     "eval":        "평가 스크립트 — 사용자 배포 경로가 아니다",
     "demo":        "데모 스크립트 — 사용자 배포 경로가 아니다",
+    "watcher_lambda": "사용자 계정 안 24시간 감시자 Lambda — 배포 키가 아니라 감시자 역할(recoder-watcher)로 돈다. "
+                      "그 권한표는 aws_policy.watcher_role_policy() 이고 tests/test_watcher.py 가 이 폴더의 호출과 대조한다",
     "relay":       "팀 게이트웨이 서버 — 팀 계정에서 돌아간다. "
                    "사용자 BYO 권한표의 대상이 아니다 (DynamoDB 등)",
 }

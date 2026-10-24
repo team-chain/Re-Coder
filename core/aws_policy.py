@@ -72,6 +72,14 @@ TASK_ROLE = "ecsTaskRole"
 #: 러너랩은 역할을 만들 수 없어서 실행 역할·태스크 역할 **둘 다** 이걸 쓴다.
 ACADEMY_TASK_EXECUTION_ROLE = "LabRole"
 
+#: 2.0.48 24시간 감시자 Lambda 역할 — 원클릭 IAM 셋업(CloudFormation)이 만들고 배포 키는 넘기기만 한다.
+WATCHER_ROLE = f"{RESOURCE_PREFIX}-watcher"
+
+
+def watcher_role_for(execution_role: str) -> str:
+    """감시자 Lambda 에 넘길 역할 — 학교 계정(실행 역할이 LabRole)은 LabRole, 그 밖에는 recoder-watcher."""
+    return ACADEMY_TASK_EXECUTION_ROLE if role_short_name(execution_role or "") == ACADEMY_TASK_EXECUTION_ROLE else WATCHER_ROLE
+
 #: ECS 클러스터·서비스 이름의 기본값. ReCoder 가 직접 만드는 자원의 이름 규칙이다.
 #: 사용자가 **이미 있는** 클러스터(`default` 등)에 배포하면 이 기본값으로는
 #: 권한이 안 맞으므로, 실제 이름을 인자로 받아 ARN 에 반영한다.
@@ -734,6 +742,62 @@ def _ecs_statements(
             "Action": ["sns:CreateTopic", "sns:Subscribe", "sns:TagResource"],
             "Resource": _arn("sns", "recoder-*", ctx),
         },
+        # ── 2.0.48 24시간 감시자(watcher) — 사용자 계정 안 Lambda · 기록 표 · 깨우는 규칙 ─────────────────
+        # 역할은 만들지 않는다(iam:CreateRole 이 있으면 아무 권한의 역할을 만들어 넘기는 권한 상승 경로).
+        # 원클릭 IAM 셋업이 만든 recoder-watcher 역할을 Lambda 에 넘기기만 한다. 없어도 배포는 된다.
+        {
+            "Sid": "WatcherFunction",
+            "Effect": "Allow",
+            "Action": ["lambda:CreateFunction", "lambda:GetFunction", "lambda:UpdateFunctionCode",
+                       "lambda:UpdateFunctionConfiguration", "lambda:DeleteFunction", "lambda:AddPermission",
+                       "lambda:CreateFunctionUrlConfig", "lambda:GetFunctionUrlConfig", "lambda:DeleteFunctionUrlConfig",
+                       "lambda:TagResource", "lambda:ListTags", "lambda:PutFunctionConcurrency"],
+            # 감시자 이름만(recoder-…-watch) — 같은 계정의 다른 recoder-* 함수(팀 게이트웨이 등)는 건드리지 못하게.
+            "Resource": _arn("lambda", "function:recoder-*-watch", ctx),
+        },
+        {
+            # 감시자 역할을 **Lambda 에만** 넘긴다(조건이 없으면 아무 서비스에 넘길 수 있다).
+            "Sid": "WatcherPassRole",
+            "Effect": "Allow",
+            "Action": ["iam:PassRole"],
+            "Resource": _arn("iam", f"role/{watcher_role_for(task_execution_role)}", ctx, global_service=True),
+            "Condition": {"StringEquals": {"iam:PassedToService": "lambda.amazonaws.com"}},
+        },
+        {
+            "Sid": "WatcherReadRole",
+            "Effect": "Allow",
+            "Action": ["iam:GetRole"],
+            "Resource": _arn("iam", f"role/{watcher_role_for(task_execution_role)}", ctx, global_service=True),
+        },
+        {
+            "Sid": "WatcherRules",
+            "Effect": "Allow",
+            "Action": ["events:PutRule", "events:PutTargets", "events:RemoveTargets", "events:DeleteRule",
+                       "events:TagResource"],
+            "Resource": _arn("events", "rule/recoder-*-w-*", ctx),
+        },
+        {
+            "Sid": "WatcherTable",
+            "Effect": "Allow",
+            "Action": ["dynamodb:CreateTable", "dynamodb:DescribeTable", "dynamodb:DeleteTable",
+                       "dynamodb:UpdateTimeToLive", "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem",
+                       "dynamodb:Query", "dynamodb:TagResource"],
+            "Resource": _arn("dynamodb", "table/recoder-*-watch", ctx),
+        },
+        {
+            "Sid": "WatcherLogs",
+            "Effect": "Allow",
+            "Action": ["logs:CreateLogGroup", "logs:PutRetentionPolicy", "logs:DeleteLogGroup", "logs:TagResource"],
+            "Resource": _arn("logs", "log-group:/aws/lambda/recoder-*-watch", ctx),
+        },
+        {
+            # 감시자 역할은 recoder:watch=true 가 붙은 서비스만 되돌릴 수 있다 — 그 표시를 붙이고 뗀다.
+            "Sid": "WatcherServiceTag",
+            "Effect": "Allow",
+            "Action": ["ecs:TagResource", "ecs:UntagResource"],
+            "Resource": _arn("ecs", f"service/{cluster}/{service}", ctx),
+            "Condition": {"ForAllValues:StringEquals": {"aws:TagKeys": ["recoder:watch"]}},
+        },
         {
             # 2.0.23 — ReCoder 가 **새로 만든** 리소스에 recoder:managed 태그를 붙인다.
             # 정리 기능이 "ReCoder 가 만든 것만" 찾는 표시다(aws_infra.tag_created).
@@ -1165,6 +1229,41 @@ def build_policy(
             statements.extend(builder(ctx))
 
     return {"Version": "2012-10-17", "Statement": statements}
+
+
+def watcher_trust_policy() -> dict:
+    """감시자 역할의 신뢰 관계 — Lambda 만 맡을 수 있다."""
+    return {"Version": "2012-10-17", "Statement": [{
+        "Effect": "Allow", "Principal": {"Service": "lambda.amazonaws.com"}, "Action": "sts:AssumeRole"}]}
+
+
+def watcher_role_policy(account_id: str = "", *, partition: str = "") -> dict:
+    """2.0.48 감시자 Lambda 가 쓰는 권한 — core/watcher_lambda/handler.py 의 호출과 정확히 맞춘다(test_watcher 가 대조).
+
+    역할 하나를 여러 서비스 · 리전의 감시자가 함께 쓴다. 그래서 리전은 * 이고, 대신 이름(recoder-*)과 태그로 좁힌다.
+      · 되돌리기(ecs:UpdateService)는 recoder:watch=true 표시가 붙은 서비스에만 — 감시자를 설치할 때 붙인다.
+      · 그 밖에는 읽기 · 자기 기록 표 · 자기 로그 · 알림 보내기뿐이다.
+    """
+    account = _check_account(account_id) if account_id else ACCOUNT_PLACEHOLDER
+    part = partition or (PARTITION_PLACEHOLDER if not account_id else "aws")
+
+    def arn(service: str, resource: str) -> str:
+        return f"arn:{part}:{service}:*:{account}:{resource}"
+
+    return {"Version": "2012-10-17", "Statement": [
+        {"Sid": "OwnLogs", "Effect": "Allow", "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+         "Resource": [arn("logs", "log-group:/aws/lambda/recoder-*-watch"), arn("logs", "log-group:/aws/lambda/recoder-*-watch:*")]},
+        # 감시자 기록 표만(recoder-…-watch) — 같은 계정의 다른 recoder-* 표(팀 릴레이 큐 등)는 못 건드리게.
+        {"Sid": "OwnTable", "Effect": "Allow", "Action": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem",
+                                                           "dynamodb:DeleteItem"],
+         "Resource": arn("dynamodb", "table/recoder-*-watch")},
+        # ECS 문서: Describe* 는 리소스 단위 제한을 보장하지 않는다 — 읽기 전용이라 * 로 둔다.
+        {"Sid": "ReadService", "Effect": "Allow", "Action": ["ecs:DescribeServices"], "Resource": "*"},
+        {"Sid": "ApprovedRollbackOnly", "Effect": "Allow", "Action": ["ecs:UpdateService"],
+         "Resource": arn("ecs", "service/*/*"),
+         "Condition": {"StringEquals": {"aws:ResourceTag/recoder:watch": "true"}}},
+        {"Sid": "Notify", "Effect": "Allow", "Action": ["sns:Publish"], "Resource": arn("sns", "recoder-*")},
+    ]}
 
 
 #: 사용자가 직접 채워야 하는 자리표시자 전체. 새로 추가하면 여기에도 넣어야

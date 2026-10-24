@@ -8,7 +8,7 @@ pydantic>=2.7.0
 pydantic-settings>=2.3.0
 
 # AWS Bedrock (primary LLM provider)
-boto3>=1.34.0
+boto3>=1.40.50  # 2.0.48 Lambda 함수 URL 권한(InvokedViaFunctionUrl)
 botocore>=1.34.0
 
 # Gemini fallback (legacy SDK + new unified SDK)

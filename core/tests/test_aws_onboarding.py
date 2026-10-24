@@ -73,7 +73,8 @@ def test_필수_자원과_출력이_있다() -> None:
     t = _template()
     policies = {k for k, v in t["Resources"].items() if v["Type"] == "AWS::IAM::ManagedPolicy"}
     assert "RecoderDeployPolicy" in policies
-    assert set(t["Resources"]) == policies | {"RecoderDeployUser", "RecoderDeployKey"}
+    #: 2.0.48 — 감시자 Lambda 역할도 이 스택이 만든다(배포 키는 역할을 만들 수 없다).
+    assert set(t["Resources"]) == policies | {"RecoderDeployUser", "RecoderDeployKey", "RecoderWatcherRole"}
     #: 나뉜 정책을 모두 사용자에게 붙인다
     assert t["Resources"]["RecoderDeployUser"]["Properties"]["ManagedPolicyArns"] == [{"Ref": p} for p in sorted(
         policies, key=lambda n: (len(n), n))]

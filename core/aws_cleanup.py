@@ -37,12 +37,16 @@ CLIENTS = ("ecs", "ecr", "logs", "ec2", "elbv2", "wafv2", "cloudwatch", "sns", "
            # 2.0.31 CloudFront 에 붙인 WAF(전역 범위) — us-east-1 클라이언트
            "wafv2_global",
            # 2.0.35 원본 구간 HTTPS — 배포 리전 인증서(acm) · origin.<도메인> 레코드(route53)
-           "acm", "route53")
+           "acm", "route53",
+           # 2.0.48 24시간 감시자(Lambda · 깨우는 규칙 · 기록 표)
+           "lambda", "events", "dynamodb")
 #: 리전을 us-east-1 로 고정해 만드는 클라이언트(이름 → 실제 서비스).
 GLOBAL_CLIENTS = {"acm_global": "acm", "wafv2_global": "wafv2"}
 
 #: 삭제 순서(작을수록 먼저).
 ORDER = {
+    #: 감시자를 먼저 지운다 — 서비스가 사라지는 동안 '장애'로 알리지 않게
+    "watcher": -1,
     "ecs_service": 0, "task_definitions": 1, "cloudfront": 2, "waf_cdn": 3, "acm_certificate": 4, "waf": 5, "alb": 6,
     #: 로드밸런서(443 리스너)가 쓰는 인증서 — 로드밸런서를 지운 뒤에
     "acm_origin_certificate": 6.5,
@@ -59,6 +63,7 @@ LABELS = {
     "rds_subnet_group": "DB 서브넷 그룹", "rds_parameter_group": "DB 파라미터 그룹", "secret": "DB 접속 정보(Secrets Manager)",
     "waf_cdn": "WAF 웹 ACL(HTTPS 주소)",
     "acm_origin_certificate": "원본 구간 인증서(ACM · 로드밸런서)",
+    "watcher": "24시간 감시자(Lambda · 규칙 · 기록 표)",
 }
 COST = {
     "ecs_service": "실행 중인 태스크만큼 시간당 요금", "task_definitions": "요금 없음", "waf": "매달 고정 요금 + 요청 수",
@@ -69,6 +74,7 @@ COST = {
     "rds_subnet_group": "요금 없음", "rds_parameter_group": "요금 없음", "secret": "비밀당 매달 소액",
     "waf_cdn": "매달 고정 요금 + 요청 수",
     "acm_origin_certificate": "요금 없음",
+    "watcher": "거의 없음(월 $0.1 미만)",
 }
 def make_clients(session: Any) -> dict:
     """boto3 세션 하나로 정리에 쓰는 클라이언트 묶음(인증서는 us-east-1)."""
@@ -429,6 +435,42 @@ def _find_rds(rds: Any, sm: Any, items: list[Item]) -> None:
                           tagged=_managed(t), service=t.get(SERVICE_TAG, ""), project=t.get(PROJECT_TAG, "")))
 
 
+def _watcher_mod():
+    try:
+        import watcher  # type: ignore
+    except ImportError:  # pragma: no cover
+        from core import watcher  # type: ignore
+    return watcher
+
+
+def _find_watchers(clients: dict, region: str, items: list[Item], records: Iterable[dict] = ()) -> None:
+    """감시자 함수가 있는지(이름이 서비스에서 정해진다 — 목록 권한 없이 GetFunction 으로).
+
+    지금 있는 ECS 서비스뿐 아니라 감시 목록 · 배포 기록의 서비스도 본다 — 서비스만 먼저 지워져 감시자가 혼자 남은 경우도 찾게.
+    """
+    watcher = _watcher_mod()
+    session = watcher.from_clients(clients)
+    candidates: dict[tuple[str, str], str] = {(i.cluster, i.name): i.project for i in items if i.kind == "ecs_service"}
+    try:
+        try:
+            import ops_alerts  # type: ignore
+        except ImportError:  # pragma: no cover
+            from core import ops_alerts  # type: ignore
+        for m in ops_alerts.monitors():
+            if m.get("region") == region:
+                candidates.setdefault((str(m.get("cluster")), str(m.get("service"))), "")
+    except Exception:  # noqa: BLE001
+        pass
+    for r in records:
+        if (r.get("region") or region) == region and r.get("cluster") and r.get("service"):
+            candidates.setdefault((str(r["cluster"]), str(r["service"])), "")
+    for (cluster, service), project in candidates.items():
+        found = watcher.installed(session, region=region, cluster=cluster, service=service)
+        if found:
+            items.append(Item(id=f"watcher:{cluster}/{service}", kind="watcher", name=found["name"], arn=found["arn"],
+                              service=service, project=project, tagged=found["tagged"], cluster=cluster))
+
+
 def find(clients: dict, *, region: str, records: Iterable[dict] = ()) -> tuple[list[Item], list[str]]:
     """리전의 ReCoder 리소스(태그 있는 것 + 이름·기록으로 보이는 태그 없는 것). 못 본 종류는 문장으로."""
     items: list[Item] = []
@@ -447,11 +489,13 @@ def find(clients: dict, *, region: str, records: Iterable[dict] = ()) -> tuple[l
                                            region=region, foreign=foreign)),
         ("관리형 DB", lambda: _find_rds(clients["rds"], clients["secretsmanager"], items)),
         ("원본 구간 인증서", lambda: _find_origin_certs(clients["acm"], items)),
+        ("24시간 감시자", lambda: _find_watchers(clients, region, items, list(records))),
     ]
     for label, step in steps:
         try:
             needs = {"HTTPS 주소": ("cloudfront", "acm_global"), "관리형 DB": ("rds", "secretsmanager"),
-                     "HTTPS 주소 WAF": ("wafv2_global",), "원본 구간 인증서": ("acm",)}.get(label, ())
+                     "HTTPS 주소 WAF": ("wafv2_global",), "원본 구간 인증서": ("acm",),
+                     "24시간 감시자": ("lambda", "events", "dynamodb")}.get(label, ())
             if not all(k in clients for k in needs):
                 continue
             step()
@@ -530,6 +574,14 @@ def _retry(fn: Callable[[], Any], codes: tuple[str, ...], *, sleep: Callable[[fl
 def _delete_one(clients: dict, item: Item, *, region: str, all_items: list[Item],
                 sleep: Callable[[float], None]) -> str:
     k = item.kind
+    if k == "watcher":
+        watcher = _watcher_mod()
+        result = watcher.uninstall(watcher.from_clients(clients), region=region, cluster=item.cluster,
+                                   service=item.service, approved=True)
+        if not result["ok"]:
+            left = [f"{r['label']}({r.get('note', '')})" for r in result["results"] if not r["ok"]]
+            raise RuntimeError("일부를 지우지 못했습니다: " + ", ".join(left))
+        return "감시자 함수 · 규칙 · 기록 표 · 로그를 지웠습니다."
     if k == "ecs_service":
         ecs = clients["ecs"]
         ecs.update_service(cluster=item.cluster, service=item.name, desiredCount=0)

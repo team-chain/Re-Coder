@@ -93,6 +93,40 @@ export interface OpsAlert {
     sources?: { ips?: Array<{ value: string; count: number }>; paths?: Array<{ value: string; count: number }> };
     suggestions?: Array<{ action: string; value: unknown; label: string; detail: string }>;
 }
+/** 2.0.48 모니터 — 감시자가 남긴 기록 하나. actions 의 롤백 제안은 링크 토큰 없이(코어가 뺀다). */
+export interface WatchEvent {
+    sk: string; at: string; ts: number; kind: string; severity: string; title: string; detail: string; source: string;
+    actions?: Array<{ action: string; label?: string; target?: string; from_td?: string; status?: string; expires?: number }>;
+    target?: string; from_td?: string; task_definition?: string;
+}
+export interface WatchStatus {
+    installed: boolean | null; error?: string; version?: string; approval_link?: boolean; discord?: boolean; mail?: boolean;
+    stable?: string; last_tick?: number; ticks?: number; healthy?: boolean; waiting_first_tick?: boolean;
+    running?: number | null; desired?: number | null; installed_at?: number;
+}
+export interface MonitorCurrent {
+    key: string; service: string; region: string; cluster: string; metrics: boolean;
+    service_state: { status: string; running: number; desired: number; revision: string; task_definition: string } | null;
+    series?: { requests: number[]; errors: number[]; blocked: number[] } | null;
+    now?: { rpm: number; error_rate: number; points: number };
+    watcher: WatchStatus; events: WatchEvent[];
+    offers: Array<{ event: string; title: string; at: string; target: string; from_td: string; label: string; expires: number }>;
+    alerts: OpsAlert[]; gaps: string[];
+}
+export interface MonitorOverview {
+    monitors: Array<{ key: string; service: string; region: string; cluster: string }>;
+    current: MonitorCurrent | null;
+}
+export interface WatchPlan {
+    service: string; cluster: string; region: string; revision: string;
+    role: { arn: string; exists: boolean | null };
+    resources: Array<{ kind: string; name: string; detail: string }>;
+    permissions: string; cost: string; notes: string[];
+}
+export interface WatchResult {
+    ok?: boolean; installed?: boolean; message: string; notes?: string[]; url?: boolean;
+    results?: Array<{ label: string; ok: boolean; note?: string }>;
+}
 import { FETCH_HEADERS_LIMIT_MS, longHttpFetch } from './longHttp';
 
 /** 보안 검사 결과로 만든 수정안. auto=false 는 안내만, risk 가 있으면 기본으로 고르지 않는다. */
@@ -1762,6 +1796,51 @@ export class ApiClient {
             // 2.0.32 — 취약점 올리기는 폴더마다 npm 잠금 갱신(최대 4분)을 하므로 넉넉히 기다린다(시간 초과 뒤 다시 누르면 두 번 적용되던 것).
             'POST', `/api/ops/alerts/${encodeURIComponent(alertId)}/act`, { action, value, approved }, false, 600000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '대응을 적용하지 못했습니다'); }
+        return resp.data;
+    }
+
+    // ── 2.0.48 모니터 · 24시간 감시자 ──
+    /** GET /api/ops/watch/overview — 서비스 상태 · 24시간 지표 · 감시자 상태 · 기록 · 승인 대기. light 는 지표 없이. */
+    async monitorOverview(key = '', light = false): Promise<MonitorOverview> {
+        const qs = new URLSearchParams();
+        if (key) { qs.set('key', key); }
+        if (light) { qs.set('light', 'true'); }
+        const resp = await this.request<MonitorOverview>('GET', `/api/ops/watch/overview${qs.toString() ? `?${qs}` : ''}`, undefined, false, 90000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '모니터 정보를 불러오지 못했습니다'); }
+        return resp.data;
+    }
+
+    /** POST /api/ops/watch/plan — 감시자를 설치하면 생기는 것 · 역할 준비 여부(AWS 를 바꾸지 않음). */
+    async watchPlan(key: string, role = ''): Promise<WatchPlan> {
+        const resp = await this.request<WatchPlan>('POST', '/api/ops/watch/plan', { key, role }, false, 60000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '설치 계획을 만들지 못했습니다'); }
+        return resp.data;
+    }
+
+    /** POST /api/ops/watch/install — 승인한 뒤에만. IAM 역할 전파를 기다릴 수 있어 넉넉히. */
+    async watchInstall(key: string, role: string, discord: string, approved: boolean): Promise<WatchResult> {
+        const resp = await this.request<WatchResult>('POST', '/api/ops/watch/install', { key, role, discord, approved }, false, 300000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '감시자를 설치하지 못했습니다'); }
+        return resp.data;
+    }
+
+    async watchUninstall(key: string, approved: boolean): Promise<WatchResult> {
+        const resp = await this.request<WatchResult>('POST', '/api/ops/watch/uninstall', { key, approved }, false, 180000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '감시자를 지우지 못했습니다'); }
+        return resp.data;
+    }
+
+    async watchSettings(key: string, settings: { discord?: string; email?: string }): Promise<WatchResult> {
+        const resp = await this.request<WatchResult>('POST', '/api/ops/watch/settings', { key, ...settings }, false, 60000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '설정을 저장하지 못했습니다'); }
+        return resp.data;
+    }
+
+    /** POST /api/ops/watch/rollback — 모니터에서 승인한 롤백. 그 사이 버전이 바뀌었으면 코어가 거절한다. */
+    async watchRollback(key: string, targetTd: string, fromTd: string, approved: boolean): Promise<WatchResult> {
+        const resp = await this.request<WatchResult>('POST', '/api/ops/watch/rollback',
+            { key, target_td: targetTd, from_td: fromTd, approved }, false, 90000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '롤백을 시작하지 못했습니다'); }
         return resp.data;
     }
 

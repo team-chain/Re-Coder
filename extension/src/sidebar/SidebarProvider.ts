@@ -1,3 +1,4 @@
+import { SEEN_KEY, pendingCount } from '../ops/monitorDigest';
 import { currentAiProvider, isEconomyProvider, storedAiKeys } from '../ai/aiKeyEnv';
 import { withTimeout } from '../core/timeouts';
 import { detectFrontendProject } from '../deploy/frontendBuild';
@@ -194,6 +195,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     //: 큰 작업 화면이 ready 를 보냈는가 — 막 만든 창·다시 불러온 창에 바로 보낸 메시지는 React 가 듣기 전이라 사라진다.
     private _workspaceReady = false;
     isWorkspaceReady(): boolean { return !!this._workspacePanelWebview && this._workspaceReady; }
+    //: 2.0.48 Monitor 탭 배지 — 서비스별 승인 대기 수(밤사이 요약과 모니터 화면이 함께 갱신).
+    private _monitorBadge: Record<string, number> = {};
+    private _monitorBadgeTotal(): number { return Object.values(this._monitorBadge).reduce((n, v) => n + v, 0); }
+    /** 밤사이 요약이 모든 서비스를 다시 센 결과로 통째로 바꾼다. */
+    setMonitorBadges(counts: Record<string, number>): void {
+        this._monitorBadge = { ...counts };
+        this.postMessage('monitor.badge', { count: this._monitorBadgeTotal() });
+    }
+    /** 모니터 화면이 한 서비스를 새로 읽었을 때. */
+    setMonitorBadge(count: number, key: string): void {
+        this._monitorBadge[key] = count;
+        this.postMessage('monitor.badge', { count: this._monitorBadgeTotal() });
+    }
     /** 빠른 이동 설정이 바뀌면 열린 화면에 알린다. */
     broadcastQuickAccess(state: QuickAccessPayload): void {
         this.postMessage('quickAccess.state', state);
@@ -1117,6 +1131,72 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     this.postMessageToWebview(requestWebview, 'ops.alerts.result', data);
                 } catch (err) {
                     this.postMessageToWebview(requestWebview, 'ops.alerts.error', { message: String(err), alertId: p.alertId });
+                }
+                break;
+            }
+            // ── 2.0.48 모니터 · 24시간 감시자 ──
+            case 'monitor.load': {
+                const p = (payload ?? {}) as { key?: string };
+                try {
+                    const data = await this._apiClient.monitorOverview(typeof p.key === 'string' ? p.key : '');
+                    const seen = this._globalState?.get<Record<string, string>>(SEEN_KEY, {}) ?? {};
+                    const key = data.current?.key ?? '';
+                    this.postMessageToWebview(requestWebview, 'monitor.result', { ...data, seen: key ? seen[key] ?? '' : '' });
+                    if (data.current) { this.setMonitorBadge(pendingCount(data.current), data.current.key); }
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'monitor.error', { message: String(err) });
+                }
+                break;
+            }
+            case 'monitor.seen': {
+                //: 사용자가 이 서비스의 기록을 여기까지 봤다 — '밤사이' 요약의 기준.
+                const p = (payload ?? {}) as { key?: string; sk?: string };
+                if (typeof p.key === 'string' && typeof p.sk === 'string' && p.key.length < 600 && p.sk.length < 100) {
+                    const seen = { ...(this._globalState?.get<Record<string, string>>(SEEN_KEY, {}) ?? {}) };
+                    if (!seen[p.key] || p.sk > seen[p.key]) {
+                        seen[p.key] = p.sk;
+                        await this._globalState?.update(SEEN_KEY, seen);
+                    }
+                }
+                break;
+            }
+            case 'monitor.badge.get': {
+                this.postMessageToWebview(requestWebview, 'monitor.badge', { count: this._monitorBadgeTotal() });
+                break;
+            }
+            case 'monitor.watch.plan': {
+                const p = (payload ?? {}) as { key?: string; role?: string };
+                try {
+                    if (!p.key) { throw new Error('감시할 서비스를 고르세요.'); }
+                    this.postMessageToWebview(requestWebview, 'monitor.plan', await this._apiClient.watchPlan(p.key, p.role ?? ''));
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'monitor.error', { message: String(err), op: 'plan' });
+                }
+                break;
+            }
+            case 'monitor.watch.install':
+            case 'monitor.watch.uninstall':
+            case 'monitor.watch.settings':
+            case 'monitor.rollback': {
+                const p = (payload ?? {}) as { key?: string; role?: string; discord?: string; email?: string; approved?: boolean;
+                    target_td?: string; from_td?: string };
+                const op = type.replace('monitor.', '').replace('watch.', '');
+                try {
+                    if (!p.key) { throw new Error('감시할 서비스를 고르세요.'); }
+                    //: AWS 를 바꾸는 요청은 승인 카드에서 누른 것만(웹뷰가 approved=true 를 실어 보낸다).
+                    if (op !== 'settings' && p.approved !== true) { throw new Error('승인 카드에서 승인한 뒤에만 실행합니다.'); }
+                    const result = op === 'install' ? await this._apiClient.watchInstall(p.key, p.role ?? '', p.discord ?? '', true)
+                        : op === 'uninstall' ? await this._apiClient.watchUninstall(p.key, true)
+                        : op === 'settings' ? await this._apiClient.watchSettings(p.key, {
+                            ...(typeof p.discord === 'string' ? { discord: p.discord } : {}), ...(p.email ? { email: p.email } : {}) })
+                        : await this._apiClient.watchRollback(p.key, p.target_td ?? '', p.from_td ?? '', true);
+                    this.postMessageToWebview(requestWebview, 'monitor.done', { op, ...result });
+                    const data = await this._apiClient.monitorOverview(p.key);
+                    const seen = this._globalState?.get<Record<string, string>>(SEEN_KEY, {}) ?? {};
+                    this.postMessageToWebview(requestWebview, 'monitor.result', { ...data, seen: seen[p.key] ?? '' });
+                    if (data.current) { this.setMonitorBadge(pendingCount(data.current), data.current.key); }
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'monitor.error', { message: String(err), op });
                 }
                 break;
             }

@@ -134,6 +134,19 @@ def build_quickcreate_template(
                     "ManagedPolicyArns": [{"Ref": name} for name in policies],
                 },
             },
+            #: 2.0.48 24시간 감시자 Lambda 역할 — 배포 키는 이 역할을 만들 수 없고 Lambda 에 넘기기만 한다.
+            "RecoderWatcherRole": {
+                "Type": "AWS::IAM::Role",
+                "Properties": {
+                    "RoleName": aws_policy.WATCHER_ROLE,
+                    "Description": "ReCoder 24h watcher - read, record, notify, approved rollback only",
+                    "AssumeRolePolicyDocument": aws_policy.watcher_trust_policy(),
+                    "Policies": [{
+                        "PolicyName": "recoder-watcher",
+                        "PolicyDocument": _to_cfn_value(aws_policy.watcher_role_policy()),
+                    }],
+                },
+            },
             "RecoderDeployKey": {
                 "Type": "AWS::IAM::AccessKey",
                 "Properties": {"UserName": {"Ref": "RecoderDeployUser"}},

@@ -240,6 +240,8 @@ class ECSAgent:
             "secretsmanager": session.client("secretsmanager"),
             #: 2.0.32 production 관리형 DB — 실행 역할이 DB 비밀을 읽을 수 있는지 미리 시뮬레이션
             "iam": session.client("iam"),
+            #: 2.0.48 24시간 감시자 — 배포가 끝나면 롤백 기준 버전을 감시자 기록 표에 알려 준다
+            "dynamodb": session.client("dynamodb"),
         }
 
     async def deploy(
@@ -575,6 +577,7 @@ class ECSAgent:
 
             record.status = ECSDeployStatus.SUCCEEDED
             record.completed_at = datetime.now(timezone.utc)
+            await self._tell_watcher(request, record, clients)
             logger.info(
                 "ECS 배포 성공: %s/%s image=%s url=%s",
                 request.cluster, request.service, record.image_uri, record.service_url,
@@ -1512,6 +1515,24 @@ class ECSAgent:
     # ------------------------------------------------------------------
     # 7단계: 서비스 확보
     # ------------------------------------------------------------------
+
+    async def _tell_watcher(self, req: ECSDeployRequest, rec: ECSDeployRecord, clients: dict) -> None:
+        """2.0.48 — 감시자가 설치돼 있으면 '이전 버전'(밤 롤백 링크의 대상)을 이번 배포 직전 버전으로 바꾼다. best-effort."""
+        if not rec.task_definition_arn or not rec.previous_task_definition_arn:
+            return
+        try:
+            try:
+                import watcher  # type: ignore
+            except ImportError:  # pragma: no cover
+                from core import watcher  # type: ignore
+            loop = asyncio.get_running_loop()
+            changed = await loop.run_in_executor(None, lambda: watcher.set_versions(
+                watcher.from_clients(clients), region=req.region, cluster=req.cluster, service=req.service,
+                current_td=rec.task_definition_arn or "", stable_td=rec.previous_task_definition_arn or ""))
+            if changed:
+                rec.provisioned["watcher"] = "24시간 감시자의 롤백 기준을 이번 배포 직전 버전으로 바꿨습니다."
+        except Exception as exc:  # noqa: BLE001 - 감시자 갱신 실패가 배포 성공을 바꾸지 않는다
+            logger.info("감시자 기준 버전 갱신 생략: %s", exc)
 
     async def _step_alerts(self, req: ECSDeployRequest, rec: ECSDeployRecord, clients: dict) -> None:
         """방패 접속 기록으로 요청·차단·오류 지표와 경보를 만들고, Core 감시 목록에 올린다(2.0.25, best-effort)."""

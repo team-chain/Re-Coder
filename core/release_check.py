@@ -41,6 +41,8 @@ RUNTIME_IMPORTS = (
     'llm.task_tier', 'llm.pricing', 'llm.scrub', 'llm.cost_ledger', 'model_compare', 'api.routes.models', 'code_spec',
     #: 2.0.45 — 테스트 리코더(완성 기준 시험) — 생성·실행 점검이 함수 안에서 불러온다
     'code_test',
+    #: 2.0.48 — 모니터 · 24시간 감시자
+    'watcher', 'api.routes.ops_watch',
 )
 
 #: 실행 파일에 넣는 AWS 서비스 정의. Core 가 부르는 서비스와 자격증명 해석(SSO·로그인)에
@@ -55,6 +57,8 @@ BUNDLED_AWS_SERVICES = (
     'wafv2',
     #: 2.0.27 HTTPS 주소·관리형 DB
     'cloudfront', 'acm', 'route53', 'rds', 'secretsmanager',
+    #: 2.0.48 24시간 감시자(사용자 계정 안 Lambda · 깨우는 규칙)
+    'lambda', 'events',
 )
 
 
@@ -104,6 +108,8 @@ def run(app) -> int:
             assert module.FileTemplateRegistry()._templates, f'{name}: file templates missing'
         for name, module in _both('grounded_repair.knowledge'):
             assert module._sources_json().is_file(), f'{name}: knowledge sources missing'
+        for name, module in _both('watcher'):
+            assert module._handler_file().is_file() and len(module.package()) > 1000, f'{name}: watcher Lambda code missing'
         checks.append('bundled data from both import names')
         from botocore.session import Session
         session = Session()

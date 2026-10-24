@@ -17,6 +17,8 @@ CORE_DIR = Path(SPECPATH)
 hidden = []
 datas = []
 datas += [(str(CORE_DIR / 'grounded_repair' / 'sources.json'), 'grounded_repair')]
+#: 2.0.48 24시간 감시자 — 사용자 계정에 올리는 Lambda 코드(파이썬 파일이지만 데이터로 싣는다)
+datas += [(str(CORE_DIR / 'watcher_lambda' / 'handler.py'), 'watcher_lambda')]
 binaries = []
 
 # ── uvicorn 런타임(동적 로딩) ─────────────────────────────────────────

@@ -322,6 +322,127 @@
               }
             },
             {
+              "Sid": "WatcherFunction",
+              "Effect": "Allow",
+              "Action": [
+                "lambda:CreateFunction",
+                "lambda:GetFunction",
+                "lambda:UpdateFunctionCode",
+                "lambda:UpdateFunctionConfiguration",
+                "lambda:DeleteFunction",
+                "lambda:AddPermission",
+                "lambda:CreateFunctionUrlConfig",
+                "lambda:GetFunctionUrlConfig",
+                "lambda:DeleteFunctionUrlConfig",
+                "lambda:TagResource",
+                "lambda:ListTags",
+                "lambda:PutFunctionConcurrency"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:recoder-*-watch"
+              }
+            },
+            {
+              "Sid": "WatcherPassRole",
+              "Effect": "Allow",
+              "Action": [
+                "iam:PassRole"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/recoder-watcher"
+              },
+              "Condition": {
+                "StringEquals": {
+                  "iam:PassedToService": "lambda.amazonaws.com"
+                }
+              }
+            },
+            {
+              "Sid": "WatcherReadRole",
+              "Effect": "Allow",
+              "Action": [
+                "iam:GetRole"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/recoder-watcher"
+              }
+            },
+            {
+              "Sid": "WatcherRules",
+              "Effect": "Allow",
+              "Action": [
+                "events:PutRule",
+                "events:PutTargets",
+                "events:RemoveTargets",
+                "events:DeleteRule",
+                "events:TagResource"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/recoder-*-w-*"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "RecoderDeployPolicy2": {
+      "Type": "AWS::IAM::ManagedPolicy",
+      "Properties": {
+        "ManagedPolicyName": "recoder-deploy-policy-2",
+        "Description": "ReCoder 가 배포에 요구하는 최소권한 (2/3)",
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "WatcherTable",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:CreateTable",
+                "dynamodb:DescribeTable",
+                "dynamodb:DeleteTable",
+                "dynamodb:UpdateTimeToLive",
+                "dynamodb:GetItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:Query",
+                "dynamodb:TagResource"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/recoder-*-watch"
+              }
+            },
+            {
+              "Sid": "WatcherLogs",
+              "Effect": "Allow",
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:PutRetentionPolicy",
+                "logs:DeleteLogGroup",
+                "logs:TagResource"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/recoder-*-watch"
+              }
+            },
+            {
+              "Sid": "WatcherServiceTag",
+              "Effect": "Allow",
+              "Action": [
+                "ecs:TagResource",
+                "ecs:UntagResource"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:service/recoder-*/recoder-*"
+              },
+              "Condition": {
+                "ForAllValues:StringEquals": {
+                  "aws:TagKeys": [
+                    "recoder:watch"
+                  ]
+                }
+              }
+            },
+            {
               "Sid": "TagRecoderResources",
               "Effect": "Allow",
               "Action": [
@@ -357,19 +478,7 @@
                   ]
                 }
               }
-            }
-          ]
-        }
-      }
-    },
-    "RecoderDeployPolicy2": {
-      "Type": "AWS::IAM::ManagedPolicy",
-      "Properties": {
-        "ManagedPolicyName": "recoder-deploy-policy-2",
-        "Description": "ReCoder 가 배포에 요구하는 최소권한 (2/3)",
-        "PolicyDocument": {
-          "Version": "2012-10-17",
-          "Statement": [
+            },
             {
               "Sid": "EdgeLoadBalancer",
               "Effect": "Allow",
@@ -633,7 +742,19 @@
                   }
                 }
               }
-            },
+            }
+          ]
+        }
+      }
+    },
+    "RecoderDeployPolicy3": {
+      "Type": "AWS::IAM::ManagedPolicy",
+      "Properties": {
+        "ManagedPolicyName": "recoder-deploy-policy-3",
+        "Description": "ReCoder 가 배포에 요구하는 최소권한 (3/3)",
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
             {
               "Sid": "ManagedDatabaseSecret",
               "Effect": "Allow",
@@ -698,19 +819,7 @@
                   }
                 }
               }
-            }
-          ]
-        }
-      }
-    },
-    "RecoderDeployPolicy3": {
-      "Type": "AWS::IAM::ManagedPolicy",
-      "Properties": {
-        "ManagedPolicyName": "recoder-deploy-policy-3",
-        "Description": "ReCoder 가 배포에 요구하는 최소권한 (3/3)",
-        "PolicyDocument": {
-          "Version": "2012-10-17",
-          "Statement": [
+            },
             {
               "Sid": "CleanupReadTags",
               "Effect": "Allow",
@@ -879,6 +988,98 @@
           },
           {
             "Ref": "RecoderDeployPolicy3"
+          }
+        ]
+      }
+    },
+    "RecoderWatcherRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": "recoder-watcher",
+        "Description": "ReCoder 24h watcher - read, record, notify, approved rollback only",
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "recoder-watcher",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "OwnLogs",
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogGroup",
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/aws/lambda/recoder-*-watch"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/aws/lambda/recoder-*-watch:*"
+                    }
+                  ]
+                },
+                {
+                  "Sid": "OwnTable",
+                  "Effect": "Allow",
+                  "Action": [
+                    "dynamodb:GetItem",
+                    "dynamodb:PutItem",
+                    "dynamodb:UpdateItem",
+                    "dynamodb:DeleteItem"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:dynamodb:*:${AWS::AccountId}:table/recoder-*-watch"
+                  }
+                },
+                {
+                  "Sid": "ReadService",
+                  "Effect": "Allow",
+                  "Action": [
+                    "ecs:DescribeServices"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Sid": "ApprovedRollbackOnly",
+                  "Effect": "Allow",
+                  "Action": [
+                    "ecs:UpdateService"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ecs:*:${AWS::AccountId}:service/*/*"
+                  },
+                  "Condition": {
+                    "StringEquals": {
+                      "aws:ResourceTag/recoder:watch": "true"
+                    }
+                  }
+                },
+                {
+                  "Sid": "Notify",
+                  "Effect": "Allow",
+                  "Action": [
+                    "sns:Publish"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:sns:*:${AWS::AccountId}:recoder-*"
+                  }
+                }
+              ]
+            }
           }
         ]
       }

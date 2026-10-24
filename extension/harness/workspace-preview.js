@@ -28,6 +28,20 @@ const saved = process.env.HARNESS_RESTORE ? {'recoder.pendingChatAction':{instru
 const memento = {get:key=>saved[key],update:async(key,value)=>{if(value===undefined)delete saved[key];else saved[key]=value;}};
 const secretValues=new Map();
 const secrets={get:async key=>secretValues.get(key),store:async(key,value)=>secretValues.set(key,value),delete:async key=>secretValues.delete(key)};
+// 2.0.48 모니터 화면 — 감시자 기록 · 승인 대기 픽스처(외부 호출 없음).
+if(process.env.HARNESS_MONITOR==='1') {
+  const now=Date.now()/1000, iso=t=>new Date(t*1000).toISOString(), sk=(t,r)=>`${new Date(t*1000).toISOString().replace('Z','000+00:00')}#${r}`;
+  const td=r=>`arn:aws:ecs:ap-northeast-2:123456789012:task-definition/temp-app:${r}`;
+  const events=[{sk:sk(now-6*3600,'a1'),at:iso(now-6*3600),ts:Math.round(now-6*3600),kind:'errors',severity:'high',title:'오류 증가',detail:'서버 오류(5xx) 비율이 5%를 넘었습니다.',source:'alarm',
+    actions:[{action:'rollback',label:'temp-app:3 로 롤백',status:'offered',target:td(3),from_td:td(4),expires:Math.round(now+5*3600)}]},
+    {sk:sk(now-6.2*3600,'b2'),at:iso(now-6.2*3600),ts:Math.round(now-6.2*3600),kind:'crash',severity:'high',title:'컨테이너가 멈춤',detail:'Essential container in task exited (app 종료 코드 1)',source:'ecs',actions:[]}];
+  const current={key:'ap-northeast-2/recoder-cluster/temp-app',service:'temp-app',region:'ap-northeast-2',cluster:'recoder-cluster',metrics:true,
+    service_state:{status:'ACTIVE',running:2,desired:2,revision:'temp-app:4',task_definition:td(4)},
+    series:{requests:Array.from({length:48},(_,i)=>40+(i===30?400:0)),errors:Array.from({length:48},(_,i)=>i===28?30:1),blocked:Array(48).fill(0)},
+    now:{rpm:42,error_rate:0.004,points:288},watcher:{installed:true,healthy:true,last_tick:Math.round(now-60),ticks:1440,approval_link:true,mail:true,discord:true,stable:'temp-app:3'},
+    events,offers:[{event:events[0].sk,title:'오류 증가',at:events[0].at,target:td(3),from_td:td(4),label:'temp-app:3 로 롤백',expires:Math.round(now+5*3600)}],alerts:[],gaps:[]};
+  api.monitorOverview=async()=>({monitors:[{key:current.key,service:'temp-app',region:'ap-northeast-2',cluster:'recoder-cluster'}],current});
+}
 if(process.env.HARNESS_DEPLOY==='1') {
   // Real local Git and host handlers, isolated API fixtures. Never publish.
   fs.mkdirSync(path.join(workspace,'docs/adr'),{recursive:true});
