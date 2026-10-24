@@ -16,6 +16,9 @@ from starlette.responses import JSONResponse
 #: CI 토큰(GitHub Actions Secret RECODER_CI_TOKEN)이 부를 수 있는 유일한 경로.
 CI_TOKEN_ROUTES = frozenset({("POST", "/workbench/preflight/run")})
 
+#: 연동 토큰(Discord 봇 등 사용자가 직접 연결한 도구)이 **부를 수 없는** 경로 — 토큰을 꺼내 보는 곳.
+INTEGRATION_BLOCKED_PREFIXES = ("/api/session/",)
+
 
 class SessionTokenMiddleware(BaseHTTPMiddleware):
     """
@@ -61,6 +64,16 @@ class SessionTokenMiddleware(BaseHTTPMiddleware):
             ci_token
             and (request.method.upper(), request.url.path) in CI_TOKEN_ROUTES
             and hmac.compare_digest(provided_token.encode("utf-8"), ci_token.encode("utf-8"))
+        ):
+            return await call_next(request)
+
+        # 연동 토큰(3.0.2): 세션 토큰은 Core 를 켤 때마다 바뀌므로, 사용자가 Discord 봇 등에 직접 넣어 두는 값은
+        # 따로 영속한다. 토큰을 꺼내 보는 /api/session/* 은 부를 수 없다. AWS 를 바꾸는 요청은 어차피 approved 가 필요하다.
+        integration: str = getattr(request.app.state, "integration_token", "") or ""
+        if (
+            integration
+            and not request.url.path.startswith(INTEGRATION_BLOCKED_PREFIXES)
+            and hmac.compare_digest(provided_token.encode("utf-8"), integration.encode("utf-8"))
         ):
             return await call_next(request)
 

@@ -224,7 +224,7 @@ class RecoderBot(discord.Client):
             name="⚙️ 초기 설정 (관리자 전용)",
             value=(
                 "```\n"
-                "/recoder setup api <ReCoder_URL> <Token>\n"
+                "/recoder setup api <ReCoder_URL> <연동 토큰: ~/.recoder/integration_token>\n"
                 "/recoder setup channel deploy #배포-알림\n"
                 "/recoder setup role add @개발팀\n"
                 "```"

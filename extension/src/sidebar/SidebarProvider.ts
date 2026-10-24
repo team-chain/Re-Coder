@@ -304,6 +304,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
         if (this._workspacePanelWebview) {
             void this._workspacePanelWebview.postMessage({ type, payload });
+            //: 기다리던 결과가 준비된 창으로 바로 갔다 — 대기를 끝낸다(나중에 창을 다시 열 때 엉뚱한 결과가 쌓이지 않게).
+            if (delivery && delivery.types.has(type) && this._workspaceReady) { this._panelDelivery = null; }
         }
     }
 
@@ -1186,15 +1188,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
             // ── 2.0.48 모니터 · 24시간 감시자 ──
             case 'monitor.load': {
-                const p = (payload ?? {}) as { key?: string };
+                const p = (payload ?? {}) as { key?: string; requestId?: string };
+                const requestId = typeof p.requestId === 'string' ? p.requestId.slice(0, 80) : undefined;
                 try {
                     const data = await this._apiClient.monitorOverview(typeof p.key === 'string' ? p.key : '');
                     const seen = this._globalState?.get<Record<string, string>>(SEEN_KEY, {}) ?? {};
                     const key = data.current?.key ?? '';
-                    this.postMessageToWebview(requestWebview, 'monitor.result', { ...data, seen: key ? seen[key] ?? '' : '' });
+                    //: requestId 를 돌려준다 — 홈과 Operate 가 서로의 결과(다른 서비스)를 가져가지 않게.
+                    this.postMessageToWebview(requestWebview, 'monitor.result', { ...data, seen: key ? seen[key] ?? '' : '', requestId });
                     if (data.current) { this.setMonitorBadge(pendingCount(data.current), data.current.key); }
                 } catch (err) {
-                    this.postMessageToWebview(requestWebview, 'monitor.error', { message: String(err) });
+                    this.postMessageToWebview(requestWebview, 'monitor.error', { message: String(err), requestId });
                 }
                 break;
             }
@@ -1605,7 +1609,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             case 'fetchIncidents': {
                 const { host, sshKeyPath } = payload as { host: string; sshKeyPath: string };
                 try {
-                    const incidents = await this._apiClient.fetchIncidents(host, sshKeyPath);
+                    const actorToken = await vscode.window.showInputBox({
+                        prompt: 'Ops 승인자 자격증명을 입력하세요 (서버에 SSH 로 접속해 상태를 읽습니다)',
+                        password: true,
+                        ignoreFocusOut: true,
+                    });
+                    if (!actorToken) { this.postMessage('errorMessage', { message: '자격증명을 입력하지 않아 조회를 취소했습니다.' }); break; }
+                    const incidents = await this._apiClient.fetchIncidents(host, sshKeyPath, actorToken);
                     this.postMessage('stateUpdate', { incidents, ...this._state });
                 } catch (err) {
                     this.postMessage('errorMessage', { message: String(err) });

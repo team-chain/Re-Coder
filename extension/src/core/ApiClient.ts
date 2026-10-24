@@ -1134,12 +1134,16 @@ export class ApiClient {
     // (paths match core/api/routes/ops.py exactly)
     // -----------------------------------------------------------------------
 
-    async fetchIncidents(host: string, sshKeyPath: string, sshUser = 'ec2-user'): Promise<AlertRecord[]> {
+    async fetchIncidents(host: string, sshKeyPath: string, actorToken: string, sshUser = 'ec2-user'): Promise<AlertRecord[]> {
+        //: 3.0.2 — 서버에 SSH 로 들어가는 요청이라 Ops 승인자 자격증명이 필요하다(코어가 401/503 으로 막는다).
         const resp = await this.request<AlertRecord[]>(
             'POST', '/api/ops/fetch-incidents',
-            { host, ssh_key_path: sshKeyPath, ssh_user: sshUser }
+            { host, ssh_key_path: sshKeyPath, ssh_user: sshUser },
+            false, 30000, { 'X-Ops-Actor-Token': actorToken },
         );
-        return resp.success && resp.data ? resp.data : [];
+        //: 실패를 "인시던트 없음"으로 보이지 않게 — 원인을 그대로 올린다.
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '운영 상태를 조회하지 못했습니다.'); }
+        return resp.data;
     }
 
     async analyzeIncident(

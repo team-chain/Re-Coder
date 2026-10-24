@@ -55,14 +55,15 @@ export async function workingChanges(root: string): Promise<WorkingChanges> {
     if (!root) { return empty; }
     try {
         const head = await git(root, ['rev-parse', '--verify', 'HEAD']).then(() => true, () => false);
-        const numstat = await git(root, head ? ['diff', '--numstat', 'HEAD', '--'] : ['diff', '--numstat', '--cached', '--']);
+        //: --relative: 프로젝트가 더 큰 저장소의 하위 폴더여도 이 폴더 안의 변경만(경로도 이 폴더 기준).
+        const numstat = await git(root, head ? ['diff', '--numstat', '--relative', 'HEAD', '--'] : ['diff', '--numstat', '--relative', '--cached', '--']);
         const files = parseNumstat(numstat).filter(f => !blockedFile(root, f.path)).slice(0, 200);
         const untracked = (await git(root, ['ls-files', '--others', '--exclude-standard']).catch(() => ''))
             .split('\n').filter(f => f.trim() && !blockedFile(root, f.trim())).length;
         const first = files.find(f => !f.binary && (f.added || f.removed));
         let snippet: WorkingChanges['snippet'] = null;
         if (first && head) {
-            const diff = await git(root, ['diff', '-U1', 'HEAD', '--', first.path]).catch(() => '');
+            const diff = await git(root, ['diff', '-U1', '--relative', 'HEAD', '--', first.path]).catch(() => '');
             const lines = parseFirstHunk(diff);
             if (lines.length) { snippet = { file: first.path, lines }; }
         }

@@ -107,6 +107,11 @@ def _ci_token_path() -> Path:
     return Path.home() / ".recoder" / "ci_token"
 
 
+def _integration_token_path() -> Path:
+    """Discord 봇처럼 사용자가 직접 연결한 도구에 넣는 연동 토큰 파일(Core 를 다시 켜도 그대로)."""
+    return Path.home() / ".recoder" / "integration_token"
+
+
 def _load_or_create_ci_token(path: Path, *, avoid: str = "") -> str:
     """CI 토큰 — 한 번 만들어 영속한다(Secret 을 다시 등록할 필요가 없게).
 
@@ -236,6 +241,11 @@ async def lifespan(app: FastAPI):
     except Exception as exc:  # noqa: BLE001 - CI 토큰이 없으면 CI 게이트만 401 이 된다
         logging.getLogger("recoder.core").warning("CI 토큰을 준비하지 못했습니다: %s", exc)
         app.state.ci_token = ""
+    try:
+        app.state.integration_token = _load_or_create_ci_token(_integration_token_path(), avoid=token)
+    except Exception as exc:  # noqa: BLE001 - 연동 토큰이 없으면 봇만 401 이 된다
+        logging.getLogger("recoder.core").warning("연동 토큰을 준비하지 못했습니다: %s", exc)
+        app.state.integration_token = ""
 
     CoreSingleton.write_runtime(port=port, token=token, pid=pid)
     CoreSingleton.set_file_permissions(CoreSingleton.RUNTIME_FILE)

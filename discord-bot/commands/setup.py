@@ -62,7 +62,7 @@ class SetupGroup(app_commands.Group):
     @app_commands.command(name="api", description="ReCoder API 엔드포인트와 인증 토큰을 설정합니다")
     @app_commands.describe(
         url="ReCoder Core API URL (예: http://your-server.com:17894)",
-        token="ReCoder 세션 토큰",
+        token="ReCoder 연동 토큰(~/.recoder/integration_token — Core 를 다시 켜도 그대로)",
     )
     async def setup_api(self, interaction: Interaction, url: str, token: str) -> None:
         if interaction.guild is None:

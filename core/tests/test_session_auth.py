@@ -140,6 +140,7 @@ def test_restart_rotates_session_token_but_keeps_ci_token(monkeypatch, tmp_path)
     monkeypatch.setattr(singleton, "remove_window", lambda pid: True)
     monkeypatch.setattr(singleton, "release_lock", lambda pid: None)
     ci_tokens = []
+    integration_tokens = []
 
     async def run():
         for _ in range(2):
@@ -154,6 +155,13 @@ def test_restart_rotates_session_token_but_keeps_ci_token(monkeypatch, tmp_path)
                 shown = client.get("/api/session/ci-token", headers={"X-Session-Token": app.state.session_token})
                 assert shown.status_code == 200 and shown.json()["token"] == app.state.ci_token
                 assert shown.json()["secret_name"] == "RECODER_CI_TOKEN"
+                # 3.0.2 연동 토큰: 재시작해도 그대로, 일반 API 는 열지만 토큰 조회(/api/session/*)는 못 연다.
+                integ = app.state.integration_token
+                integration_tokens.append(integ)
+                assert client.get("/api/status", headers={"X-Session-Token": integ}).status_code == 200
+                assert client.get("/api/session/ci-token", headers={"X-Session-Token": integ}).status_code == 401
+                assert client.get("/api/session/integration-token", headers={"X-Session-Token": integ}).status_code == 401
+                assert client.get("/api/session/integration-token", headers={"X-Session-Token": app.state.session_token}).json()["token"] == integ
 
     asyncio.run(run())
     assert len(writes) == 2
@@ -163,6 +171,7 @@ def test_restart_rotates_session_token_but_keeps_ci_token(monkeypatch, tmp_path)
     assert ci_tokens[0] == ci_tokens[1] and len(ci_tokens[0]) >= 32
     assert ci_tokens[0] not in {w["token"] for w in writes}
     assert (tmp_path / ".recoder" / "ci_token").read_text(encoding="utf-8") == ci_tokens[0]
+    assert integration_tokens[0] == integration_tokens[1] and integration_tokens[0] not in {w["token"] for w in writes} | {ci_tokens[0]}
     if os.name == "posix":
         assert stat.S_IMODE((tmp_path / ".recoder" / "ci_token").stat().st_mode) == 0o600
 

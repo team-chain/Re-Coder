@@ -371,7 +371,12 @@ export const MonitorPage: React.FC<{ active: boolean; onOpenDeploy: () => void; 
   const keyRef = useRef("");
   keyRef.current = key;
 
-  const load = useCallback((k = keyRef.current) => { setLoading(true); postMessage("monitor.load", { key: k }); }, [postMessage]);
+  //: 3.0.2 — 홈도 monitor.load 를 부른다. 내 요청의 결과만 받는다(다른 서비스로 바뀌지 않게).
+  const reqRef = useRef("");
+  const load = useCallback((k = keyRef.current) => {
+    reqRef.current = `mon-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    setLoading(true); postMessage("monitor.load", { key: k, requestId: reqRef.current });
+  }, [postMessage]);
   useEffect(() => {
     if (!active) { seenAtOpen.current = {}; return; }
     load();
@@ -381,6 +386,7 @@ export const MonitorPage: React.FC<{ active: boolean; onOpenDeploy: () => void; 
 
   useMessage(useCallback((event) => {
     const p = (event.payload ?? {}) as Record<string, unknown>;
+    if ((event.type === "monitor.result" || event.type === "monitor.error") && typeof p.requestId === "string" && p.requestId !== reqRef.current) return;
     if (event.type === "monitor.result") {
       const d = p as unknown as MonitorData;
       setLoading(false); setError("");

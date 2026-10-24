@@ -120,6 +120,19 @@ async def get_ci_token(request: Request) -> dict:
     }
 
 
+@router.get("/api/session/integration-token")
+async def get_integration_token(request: Request) -> dict:
+    """Discord 봇 등 직접 연결하는 도구용 연동 토큰(세션 토큰으로만 볼 수 있다).
+
+    Core 를 다시 켜도 바뀌지 않는다. /api/session/* (토큰 조회)는 부를 수 없다.
+    """
+    token = str(getattr(request.app.state, "integration_token", "") or "")
+    if not token:
+        raise HTTPException(status_code=503, detail="연동 토큰을 준비하지 못했습니다. Core 를 다시 시작해 주십시오.")
+    return {"token": token, "path": str(_RECODER_DIR / "integration_token"),
+            "usage": "Discord: /recoder setup api <ReCoder 주소> <이 토큰>"}
+
+
 @router.get("/api/cost")
 async def get_cost() -> CostSummary:
     """Primary cost endpoint specified in the v6.4 design doc (§19.5)."""

@@ -7,7 +7,7 @@ function validatePackageFiles(files, { requireCore = false, target = `${process.
     'package.json', 'out/extension.js', 'out/sidebar/SidebarProvider.js',
     'out/sidebar/ReCoderPanel.js', 'out/sidebar/WorkbenchSidebarProvider.js',
     'out/sidebar/workbenchHost.js', 'out/sidebar/workbenchHtml.js',
-    'out/sidebar/canvasHost.js', 'out/codemap/analysisJob.js',
+    'out/sidebar/canvasHost.js', 'out/sidebar/homeChanges.js', 'out/codemap/analysisJob.js',
     'out/codemap/analysisWorker.js', 'out/codemap/analyzer.js',
     'out/webview/webview.js', 'media/icon.png', 'media/recoder-icon.svg',
     'media/fonts/PretendardVariable.woff2', 'media/fonts/Pretendard-OFL.txt',

@@ -310,10 +310,10 @@ export function HomeView({ data, go, open }: { data: HomeData; go: Go; open: (ur
 export const HomeBento: React.FC<{ active: boolean; go: Go }> = ({ active, go }) => {
   const { postMessage, useMessage } = useVSCodeApi();
   const [data, setData] = useState<HomeData>({ snapshot: null, history: null, monitor: null, changes: null });
-  const reqs = useRef({ snap: "", hist: "" });
+  const reqs = useRef({ snap: "", hist: "", mon: "" });
   const load = useCallback(() => {
     const t = Date.now();
-    reqs.current = { snap: `home-snap-${t}`, hist: `home-hist-${t}` };
+    reqs.current = { snap: `home-snap-${t}`, hist: `home-hist-${t}`, mon: `home-mon-${t}` };
     postMessage("canvas.snapshot", { requestId: reqs.current.snap });
     postMessage("replay.history", { requestId: reqs.current.hist });
     postMessage("home.changes");
@@ -330,7 +330,7 @@ export const HomeBento: React.FC<{ active: boolean; go: Go }> = ({ active, go })
       const snapshot = p.snapshot as Snapshot;
       setData(d => ({ ...d, snapshot }));
       //: 모니터는 AWS 가 연결됐을 때만 묻는다(아니면 매번 오류만 돌아온다).
-      if (snapshot?.aws?.ready) postMessage("monitor.load", { key: "" });
+      if (snapshot?.aws?.ready) postMessage("monitor.load", { key: "", requestId: reqs.current.mon });
     }
     if (type === "replay.historyResult" && p.requestId === reqs.current.hist) {
       const h = p.history as { entries?: HistoryEntryLite[] } | undefined;
@@ -338,7 +338,7 @@ export const HomeBento: React.FC<{ active: boolean; go: Go }> = ({ active, go })
     }
     if (type === "replay.historyError" && p.requestId === reqs.current.hist) setData(d => ({ ...d, history: [] }));
     if (type === "home.changesResult") setData(d => ({ ...d, changes: p as unknown as ChangesLite }));
-    if (type === "monitor.result") setData(d => ({ ...d, monitor: (p.current as MonitorCurrentView) ?? null }));
+    if (type === "monitor.result" && p.requestId === reqs.current.mon) setData(d => ({ ...d, monitor: (p.current as MonitorCurrentView) ?? null }));
   }, [postMessage]));
   return <HomeView data={data} go={go} open={(url) => postMessage("webview.open.external", { url })} />;
 };

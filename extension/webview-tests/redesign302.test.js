@@ -76,3 +76,34 @@ test('3.0.2 웹뷰에 캐릭터 · 글자 기호가 없다(로고만)',()=>{
   fs.readFileSync(p,'utf8').split('\n').forEach((l,i)=>{const t=l.trim();if(t.startsWith('//')||t.startsWith('*')||t.startsWith('/*'))return;if(/[✓✕✗]/.test(l))bad.push(`${f}:${i+1}`);});}}};
  walk(root);assert.deepEqual(bad,[]);
 });
+
+test('3.0.2 바뀐 코드: 프로젝트가 큰 저장소의 하위 폴더면 그 폴더 안 변경만, 비밀 파일은 빼고',async()=>{
+ const os=require('node:os');const {execFileSync}=require('node:child_process');
+ const {workingChanges}=require('../out/sidebar/homeChanges.js');
+ const repo=fs.mkdtempSync(path.join(os.tmpdir(),'rc-home-'));
+ const g=(...a)=>execFileSync('git',['-C',repo,...a],{stdio:'pipe'});
+ g('init','-q');g('config','user.email','t@t');g('config','user.name','t');
+ fs.mkdirSync(path.join(repo,'app'));fs.mkdirSync(path.join(repo,'other'));
+ fs.writeFileSync(path.join(repo,'app','a.js'),'one\n');fs.writeFileSync(path.join(repo,'other','secret.txt'),'x\n');fs.writeFileSync(path.join(repo,'app','.env'),'K=1\n');
+ g('add','-A');g('commit','-qm','init');
+ fs.writeFileSync(path.join(repo,'app','a.js'),'one\ntwo\n');fs.writeFileSync(path.join(repo,'other','secret.txt'),'y\n');fs.writeFileSync(path.join(repo,'app','.env'),'K=2\n');
+ const c=await workingChanges(path.join(repo,'app'));
+ assert.deepEqual(c.files.map(f=>f.path),['a.js']);assert.equal(c.added,1);
+ assert.equal(c.snippet.file,'a.js');assert.ok(c.snippet.lines.some(l=>l.kind==='add'&&l.text==='two'));
+ assert.ok(!JSON.stringify(c).includes('K=2'));
+});
+
+test('3.0.2 운영 상태 조회: Ops 승인자 자격증명을 헤더로 보내고, 실패를 "없음"으로 숨기지 않는다',async()=>{
+ const http=require('node:http');const Module=require('node:module');
+ const resolve=Module._resolveFilename;Module._resolveFilename=function(n,...a){return n==='vscode'?path.join(__dirname,'../harness/vscode-mock.js'):resolve.call(this,n,...a);};
+ const {ApiClient}=require('../out/core/ApiClient.js');Module._resolveFilename=resolve;
+ const seen=[];let fail=false;
+ const server=http.createServer((req,res)=>{seen.push(req.headers['x-ops-actor-token']);res.setHeader('Content-Type','application/json');if(fail){res.statusCode=503;return res.end(JSON.stringify({detail:'승인자 설정 없음'}));}res.end('[]');});
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));
+ try{
+  const core={getPort:()=>server.address().port,getSessionToken:()=>'t',refreshToken:async()=>true};
+  const api=new ApiClient(core);
+  assert.deepEqual(await api.fetchIncidents('1.2.3.4','~/.ssh/k','actor-1'),[]);assert.equal(seen[0],'actor-1');
+  fail=true;await assert.rejects(()=>api.fetchIncidents('1.2.3.4','~/.ssh/k','actor-1'),/승인자 설정 없음|운영 상태/);
+ } finally { server.close(); }
+});

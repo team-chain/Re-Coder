@@ -794,7 +794,7 @@ def step8_rollback(client, token: str, deployment_id: str) -> None:
 
     resp = client.post(
         "/api/deploy/rollback",
-        json={"deployment_id": deployment_id},
+        json={"deployment_id": deployment_id, "approved": True},
         headers=_headers(token),
     )
     if resp.status_code == 422:
