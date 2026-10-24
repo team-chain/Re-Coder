@@ -1,3 +1,9 @@
+# CI 의존성 보안 검사 복구 (2026-10-24, 3.0.1)
+
+- CI #275 실패 원인: 코드가 아니라 새로 공개된 취약점 — multer(루트) · body-parser(커머스 백엔드 · repair-security 평가) · fast-uri · @azure/msal-node(확장 vsce → @azure/identity) · setuptools 84.0.0(배포 잠금).
+- npm audit fix(잠금 파일만), 확장 package.json overrides {"@azure/msal-node": "^7.1.1"} — @azure/identity 최신도 ^6 이라 고친 버전(7.1+)으로 덮어씀. vsce 는 패키징에만 쓰고 이 경로는 MSAL 을 부르지 않는다(vsce package 확인). requirements-release-*.txt setuptools 84.1.0.
+- 확인: npm audit(루트 · 확장 · 커머스 2 · 평가) 0, pip-audit 잠금 3개 0, 확장 684 · build · verify:package · e2e · vsce package · promptfoo 평가 19/19.
+
 # 3.0.1 (2026-10-24)
 
 - 사용자 요청으로 메이저 버전 3 으로(2.0.50 과 코드 같음). 버전 위치: extension/package.json · package-lock.json(3 · 9줄) · core/version.py, `python3 scripts/check_release_tag.py v3.0.1`.

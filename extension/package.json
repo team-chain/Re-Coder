@@ -906,5 +906,8 @@
   },
   "dependencies": {
     "ws": "^8.18.0"
+  },
+  "overrides": {
+    "@azure/msal-node": "^7.1.1"
   }
 }
