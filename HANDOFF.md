@@ -1,3 +1,7 @@
+# 3.0.1 (2026-10-24)
+
+- 사용자 요청으로 메이저 버전 3 으로(2.0.50 과 코드 같음). 버전 위치: extension/package.json · package-lock.json(3 · 9줄) · core/version.py, `python3 scripts/check_release_tag.py v3.0.1`.
+
 # Monitor → Operate (2026-10-24, 2.0.50)
 
 - 사용자 피드백: 「모니터」 이름 · 말투가 기존 톤과 안 맞음 → 탭 제목 Operate(부제 「배포 후 상태와 대응」). 내부 id 는 그대로 monitor(hub:monitor, monitor.* 메시지, testid mon-*).
