@@ -40,6 +40,7 @@ const P: Record<string, string> = {
   rewind: "M6 5v14M19 5 9 12l10 7z",
   edit: "M4 20h4L19 9l-4-4L4 16zM14 6l4 4",
   alert: "M12 4 2.5 20h19zM12 10v4M12 17v.01",
+  refresh: "M20 11a8 8 0 0 0-14.6-4.5M4 4v4h4M4 13a8 8 0 0 0 14.6 4.5M20 20v-4h-4",
 };
 
 export type IconName = keyof typeof P;

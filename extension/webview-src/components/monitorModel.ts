@@ -82,7 +82,7 @@ export function pendingAlerts(cur: Pick<MonitorCurrentView, "alerts">): AlertVie
 export function hero(cur: MonitorCurrentView, items: TimelineItem[], pending: number): { title: string; sub: string; tone: "ok" | "warn" | "bad" | "off" } {
   const fresh = items.filter((i) => i.fresh && i.tone !== "info").length;
   const rev = cur.service_state?.revision ? `지금 ${cur.service_state.revision}` : "";
-  const ticks = cur.watcher.ticks ? `감시자가 ${cur.watcher.ticks.toLocaleString()}번 확인했어요` : "";
+  const ticks = cur.watcher.ticks ? `감시자 ${cur.watcher.ticks.toLocaleString()}번 확인` : "";
   if (cur.service_state && cur.service_state.status !== "ACTIVE") {
     return { title: "서비스를 찾지 못했어요", sub: "지워졌거나 다른 리전일 수 있어요 — 정리 화면에서 확인하세요", tone: "bad" };
   }

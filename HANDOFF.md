@@ -1,3 +1,10 @@
+# 모니터 화면 단순화 (2026-10-24, 2.0.49)
+
+- 사용자 피드백: 모니터가 빼곡하다(어제 다른 화면과 같은 문제). MonitorPage 보기 부분을 한 열(최대 720px)로 다시 씀 — 머리(모니터 · 서비스 칩 · 새로 고침 아이콘) · 상태 카드 · 할 일(롤백 제안 · 열린 알림, 버튼 최대 2개, 누르면 확인) · 지금(통계 3칸) · 최근 기록(5줄, 눌러야 설명, 「전체 n개」) · 감시(한 줄, 「설정」을 눌러야 펼침). 기능 · 메시지 · 승인 흐름은 2.0.48 그대로.
+- testid 변경: tile-* → stat-*, mon-no-approvals 없음, mon-alert 한 번만 그림, mon-plan 버튼 글자 「설치」.
+- icons.tsx 에 refresh 추가. monitorModel hero 문구 「감시자 n번 확인」(좁은 폭 줄바꿈 방지).
+- 시험: webview-tests/monitor.test.js 화면 시험 2개를 새 구조로(접힘 · 5줄 제한 · 상태 모름 포함). 1280 · 420 · 밝은 테마 캡처로 확인.
+
 # 모니터 · 24시간 감시자 (2026-10-24, 2.0.48)
 
 - core/watcher_lambda/handler.py — 사용자 계정 Lambda(외부 패키지 없음, python3.13). 진입: 함수 URL(requestContext.http) · aws.cloudwatch(경보 이름 정확히 일치 · ALARM 만) · aws.ecs(Task STOPPED — ServiceSchedulerInitiated 등은 무시하되 stoppedReason 에 health check 면 crash / Service Action TASK_START_IMPAIRED·PLACEMENT_FAILURE → impaired / Deployment SERVICE_DEPLOYMENT_FAILED) · aws.events 5분(heartbeat, 4분 안 중복 배달 무시, running<desired 3번 → outage, 서비스 없음 → missing 하루 1번). 표: CONFIG(url·topic·discord·stable_td) · STATE(last_tick·ticks·strikes, COOLDOWN#종류) · EVENT(sk=마이크로초 ISO#무작위, ttl 30일) · TOKEN(sk=sha256(토큰), 12시간, pending→used 조건부 갱신). 쉼은 원자적 조건부 갱신, 기록 실패 시 풀어 둠. 롤백 제안은 URL 이 없어도 EVENT.actions 에 남고(VS Code 승인), URL 이 있으면 일회용 링크. GET 은 확인 화면만, POST 는 되돌릴 버전 번호(c) 일치 + 그 사이 버전 불변일 때만 UpdateService. 경보로 생긴 일은 롤백 링크가 있을 때만 SNS 메일(경보 자체 메일과 중복 방지), 디스코드는 늘.

@@ -1,12 +1,12 @@
 /**
- * 2.0.48 모니터 — 한 화면에서 서비스 상태 · 밤사이 일어난 일 · 승인 대기 · 24시간 감시자를 본다.
+ * 2.0.49 모니터 — 지금 괜찮은지 · 내가 할 일 · 최근 기록, 이 세 가지만 한 줄로 쭉.
  *
- *  · 밤에는 감시자가 감지 · 기록 · 알림 · 준비까지만 한다. 여기서 사람이 승인한 것만 실행한다.
- *  · AWS 를 바꾸는 버튼(설치 · 삭제 · 롤백 · 대응)은 모두 확인 단계를 한 번 더 거친다.
+ *  · 처음 보이는 것은 상태 한 줄과 할 일뿐. 자세한 내용(기록 설명 · 감시 설정)은 눌러야 펼친다.
+ *  · 밤에는 감시자가 감지 · 기록 · 알림 · 준비까지만 한다. AWS 를 바꾸는 버튼은 모두 확인을 한 번 더 거친다.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
-import { Box, Button, Kit, Line, SettingRow } from "./ui/kit";
+import { Button, Kit, Line } from "./ui/kit";
 import { Icon } from "./ui/icons";
 import { CHARACTER_SRC } from "./recoderCharacter";
 import { Logo } from "./canvas/Scene";
@@ -16,66 +16,75 @@ import {
 } from "./monitorModel";
 
 const CSS = `
-.rc-mon{max-width:1180px;margin:0 auto}
-.rc-mon .hd{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.rc-mon{max-width:720px;margin:0 auto}
+.rc-mon .hd{display:flex;align-items:center;gap:10px;margin-bottom:16px}
 .rc-mon .hd h1{margin:0;font-size:19px;font-weight:650}
-.rc-mon .app{display:flex;align-items:center;gap:8px;height:32px;padding:0 10px 0 6px;border-radius:10px;background:var(--rk-surface);font-size:12.5px}
-.rc-mon .app svg.rc-logo{width:20px;height:20px;border-radius:5px}.rc-mon .app small{color:var(--rk-fg3)}
-.rc-mon .app select{all:unset;cursor:pointer;font-weight:500}
-.rc-mon .pill{display:inline-flex;align-items:center;gap:7px;height:28px;padding:0 11px;border-radius:99px;font-size:12px;background:var(--rk-surface);color:var(--rk-fg2)}
-.rc-mon .pill.ok{background:color-mix(in srgb,var(--rk-ok) 13%,transparent);color:var(--rk-ok)}
-.rc-mon .pill.warn{background:color-mix(in srgb,var(--rk-warn) 14%,transparent);color:var(--rk-warn)}
+.rc-mon .app{display:flex;align-items:center;gap:7px;height:30px;padding:0 10px 0 6px;border-radius:10px;background:var(--rk-surface);font-size:12.5px;min-width:0}
+.rc-mon .app svg.rc-logo{width:18px;height:18px;border-radius:5px;flex:none}
+.rc-mon .app select{all:unset;cursor:pointer;font-weight:500;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .rc-mon .sp{flex:1}
-.rc-mon .grid{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:18px;align-items:start}
-.rc-mon .card{background:var(--rk-surface);border-radius:14px}
-.rc-mon .hero{display:flex;align-items:center;gap:14px;padding:16px 18px}
-.rc-mon .hero img{width:44px;height:44px;flex:none}
-.rc-mon .hero b{font-size:15px;display:block}.rc-mon .hero p{margin:2px 0 0;color:var(--rk-fg2);font-size:12.5px}
-.rc-mon .hero[data-tone=bad] b{color:var(--rk-bad)}.rc-mon .hero[data-tone=warn] b{color:var(--rk-warn)}
-.rc-mon .tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:12px}
-.rc-mon .tile{background:var(--rk-surface);border-radius:12px;padding:12px 14px 10px;min-width:0}
-.rc-mon .tile .k{display:flex;align-items:center;gap:6px;color:var(--rk-fg2);font-size:12px}
-.rc-mon .tile .v{font-size:20px;font-weight:650;margin:4px 0 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.rc-mon .tile .v small{font-size:12px;font-weight:400;color:var(--rk-fg3);margin-left:4px}
-.rc-mon .tile .s{font-size:11.5px;color:var(--rk-fg3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.rc-mon .bar{height:6px;border-radius:99px;background:var(--rk-surface2);overflow:hidden;margin:10px 0 8px}.rc-mon .bar i{display:block;height:100%;border-radius:99px;background:var(--rk-ok)}
-.rc-mon .bar.warn i{background:var(--rk-warn)}.rc-mon .bar.bad i{background:var(--rk-bad)}
-.rc-mon .spark{display:block;width:100%;height:30px;margin-top:4px}
-.rc-mon .sec{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin:20px 2px 8px}.rc-mon .sec b{font-size:13px;font-weight:600}.rc-mon .sec span{font-size:12px;color:var(--rk-fg3)}
-.rc-mon .tl{padding:4px 16px}
-.rc-mon .ev{display:grid;grid-template-columns:48px 30px minmax(0,1fr);gap:10px;padding:11px 0;align-items:start}
-.rc-mon .ev+.ev{border-top:1px solid var(--rk-hair)}
-.rc-mon .ev time{color:var(--rk-fg3);font-variant-numeric:tabular-nums;font-size:12px;padding-top:5px}
-.rc-mon .ib{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;background:var(--rk-surface2);color:var(--rk-fg2)}
+.rc-mon .icon-btn{all:unset;cursor:pointer;width:30px;height:30px;border-radius:9px;display:grid;place-items:center;color:var(--rk-fg2)}
+.rc-mon .icon-btn:hover{background:var(--rk-surface)}.rc-mon .icon-btn:focus-visible{outline:2px solid var(--vscode-focusBorder,#3d8bff)}
+.rc-mon .icon-btn[aria-busy=true] svg{animation:rc-mon-spin 1s linear infinite}
+@keyframes rc-mon-spin{to{transform:rotate(360deg)}}
+.rc-mon .card{background:var(--rk-surface);border-radius:16px}
+.rc-mon .hero{display:flex;align-items:center;gap:14px;padding:18px 20px}
+.rc-mon .hero img{width:46px;height:46px;flex:none}
+.rc-mon .hero b{font-size:16px;font-weight:650;display:block;line-height:1.35}
+.rc-mon .hero p{margin:3px 0 0;color:var(--rk-fg2);font-size:12.5px}
+.rc-mon .hero .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:8px;vertical-align:2px;background:var(--rk-ok)}
+.rc-mon .hero[data-tone=warn] .dot{background:var(--rk-warn)}.rc-mon .hero[data-tone=bad] .dot{background:var(--rk-bad)}.rc-mon .hero[data-tone=off] .dot{background:var(--rk-fg3)}
+.rc-mon .label{font-size:12px;font-weight:500;color:var(--rk-fg2);margin:22px 4px 8px;display:flex;justify-content:space-between;gap:8px}
+.rc-mon .label button{all:unset;cursor:pointer;color:var(--vscode-textLink-foreground,#3d8bff);font-weight:400}
+.rc-mon .todo{display:flex;align-items:center;gap:12px;padding:12px 14px 12px 16px}
+.rc-mon .todo+.todo,.rc-mon .confirm+.todo{border-top:1px solid var(--rk-hair)}
+.rc-mon .ib{width:32px;height:32px;border-radius:10px;display:grid;place-items:center;flex:none;background:var(--rk-surface2);color:var(--rk-fg2)}
 .rc-mon .ib.bad{background:color-mix(in srgb,var(--rk-bad) 14%,transparent);color:var(--rk-bad)}
 .rc-mon .ib.warn{background:color-mix(in srgb,var(--rk-warn) 14%,transparent);color:var(--rk-warn)}
 .rc-mon .ib.info{background:var(--rk-accent-soft);color:var(--rk-accent)}
-.rc-mon .ev b{font-weight:600}.rc-mon .ev p{margin:2px 0 0;color:var(--rk-fg2);font-size:12.5px;overflow-wrap:anywhere}
-.rc-mon .ev .meta{font-size:11.5px;color:var(--rk-fg3);margin-top:3px}
-.rc-mon .new{display:inline-block;margin-left:6px;padding:0 6px;border-radius:6px;font-size:10.5px;font-weight:600;background:var(--rk-accent-soft);color:var(--rk-accent);vertical-align:1px}
-.rc-mon .empty{padding:26px 18px;text-align:center;color:var(--rk-fg2)}.rc-mon .empty b{display:block;color:var(--rk-fg);font-size:14px;margin:6px 0 2px}
-.rc-mon .ap{padding:14px 16px}.rc-mon .ap+.ap{margin-top:10px}
-.rc-mon .ap .h{display:flex;align-items:center;gap:10px}
-.rc-mon .ap .h b{font-size:13.5px;display:block}.rc-mon .ap .h small{display:block;color:var(--rk-fg3);font-size:11.5px}
-.rc-mon .ap p{margin:10px 0 0;color:var(--rk-fg2);font-size:12.5px}
-.rc-mon .btns{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}.rc-mon .btns .rk-btn{flex:1 1 auto;width:auto;min-width:96px}
-.rc-mon .confirm{margin-top:12px;padding:10px 12px;border-radius:10px;background:color-mix(in srgb,var(--rk-warn) 10%,transparent);font-size:12.5px}
-.rc-mon .kv{display:flex;justify-content:space-between;gap:12px;padding:9px 0;font-size:12.5px}.rc-mon .kv+.kv{border-top:1px solid var(--rk-hair)}
-.rc-mon .kv span{color:var(--rk-fg2);flex:none;white-space:nowrap}.rc-mon .kv b{flex:1;min-width:0;font-weight:500;text-align:right;overflow-wrap:anywhere}
-.rc-mon .msg{margin-bottom:12px}
-.rc-mon .field{display:flex;gap:8px;margin-top:8px}.rc-mon .field .rk-input{flex:1}
-.rc-mon .narrow-only{display:none}
-@media (max-width:900px){.rc-mon .grid{grid-template-columns:1fr}.rc-mon .narrow-only{display:block;margin-top:14px}.rc-mon .wide-only{display:none}.rc-mon .tiles{grid-template-columns:1fr 1fr}}
+.rc-mon .tx{flex:1;min-width:0}.rc-mon .tx b{display:block;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rc-mon .tx small{display:block;color:var(--rk-fg3);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rc-mon .acts{display:flex;gap:6px;flex:none}
+.rc-mon .acts .rk-btn{width:auto}
+.rc-mon .confirm{margin:0 14px 12px 60px;padding:10px 12px;border-radius:11px;background:color-mix(in srgb,var(--rk-warn) 10%,transparent);font-size:12.5px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.rc-mon .confirm span{flex:1;min-width:180px}
+.rc-mon .stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}
+.rc-mon .stat{padding:14px 16px;min-width:0}.rc-mon .stat+.stat{border-left:1px solid var(--rk-hair)}
+.rc-mon .stat .k{color:var(--rk-fg2);font-size:12px}
+.rc-mon .stat .v{font-size:19px;font-weight:650;margin:2px 0 0;white-space:nowrap}.rc-mon .stat .v small{font-size:12px;font-weight:400;color:var(--rk-fg3);margin-left:3px}
+.rc-mon .stat .v.bad{color:var(--rk-bad)}
+.rc-mon .spark{display:block;width:100%;height:24px;margin-top:6px}
+.rc-mon .ev{all:unset;box-sizing:border-box;cursor:pointer;display:flex;align-items:center;gap:12px;width:100%;padding:10px 14px 10px 16px}
+.rc-mon .ev+.ev,.rc-mon .more+.ev{border-top:1px solid var(--rk-hair)}
+.rc-mon .ev:hover{background:var(--rk-surface)}.rc-mon .ev:focus-visible{outline:2px solid var(--vscode-focusBorder,#3d8bff);outline-offset:-2px}
+.rc-mon .ev time{width:44px;flex:none;color:var(--rk-fg3);font-variant-numeric:tabular-nums;font-size:12px}
+.rc-mon .ev .ib{width:26px;height:26px;border-radius:8px}
+.rc-mon .ev .new{width:6px;height:6px;border-radius:50%;background:var(--rk-accent);flex:none}
+.rc-mon .more{padding:0 16px 12px 88px;color:var(--rk-fg2);font-size:12.5px;line-height:1.55;overflow-wrap:anywhere}
+.rc-mon .more small{display:block;color:var(--rk-fg3);margin-top:4px}
+.rc-mon .empty{padding:22px 18px;text-align:center;color:var(--rk-fg3);font-size:12.5px}
+.rc-mon .empty b{display:block;color:var(--rk-fg);font-size:14px;margin:6px 0 2px}
+.rc-mon .watch{display:flex;align-items:center;gap:12px;padding:12px 14px 12px 16px}
+.rc-mon .panel{padding:2px 16px 14px 60px}
+.rc-mon .kv{display:flex;justify-content:space-between;gap:12px;padding:8px 0;font-size:12.5px}.rc-mon .kv+.kv{border-top:1px solid var(--rk-hair)}
+.rc-mon .kv span{color:var(--rk-fg2);flex:none}.rc-mon .kv b{flex:1;min-width:0;font-weight:500;text-align:right;overflow-wrap:anywhere}
+.rc-mon .field{display:flex;gap:8px;margin-top:10px}.rc-mon .field .rk-input{flex:1;min-width:0}.rc-mon .field .rk-btn{width:auto;flex:none;height:34px}
+.rc-mon .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.rc-mon .chip{height:26px;display:inline-flex;align-items:center;gap:6px;padding:0 10px;border-radius:8px;background:var(--rk-surface2);font-size:12px;color:var(--rk-fg2)}
+.rc-mon .msg{margin:-4px 2px 12px}
+.rc-mon .foot{display:flex;gap:8px;margin-top:12px}.rc-mon .foot .rk-btn{width:auto;flex:1}
+@media (max-width:560px){.rc-mon .stat{padding:12px 12px}.rc-mon .stat .v{font-size:17px}
+  .rc-mon .todo{flex-wrap:wrap}.rc-mon .todo .acts{width:100%;padding-left:44px}.rc-mon .todo .acts .rk-btn{flex:1}
+  .rc-mon .confirm{margin-left:14px}.rc-mon .panel{padding-left:16px}.rc-mon .more{padding-left:16px}}
 `;
 
 function Spark({ values, tone = "var(--rk-accent)" }: { values?: number[]; tone?: string }) {
-  if (!values || values.length < 2) return <svg className="spark" viewBox="0 0 120 30" aria-hidden="true"><line x1="0" y1="27" x2="120" y2="27" stroke="var(--rk-hair)" /></svg>;
+  if (!values || values.length < 2) return null;
   const max = Math.max(...values, 1);
-  const pts = values.map((v, i) => `${(i * 120 / (values.length - 1)).toFixed(1)},${(28 - (v / max) * 24).toFixed(1)}`).join(" ");
+  const pts = values.map((v, i) => `${(i * 120 / (values.length - 1)).toFixed(1)},${(22 - (v / max) * 19).toFixed(1)}`).join(" ");
   return (
-    <svg className="spark" viewBox="0 0 120 30" preserveAspectRatio="none" aria-hidden="true">
-      <polygon points={`0,30 ${pts} 120,30`} fill={tone} opacity=".1" />
-      <polyline points={pts} fill="none" stroke={tone} strokeWidth="1.6" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+    <svg className="spark" viewBox="0 0 120 24" preserveAspectRatio="none" aria-hidden="true">
+      <polyline points={pts} fill="none" stroke={tone} strokeWidth="1.5" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
     </svg>
   );
 }
@@ -99,125 +108,129 @@ export interface MonitorViewProps {
   onAct?: (a: AlertView, s: NonNullable<AlertView["suggestions"]>[number]) => void;
 }
 
-function Tiles({ cur, now }: { cur: MonitorCurrentView; now: number }) {
-  const s = cur.service_state;
-  const short = s ? s.desired > 0 && s.running < s.desired : false;
-  const errPct = cur.now ? cur.now.error_rate * 100 : null;
-  const w = cur.watcher;
-  return (
-    <div className="tiles">
-      <div className="tile" data-testid="tile-requests"><div className="k"><Icon name="pulse" size={13} />요청</div>
-        <div className="v">{cur.now ? cur.now.rpm.toLocaleString() : "—"}<small>/분</small></div>
-        {cur.series ? <Spark values={cur.series.requests} /> : <div className="s">{cur.metrics ? "지표를 읽지 못했어요" : "방패가 꺼져 요청을 셀 수 없어요"}</div>}</div>
-      <div className="tile" data-testid="tile-errors"><div className="k"><Icon name="alert" size={13} />오류율</div>
-        <div className="v">{errPct === null ? "—" : errPct.toFixed(errPct < 10 ? 1 : 0)}<small>% · 지금</small></div>
-        {cur.series ? <Spark values={cur.series.errors} tone={errPct !== null && errPct > 5 ? "var(--rk-bad)" : "var(--rk-warn)"} /> : <div className="s">5xx 비율 · 5분 단위</div>}</div>
-      <div className="tile" data-testid="tile-tasks"><div className="k"><Icon name="box" size={13} />실행 중</div>
-        <div className="v">{s ? s.running : "—"}<small>/ {s ? s.desired : "—"} 태스크</small></div>
-        <div className={`bar ${short ? "bad" : ""}`}><i style={{ width: s && s.desired ? `${Math.min(100, (s.running / s.desired) * 100)}%` : "0%" }} /></div>
-        <div className="s">{!s ? "서비스 상태를 읽지 못했어요" : `${s.revision ? `${s.revision} · ` : ""}${short ? "덜 떠 있어요" : s.desired === 0 ? "멈춤 · 요금 없음" : "모두 떠 있어요"}`}</div></div>
-      <div className="tile" data-testid="tile-watcher"><div className="k"><Icon name="shield" size={13} />감시자</div>
-        <div className="v">{!w.installed ? "없음" : w.waiting_first_tick ? "준비 중" : w.healthy ? "정상" : "멈춤"}<small>{w.installed && !w.waiting_first_tick ? minutesAgo(w.last_tick, now) : ""}</small></div>
-        <div className={`bar ${!w.installed ? "" : w.healthy || w.waiting_first_tick ? "" : "warn"}`}><i style={{ width: w.installed ? "100%" : "0%" }} /></div>
-        <div className="s">{!w.installed ? "PC 가 꺼져 있으면 감지 · 알림이 멈춰요" : w.waiting_first_tick ? "5분 안에 첫 확인 기록이 남아요" : `5분마다 · ${(w.ticks ?? 0).toLocaleString()}번 확인`}</div></div>
-    </div>
-  );
-}
-
-function Timeline({ items, now }: { items: TimelineItem[]; now: Date }) {
-  if (!items.length) {
-    return <div className="card empty" data-testid="mon-empty-timeline"><Icon name="check" size={22} /><b>기록이 없어요</b>오류 · 요청 급증 · 태스크 이상이 생기면 여기에 쌓여요</div>;
-  }
-  return (
-    <div className="card tl" data-testid="mon-timeline">
-      {items.slice(0, 20).map((i) => (
-        <div className="ev" key={i.id}>
-          <time>{clock(i.at, now)}</time>
-          <span className={`ib ${i.tone}`}><Icon name={kindIcon(i.kind)} size={15} /></span>
-          <div><b>{i.title}</b>{i.fresh && <span className="new">새로</span>}<p>{i.detail}</p><div className="meta">{sourceText(i.source)}</div></div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 function Confirm({ text, label, busy, onYes, onNo, testId }: { text: React.ReactNode; label: string; busy?: boolean; onYes: () => void; onNo: () => void; testId?: string }) {
   return (
     <div className="confirm" role="alertdialog" data-testid={testId}>
-      {text}
-      <div className="btns"><Button small variant="ghost" onClick={onNo} disabled={busy}>취소</Button><Button small onClick={onYes} disabled={busy} testId={testId ? `${testId}-yes` : undefined}>{busy ? "실행 중…" : label}</Button></div>
+      <span>{text}</span>
+      <Button small variant="ghost" onClick={onNo} disabled={busy}>취소</Button>
+      <Button small onClick={onYes} disabled={busy} testId={testId ? `${testId}-yes` : undefined}>{busy ? "실행 중…" : label}</Button>
     </div>
   );
 }
 
-function Approvals({ cur, busy, onRollback, onAct }: { cur: MonitorCurrentView; busy?: string; onRollback?: MonitorViewProps["onRollback"]; onAct?: MonitorViewProps["onAct"] }) {
-  const [ask, setAsk] = useState<string>("");
+/** 할 일 — 이전 버전 롤백 · 대응 제안. 한 줄에 무엇 · 왜 · 버튼 하나. */
+function Todo({ cur, busy, onRollback, onAct }: { cur: MonitorCurrentView; busy?: string; onRollback?: MonitorViewProps["onRollback"]; onAct?: MonitorViewProps["onAct"] }) {
+  const [ask, setAsk] = useState("");
   const alerts = pendingAlerts(cur);
-  const total = cur.offers.length + alerts.length;
+  if (!cur.offers.length && !alerts.length) return null;
   return (
     <>
-      <div className="sec" style={{ marginTop: 0 }}><b>승인 대기 {total}건</b><span>승인 전에는 아무것도 바뀌지 않아요</span></div>
-      {total === 0 && <div className="card empty" data-testid="mon-no-approvals"><b>승인할 일이 없어요</b>필요하면 여기에 롤백 · 대응 제안이 올라와요</div>}
-      {cur.offers.map((o) => {
-        const id = `rb:${o.target}`;
-        return (
-          <div className="card ap" key={id} data-testid="mon-offer">
-            <div className="h"><span className="ib"><Icon name="history" size={16} /></span><div><b>이전 버전으로 되돌리기</b><small>{revOf(o.from_td)} → {revOf(o.target)} · {o.title}</small></div></div>
-            <p>이전 이미지로 무중단 교체해요(1~3분). 원인 코드는 그대로라 고친 뒤 다시 배포하세요.</p>
-            {ask === id
-              ? <Confirm testId="mon-rollback-confirm" text={<>지금 <b>{revOf(o.from_td)}</b> 을 <b>{revOf(o.target)}</b> 로 되돌립니다.</>} label="롤백 승인" busy={busy === "rollback"}
-                  onYes={() => onRollback?.(o)} onNo={() => setAsk("")} />
-              : <div className="btns"><Button small onClick={() => setAsk(id)} disabled={!!busy} testId="mon-rollback">{revOf(o.target)} 로 롤백</Button></div>}
-          </div>
-        );
-      })}
-      {alerts.map((a) => (
-        <div className="card ap" key={a.id} data-testid="mon-alert">
-          <div className="h"><span className="ib"><Icon name={kindIcon(a.kind)} size={16} /></span><div><b>{a.title}</b><small>{clock(a.at)} · VS Code 가 켜져 있을 때 감지</small></div></div>
-          <p>{a.detail}</p>
-          {(a.suggestions ?? []).map((s, i) => {
-            const id = `al:${a.id}:${i}`;
-            return ask === id
-              ? <Confirm key={id} testId="mon-act-confirm" text={<><b>{s.label}</b> — {s.detail}</>} label="승인하고 적용" busy={busy === "act"}
-                  onYes={() => onAct?.(a, s)} onNo={() => setAsk("")} />
-              : <div className="btns" key={id}><Button small variant="ghost" onClick={() => setAsk(id)} disabled={!!busy}>{s.label}</Button></div>;
-          })}
-        </div>
-      ))}
+      <div className="label"><span>할 일</span><span>승인 전에는 아무것도 바뀌지 않아요</span></div>
+      <div className="card">
+        {cur.offers.map((o) => {
+          const id = `rb:${o.target}`;
+          return (
+            <React.Fragment key={id}>
+              <div className="todo" data-testid="mon-offer">
+                <span className="ib warn"><Icon name="history" size={16} /></span>
+                <div className="tx"><b>이전 버전으로 되돌리기</b><small>{o.title} · {revOf(o.from_td)} → {revOf(o.target)}</small></div>
+                {ask !== id && <div className="acts"><Button small onClick={() => setAsk(id)} disabled={!!busy} testId="mon-rollback">되돌리기</Button></div>}
+              </div>
+              {ask === id && <Confirm testId="mon-rollback-confirm" text={<><b>{revOf(o.target)}</b> 로 되돌려요 · 무중단 1~3분</>} label="승인" busy={busy === "rollback"}
+                onYes={() => onRollback?.(o)} onNo={() => setAsk("")} />}
+            </React.Fragment>
+          );
+        })}
+        {alerts.map((a) => (
+          <React.Fragment key={a.id}>
+            <div className="todo" data-testid="mon-alert">
+              <span className="ib warn"><Icon name={kindIcon(a.kind)} size={16} /></span>
+              <div className="tx"><b>{a.title}</b><small>{clock(a.at)} · {a.detail}</small></div>
+              <div className="acts">{(a.suggestions ?? []).slice(0, 2).map((s, i) => ask === `al:${a.id}:${i}` ? null : (
+                <Button key={i} small variant={i ? "ghost" : "primary"} onClick={() => setAsk(`al:${a.id}:${i}`)} disabled={!!busy}>{s.label}</Button>))}</div>
+            </div>
+            {(a.suggestions ?? []).slice(0, 2).map((s, i) => ask === `al:${a.id}:${i}` &&
+              <Confirm key={i} testId="mon-act-confirm" text={<><b>{s.label}</b> · {s.detail}</>} label="승인" busy={busy === "act"}
+                onYes={() => onAct?.(a, s)} onNo={() => setAsk("")} />)}
+          </React.Fragment>
+        ))}
+      </div>
     </>
   );
 }
 
-function WatcherCard({ cur, plan, busy, now, onPlan, onInstall, onUninstall, onSettings }: {
+function Stats({ cur }: { cur: MonitorCurrentView }) {
+  const s = cur.service_state;
+  const errPct = cur.now ? cur.now.error_rate * 100 : null;
+  const short = s ? s.desired > 0 && s.running < s.desired : false;
+  return (
+    <div className="card stats">
+      <div className="stat" data-testid="stat-requests"><div className="k">요청</div>
+        <div className="v">{cur.now ? cur.now.rpm.toLocaleString() : "—"}<small>/분</small></div><Spark values={cur.series?.requests} /></div>
+      <div className="stat" data-testid="stat-errors"><div className="k">오류율</div>
+        <div className={`v${errPct !== null && errPct > 5 ? " bad" : ""}`}>{errPct === null ? "—" : errPct.toFixed(errPct < 10 ? 1 : 0)}<small>%</small></div>
+        <Spark values={cur.series?.errors} tone="var(--rk-warn)" /></div>
+      <div className="stat" data-testid="stat-tasks"><div className="k">실행 중</div>
+        <div className={`v${short ? " bad" : ""}`}>{s ? s.running : "—"}<small>/ {s ? s.desired : "—"}</small></div>
+        <div className="k" style={{ marginTop: 6 }}>{s?.revision || ""}</div></div>
+    </div>
+  );
+}
+
+function Records({ items, now }: { items: TimelineItem[]; now: Date }) {
+  const [open, setOpen] = useState("");
+  const [all, setAll] = useState(false);
+  const shown = all ? items.slice(0, 30) : items.slice(0, 5);
+  return (
+    <>
+      <div className="label"><span>최근 기록</span>{items.length > 5 && <button type="button" onClick={() => setAll(!all)}>{all ? "접기" : `전체 ${Math.min(items.length, 30)}개`}</button>}</div>
+      {!items.length
+        ? <div className="card empty" data-testid="mon-empty-timeline">아직 기록이 없어요</div>
+        : <div className="card" data-testid="mon-timeline">
+            {shown.map((i) => (
+              <React.Fragment key={i.id}>
+                <button type="button" className="ev" aria-expanded={open === i.id} onClick={() => setOpen(open === i.id ? "" : i.id)}>
+                  <time>{clock(i.at, now)}</time>
+                  <span className={`ib ${i.tone}`}><Icon name={kindIcon(i.kind)} size={14} /></span>
+                  <span className="tx"><b>{i.title}</b></span>
+                  {i.fresh && <span className="new" aria-label="새 기록" />}
+                </button>
+                {open === i.id && <div className="more">{i.detail}<small>{sourceText(i.source)}</small></div>}
+              </React.Fragment>
+            ))}
+          </div>}
+    </>
+  );
+}
+
+function Watcher({ cur, plan, busy, now, onPlan, onInstall, onUninstall, onSettings }: {
   cur: MonitorCurrentView; plan: MonitorViewProps["plan"]; busy?: string; now: number;
   onPlan?: MonitorViewProps["onPlan"]; onInstall?: MonitorViewProps["onInstall"]; onUninstall?: MonitorViewProps["onUninstall"]; onSettings?: MonitorViewProps["onSettings"];
 }) {
   const w = cur.watcher;
+  const [open, setOpen] = useState(false);
   const [role, setRole] = useState("");
   const [discord, setDiscord] = useState("");
   const [email, setEmail] = useState("");
   const [ask, setAsk] = useState(false);
   //: 설치 → 설치됨처럼 카드가 바뀌면 열려 있던 확인 단계를 닫는다(설치 확인이 '지우기' 확인으로 이어지지 않게).
-  useEffect(() => { setAsk(false); }, [w.installed]);
+  useEffect(() => { setAsk(false); setOpen(false); }, [w.installed]);
   if (w.installed === null) {
-    return <div className="card ap"><Line icon="alert" tone="warn">감시자 상태를 확인하지 못했어요 — {w.error || "AWS 연결을 확인하세요"}</Line></div>;
+    return <div className="card watch"><Line icon="alert" tone="warn">감시자 상태를 확인하지 못했어요 — {w.error || "AWS 연결을 확인하세요"}</Line></div>;
   }
   if (!w.installed) {
     return (
-      <div className="card ap" data-testid="mon-setup">
-        <div className="h"><span className="ib"><Icon name="shield" size={16} /></span><div><b>24시간 감시자</b><small>PC 가 꺼져 있어도 내 AWS 안에서</small></div></div>
-        <Box>
-          <SettingRow icon="pulse" title="경보 · ECS 이벤트 · 5분마다 확인" desc="오류 증가 · 요청 급증 · 컨테이너 멈춤 · 태스크 부족" />
-          <SettingRow icon="bell" title="메일 · 디스코드로 알림" desc="급하면 폰에서 이전 버전 롤백만 승인" />
-          <SettingRow icon="lock" title="기록은 내 AWS 에만" desc="ReCoder 서버로 보내지 않아요 · 30일 뒤 자동 삭제" />
-        </Box>
-        {!plan && <div className="btns"><Button onClick={() => onPlan?.(role)} disabled={!!busy} testId="mon-plan">{busy === "plan" ? "확인 중…" : "설치 내용 확인"}</Button></div>}
+      <div className="card" data-testid="mon-setup">
+        <div className="watch">
+          <span className="ib"><Icon name="shield" size={16} /></span>
+          <div className="tx"><b>24시간 감시자</b><small>PC 가 꺼져 있어도 내 AWS 안에서 지켜봐요 · 월 $0.1 미만</small></div>
+          {!plan && <div className="acts"><Button small onClick={() => onPlan?.(role)} disabled={!!busy} testId="mon-plan">{busy === "plan" ? "확인 중…" : "설치"}</Button></div>}
+        </div>
         {plan && (
-          <div data-testid="mon-plan-detail">
-            <div style={{ marginTop: 12 }}>
-              {plan.resources.map((r) => <div className="kv" key={r.kind}><span>{r.kind}</span><b>{r.detail}</b></div>)}
-              <div className="kv"><span>권한</span><b>{plan.permissions}</b></div>
-              <div className="kv"><span>요금</span><b>{plan.cost}</b></div>
+          <div className="panel" data-testid="mon-plan-detail">
+            <div className="chips">{plan.resources.map((r) => <span className="chip" key={r.kind} title={r.detail}>{r.kind}</span>)}</div>
+            <div style={{ marginTop: 8 }}>
+              <div className="kv"><span>할 수 있는 일</span><b>읽기 · 기록 · 알림 · 승인한 롤백</b></div>
               <div className="kv"><span>역할</span><b>{plan.role.arn.split("/").pop()} {plan.role.exists === true ? "· 준비됨" : plan.role.exists === false ? "· 없음" : "· 확인 못함"}</b></div>
             </div>
             {plan.notes.map((n) => <Line key={n} icon="alert" tone="warn">{n}</Line>)}
@@ -225,33 +238,41 @@ function WatcherCard({ cur, plan, busy, now, onPlan, onInstall, onUninstall, onS
               <div className="field"><input className="rk-input" aria-label="감시자 역할" placeholder="다른 역할 이름 · 학교 계정은 LabRole" value={role} onChange={(e) => setRole(e.target.value)} />
                 <Button small variant="ghost" onClick={() => onPlan?.(role)} disabled={!!busy}>다시 확인</Button></div>
             )}
-            <div className="field"><input className="rk-input" aria-label="디스코드 웹후크" placeholder="디스코드 웹후크 주소(선택)" value={discord} onChange={(e) => setDiscord(e.target.value)} /></div>
+            <div className="field"><input className="rk-input" aria-label="디스코드 웹후크" placeholder="디스코드 웹후크(선택)" value={discord} onChange={(e) => setDiscord(e.target.value)} /></div>
             {ask
-              ? <Confirm testId="mon-install-confirm" text="위 리소스를 내 AWS 에 만들어요. 언제든 여기서 지울 수 있어요." label="승인하고 설치" busy={busy === "install"}
-                  onYes={() => onInstall?.(role, discord)} onNo={() => setAsk(false)} />
-              : <div className="btns"><Button onClick={() => setAsk(true)} disabled={!!busy || plan.role.exists === false} testId="mon-install">설치</Button></div>}
+              ? <div style={{ marginTop: 12 }}><Confirm testId="mon-install-confirm" text="위 리소스를 내 AWS 에 만들어요 · 언제든 지울 수 있어요" label="승인하고 설치" busy={busy === "install"}
+                  onYes={() => onInstall?.(role, discord)} onNo={() => setAsk(false)} /></div>
+              : <div className="foot"><Button onClick={() => setAsk(true)} disabled={!!busy || plan.role.exists === false} testId="mon-install">설치</Button></div>}
           </div>
         )}
       </div>
     );
   }
+  const state = w.waiting_first_tick ? "첫 확인을 기다리는 중" : w.healthy ? `정상 · ${minutesAgo(w.last_tick, now)} 확인` : `확인 멈춤 · ${minutesAgo(w.last_tick, now)}`;
   return (
-    <div className="card ap" data-testid="mon-watcher">
-      <div className="h"><span className="ib"><Icon name="shield" size={16} /></span><div><b>24시간 감시자</b><small>내 AWS 안에서 · {w.waiting_first_tick ? "첫 확인 기다리는 중" : `마지막 확인 ${minutesAgo(w.last_tick, now)}`}</small></div></div>
-      <div style={{ marginTop: 10 }}>
-        <div className="kv"><span>알림</span><b>{[w.mail ? "메일" : "", w.discord ? "디스코드" : ""].filter(Boolean).join(" · ") || "VS Code 만"}</b></div>
-        <div className="kv"><span>밤 롤백 링크</span><b>{w.approval_link ? (w.stable ? `${w.stable} 로 되돌리기` : "다음 배포부터") : "꺼짐 · VS Code 에서 승인"}</b></div>
-        <div className="kv"><span>자동 실행</span><b>꺼짐 · 모두 승인 후</b></div>
+    <div className="card" data-testid="mon-watcher">
+      <div className="watch">
+        <span className={`ib ${w.healthy || w.waiting_first_tick ? "" : "warn"}`}><Icon name="shield" size={16} /></span>
+        <div className="tx"><b>24시간 감시자</b><small>{state} · {[w.mail ? "메일" : "", w.discord ? "디스코드" : ""].filter(Boolean).join(" · ") || "VS Code 알림만"}</small></div>
+        <div className="acts"><Button small variant="ghost" onClick={() => setOpen(!open)} testId="mon-watch-settings">{open ? "닫기" : "설정"}</Button></div>
       </div>
-      <div className="field"><input className="rk-input" aria-label="디스코드 웹후크" placeholder={w.discord ? "새 디스코드 웹후크(비우면 그대로)" : "디스코드 웹후크 주소"} value={discord} onChange={(e) => setDiscord(e.target.value)} />
-        <Button small variant="ghost" onClick={() => { onSettings?.({ discord }); setDiscord(""); }} disabled={!!busy || !discord.trim()}>저장</Button></div>
-      {w.discord && <div className="btns"><Button small variant="ghost" onClick={() => onSettings?.({ discord: "" })} disabled={!!busy}>디스코드 알림 끄기</Button></div>}
-      <div className="field"><input className="rk-input" aria-label="알림 메일" placeholder="알림 받을 메일 추가" value={email} onChange={(e) => setEmail(e.target.value)} />
-        <Button small variant="ghost" onClick={() => { onSettings?.({ email }); setEmail(""); }} disabled={!!busy || !email.trim()}>구독</Button></div>
-      {ask
-        ? <Confirm testId="mon-uninstall-confirm" text="감시자 함수 · 규칙 · 기록 표 · 로그를 지워요. 기록도 함께 사라져요." label="지우기" busy={busy === "uninstall"}
-            onYes={() => onUninstall?.()} onNo={() => setAsk(false)} />
-        : <div className="btns"><Button small variant="ghost" onClick={() => setAsk(true)} disabled={!!busy} testId="mon-uninstall">감시자 지우기</Button></div>}
+      {open && (
+        <div className="panel">
+          <div className="kv"><span>밤 롤백 링크</span><b>{w.approval_link ? (w.stable ? `${w.stable} 로` : "다음 배포부터") : "꺼짐 · VS Code 에서 승인"}</b></div>
+          <div className="kv"><span>자동 실행</span><b>꺼짐 · 모두 승인 후</b></div>
+          <div className="field"><input className="rk-input" aria-label="디스코드 웹후크" placeholder={w.discord ? "새 디스코드 웹후크" : "디스코드 웹후크"} value={discord} onChange={(e) => setDiscord(e.target.value)} />
+            <Button small variant="ghost" onClick={() => { onSettings?.({ discord }); setDiscord(""); }} disabled={!!busy || !discord.trim()}>저장</Button></div>
+          <div className="field"><input className="rk-input" aria-label="알림 메일" placeholder="알림 받을 메일" value={email} onChange={(e) => setEmail(e.target.value)} />
+            <Button small variant="ghost" onClick={() => { onSettings?.({ email }); setEmail(""); }} disabled={!!busy || !email.trim()}>구독</Button></div>
+          {ask
+            ? <div style={{ marginTop: 12 }}><Confirm testId="mon-uninstall-confirm" text="감시자와 기록을 지워요" label="지우기" busy={busy === "uninstall"}
+                onYes={() => onUninstall?.()} onNo={() => setAsk(false)} /></div>
+            : <div className="foot">
+                {w.discord && <Button small variant="ghost" onClick={() => onSettings?.({ discord: "" })} disabled={!!busy}>디스코드 끄기</Button>}
+                <Button small variant="ghost" onClick={() => setAsk(true)} disabled={!!busy} testId="mon-uninstall">감시자 지우기</Button>
+              </div>}
+        </div>
+      )}
     </div>
   );
 }
@@ -264,53 +285,45 @@ export function MonitorView(props: MonitorViewProps) {
   const items = useMemo(() => (cur ? timeline(cur, data?.seen ?? "") : []), [cur, data?.seen]);
   const pending = cur ? cur.offers.length + pendingAlerts(cur).length : 0;
   const h = cur ? hero(cur, items, pending) : null;
-  const w = cur?.watcher;
   return (
     <Kit className="rc-mon" data-testid="monitor">
       <style>{CSS}</style>
       <div className="hd">
         <h1>모니터</h1>
         {cur && (
-          <span className="app"><Logo kind="ecs" />
+          <span className="app" title={`${cur.cluster} · ${cur.region}`}><Logo kind="ecs" />
             {data!.monitors.length > 1
               ? <select aria-label="볼 서비스" value={cur.key} onChange={(e) => onSelect?.(e.target.value)}>
-                  {data!.monitors.map((m) => <option key={m.key} value={m.key}>{m.service} · {m.region}</option>)}
+                  {data!.monitors.map((m) => <option key={m.key} value={m.key}>{m.service}</option>)}
                 </select>
               : <span>{cur.service}</span>}
-            <small>{data!.monitors.length > 1 ? "ECS" : `ECS · ${cur.region}`}</small></span>
+          </span>
         )}
-        {w && <span className={`pill ${w.installed ? (w.healthy || w.waiting_first_tick ? "ok" : "warn") : ""}`} data-testid="mon-pill">
-          <Icon name="shield" size={13} />{w.installed ? (w.waiting_first_tick ? "감시자 준비 중" : w.healthy ? `감시자 동작 중 · ${minutesAgo(w.last_tick, now)} 확인` : "감시자 확인 멈춤") : "감시자 없음 · VS Code 가 켜져 있을 때만"}</span>}
         <span className="sp" />
-        <Button small variant="ghost" onClick={onRefresh} disabled={loading}>{loading ? "불러오는 중…" : "새로 고침"}</Button>
+        <button type="button" className="icon-btn" aria-label="새로 고침" title="새로 고침" aria-busy={loading || undefined} onClick={onRefresh}><Icon name="refresh" size={16} /></button>
       </div>
       {message && <div className="msg"><Line icon={message.tone === "ok" ? "check" : "alert"} tone={message.tone}>{message.text}</Line></div>}
       {error && <div className="msg"><Line icon="alert" tone="bad">{error}</Line></div>}
       {!cur && !loading && !error && (
         <div className="card empty" data-testid="mon-no-monitors">
-          <Icon name="pulse" size={24} /><b>감시 중인 앱이 없어요</b>
-          ECS 로 배포할 때 「공격·장애 감지 알림」을 켜면 여기에 나타나요.
-          <div className="btns" style={{ justifyContent: "center" }}><Button small onClick={onOpenDeploy}>배포 캔버스 열기</Button></div>
+          <Icon name="pulse" size={22} /><b>지켜볼 앱이 아직 없어요</b>
+          ECS 로 배포하면 여기에 나타나요
+          <div className="foot" style={{ justifyContent: "center" }}><Button small onClick={onOpenDeploy}>배포하러 가기</Button></div>
         </div>
       )}
       {cur && h && (
-        <div className="grid">
-          <div>
-            <div className="card hero" data-tone={h.tone} data-testid="mon-hero"><img src={CHARACTER_SRC} alt="" /><div><b>{h.title}</b><p>{h.sub}</p></div></div>
-            {cur.gaps.map((g) => <Line key={g} icon="alert" tone="warn">{g}</Line>)}
-            {/* 좁은 화면 — 승인 대기를 요약 바로 아래로(넓은 화면은 오른쪽 칸) */}
-            <div className="narrow-only"><Approvals cur={cur} busy={busy} onRollback={props.onRollback} onAct={props.onAct} /></div>
-            <Tiles cur={cur} now={now} />
-            <div className="sec"><b>일어난 일</b><span>{items.some((i) => i.fresh) ? "마지막으로 본 뒤 생긴 것에 「새로」" : "최근 30일"}</span></div>
-            <Timeline items={items} now={new Date(now)} />
-          </div>
-          <div>
-            <div className="wide-only"><Approvals cur={cur} busy={busy} onRollback={props.onRollback} onAct={props.onAct} /></div>
-            <div className="sec"><b>감시 설정</b><span>내 AWS 안에서 동작</span></div>
-            <WatcherCard cur={cur} plan={plan ?? null} busy={busy} now={now} onPlan={props.onPlan} onInstall={props.onInstall}
-              onUninstall={props.onUninstall} onSettings={props.onSettings} />
-          </div>
-        </div>
+        <>
+          <div className="card hero" data-tone={h.tone} data-testid="mon-hero"><img src={CHARACTER_SRC} alt="" />
+            <div style={{ minWidth: 0 }}><b><span className="dot" />{h.title}</b><p>{h.sub}</p></div></div>
+          {cur.gaps.map((g) => <Line key={g} icon="alert" tone="warn">{g}</Line>)}
+          <Todo cur={cur} busy={busy} onRollback={props.onRollback} onAct={props.onAct} />
+          <div className="label"><span>지금</span><span>최근 24시간</span></div>
+          <Stats cur={cur} />
+          <Records items={items} now={new Date(now)} />
+          <div className="label"><span>감시</span></div>
+          <Watcher cur={cur} plan={plan ?? null} busy={busy} now={now} onPlan={props.onPlan} onInstall={props.onInstall}
+            onUninstall={props.onUninstall} onSettings={props.onSettings} />
+        </>
       )}
     </Kit>
   );
