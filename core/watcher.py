@@ -199,8 +199,8 @@ def plan(session: Any, *, region: str, cluster: str, service: str, role: str = "
         role_state = False if _code(exc) == "NoSuchEntity" else None
     notes = []
     if role_state is False:
-        notes.append(f"감시자 역할 {arn.rsplit('/', 1)[-1]} 이 없습니다 — AWS 연결 화면의 「원클릭 IAM 셋업」 스택을 최신으로 "
-                     "업데이트하거나, 권한 안내의 감시자 역할을 만들어 주세요(학교 계정은 LabRole).")
+        notes.append(f"상시 감시 역할 {arn.rsplit('/', 1)[-1]} 이 없습니다 — AWS 연결 화면의 「원클릭 IAM 셋업」 스택을 최신으로 "
+                     "업데이트하거나, 권한 안내의 상시 감시 역할을 만들어 주세요(학교 계정은 LabRole).")
     elif role_state is None:
         notes.append("역할이 있는지 확인하지 못했습니다(iam:GetRole 권한 없음) — 설치할 때 확인합니다.")
     return {
@@ -291,7 +291,7 @@ def install(session: Any, *, region: str, cluster: str, service: str, role: str 
         topic = str(session.client("sns").create_topic(
             Name=n["topic"], Tags=[{"Key": k, "Value": v} for k, v in tags.items()])["TopicArn"])
     except Exception as exc:  # noqa: BLE001
-        notes.append(f"메일 알림 주제를 준비하지 못했습니다: {_msg(exc)} — 디스코드 알림과 VS Code 모니터만 씁니다.")
+        notes.append(f"메일 알림 주제를 준비하지 못했습니다: {_msg(exc)} — 디스코드 알림과 VS Code 의 Operate 화면만 씁니다.")
 
     # 4. Lambda
     blob = package()
@@ -301,7 +301,7 @@ def install(session: Any, *, region: str, cluster: str, service: str, role: str 
         current = lam.get_function(FunctionName=n["function"])["Configuration"]
     except Exception as exc:  # noqa: BLE001
         if not _missing(exc):
-            raise WatchError(f"감시자 함수를 확인하지 못했습니다: {_msg(exc)}") from exc
+            raise WatchError(f"상시 감시 함수를 확인하지 못했습니다: {_msg(exc)}") from exc
         current = None
     try:
         if current is None:
@@ -324,12 +324,12 @@ def install(session: Any, *, region: str, cluster: str, service: str, role: str 
         raise
     except Exception as exc:  # noqa: BLE001
         if _code(exc) in ("AccessDeniedException", "AccessDenied") and "PassRole" in str(exc):
-            raise WatchError(f"감시자 역할을 Lambda 에 넘길 권한이 없습니다(iam:PassRole · {role_arn.rsplit('/', 1)[-1]}) — "
+            raise WatchError(f"상시 감시 역할을 Lambda 에 넘길 권한이 없습니다(iam:PassRole · {role_arn.rsplit('/', 1)[-1]}) — "
                              "권한 템플릿을 최신으로 다시 적용하세요.") from exc
         if _code(exc) == "InvalidParameterValueException" and "role" in str(exc).lower():
             raise WatchError(f"Lambda 가 역할 {role_arn.rsplit('/', 1)[-1]} 을 맡을 수 없습니다 — 역할이 없거나 "
                              "신뢰 관계에 lambda.amazonaws.com 이 없습니다.") from exc
-        raise WatchError(f"감시자 함수를 만들지 못했습니다: {_msg(exc)}") from exc
+        raise WatchError(f"상시 감시 함수를 만들지 못했습니다: {_msg(exc)}") from exc
 
     # 5. 승인 링크(함수 URL) — 조직 정책이 공개 URL 을 막으면 링크 없이 설치한다(승인은 VS Code 에서).
     url = ""
@@ -349,7 +349,7 @@ def install(session: Any, *, region: str, cluster: str, service: str, role: str 
                     raise
     except Exception as exc:  # noqa: BLE001
         url = ""
-        notes.append(f"밤에 쓰는 롤백 승인 링크를 만들지 못했습니다({_msg(exc)}) — 롤백 승인은 VS Code 모니터에서 합니다.")
+        notes.append(f"롤백 승인 링크를 만들지 못했습니다({_msg(exc)}) — 롤백 승인은 VS Code 의 Operate 화면에서 합니다.")
 
     # 6. 깨우는 규칙
     patterns = {
@@ -374,7 +374,7 @@ def install(session: Any, *, region: str, cluster: str, service: str, role: str 
                 if _code(exc) != "ResourceConflictException":
                     raise
         except Exception as exc:  # noqa: BLE001
-            raise WatchError(f"감시자를 깨우는 규칙({key})을 만들지 못했습니다: {_msg(exc)}") from exc
+            raise WatchError(f"상시 감시를 깨우는 규칙({key})을 만들지 못했습니다: {_msg(exc)}") from exc
 
     # 7. 설정(알림 주소 · 롤백 기준 버전) — 이미 있던 디스코드 주소 · 기준 버전은 비워 두면 그대로
     sets = {"service": service, "cluster": cluster, "region": region, "url": url, "topic": topic, "version": VERSION,
@@ -392,16 +392,16 @@ def install(session: Any, *, region: str, cluster: str, service: str, role: str 
     try:
         lam.put_function_concurrency(FunctionName=n["function"], ReservedConcurrentExecutions=RESERVED_CONCURRENCY)
     except Exception as exc:  # noqa: BLE001
-        notes.append(f"감시자 동시 실행 한도를 정하지 못했습니다({_code(exc)}) — 계정의 Lambda 동시 실행 한도가 작으면 생깁니다(동작에는 문제 없음).")
+        notes.append(f"상시 감시 동시 실행 한도를 정하지 못했습니다({_code(exc)}) — 계정의 Lambda 동시 실행 한도가 작으면 생깁니다(동작에는 문제 없음).")
 
     # 9. 감시자 역할이 이 서비스만 되돌릴 수 있게 표시
     try:
         session.client("ecs").tag_resource(resourceArn=svc["serviceArn"], tags=[{"key": WATCH_TAG, "value": "true"}])
     except Exception as exc:  # noqa: BLE001
-        notes.append(f"서비스에 감시 표시를 붙이지 못했습니다({_msg(exc)}) — 밤 롤백 링크가 권한 부족으로 실패할 수 있습니다.")
+        notes.append(f"서비스에 감시 표시를 붙이지 못했습니다({_msg(exc)}) — 롤백 승인 링크가 권한 부족으로 실패할 수 있습니다.")
 
     return {"installed": True, "function": n["function"], "url": bool(url), "notes": notes,
-            "message": "감시자를 설치했습니다 — 5분 안에 첫 확인 기록이 남습니다."}
+            "message": "상시 감시를 설치했습니다 — 5분 안에 첫 확인 기록이 남습니다."}
 
 
 def _update_config(ddb: Any, table: str, sets: dict, *, must_exist: bool = False) -> None:
@@ -517,7 +517,7 @@ def settings(session: Any, *, region: str, cluster: str, service: str, discord: 
             _update_config(session.client("dynamodb"), n["table"], {"discord": discord}, must_exist=True)
         except Exception as exc:  # noqa: BLE001
             if _missing(exc) or _code(exc) == "ConditionalCheckFailedException":
-                raise WatchError("감시자가 설치돼 있지 않습니다.") from exc
+                raise WatchError("상시 감시가 설치돼 있지 않습니다.") from exc
             raise
         notes.append("디스코드 알림을 껐습니다." if not discord else "디스코드 알림 주소를 저장했습니다.")
     email = (email or "").strip()
@@ -557,11 +557,11 @@ def rollback(session: Any, *, region: str, cluster: str, service: str, target_td
         config = {}
     #: 감시자가 제안한 대상(이번 배포 직전 버전)으로만 — 임의의 옛 버전으로 되돌리는 통로가 되지 않게.
     if not config.get("stable_td") or _rev(str(config["stable_td"])) != _rev(target_td):
-        raise WatchError("감시자가 제안한 이전 버전이 아닙니다 — 모니터를 새로 고친 뒤 다시 확인하세요.")
+        raise WatchError("상시 감시가 제안한 이전 버전이 아닙니다 — Operate 화면을 새로 고친 뒤 다시 확인하세요.")
     svc = _service(session, cluster, service)
     current = str(svc.get("taskDefinition") or "")
     if _rev(current) != _rev(from_td):
-        raise WatchError(f"그 사이 버전이 바뀌었습니다(지금 {_rev(current)}) — 모니터를 새로 고친 뒤 다시 확인하세요.")
+        raise WatchError(f"그 사이 버전이 바뀌었습니다(지금 {_rev(current)}) — Operate 화면을 새로 고친 뒤 다시 확인하세요.")
     session.client("ecs").update_service(cluster=cluster, service=service, taskDefinition=target_td, forceNewDeployment=True)
     now = time.time()
     try:
@@ -603,7 +603,7 @@ def uninstall(session: Any, *, region: str, cluster: str, service: str, approved
     for key, rule in n["rules"].items():
         step(f"규칙 {key}", lambda rule=rule: (events_c.remove_targets(Rule=rule, Ids=["watch"]), events_c.delete_rule(Name=rule)))
     step("승인 링크", lambda: lam.delete_function_url_config(FunctionName=n["function"]))
-    step("감시자 함수", lambda: lam.delete_function(FunctionName=n["function"]))
+    step("상시 감시 함수", lambda: lam.delete_function(FunctionName=n["function"]))
     step("기록 표", lambda: session.client("dynamodb").delete_table(TableName=n["table"]))
     step("로그 그룹", lambda: session.client("logs").delete_log_group(logGroupName=n["log_group"]))
 
@@ -616,7 +616,7 @@ def uninstall(session: Any, *, region: str, cluster: str, service: str, approved
     step("감시 표시 떼기", untag)
     failed = [r for r in results if not r["ok"]]
     return {"ok": not failed, "results": results,
-            "message": "감시자를 지웠습니다." if not failed else f"{len(failed)}개를 지우지 못했습니다 — 목록을 확인하세요."}
+            "message": "상시 감시를 지웠습니다." if not failed else f"{len(failed)}개를 지우지 못했습니다 — 목록을 확인하세요."}
 
 
 def installed(session: Any, *, region: str, cluster: str, service: str) -> Optional[dict]:

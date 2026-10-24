@@ -233,7 +233,7 @@ const HubRouter: React.FC<{ view: ViewMode; ctx: ReadyCtx; externalTurn?: Extern
     </div>
     <div hidden={!deploying}>{(deployVisited || deploying) && <FeatureRouter view="hub:deploy" ctx={ctx} onSelectMode={onSelectMode} />}</div>
     <div hidden={view !== 'hub:security'}>{(securityVisited || view === 'hub:security') && <SecurityHub onHome={() => onSelectMode('home')} onHub={h => onSelectMode(`hub:${h}`)} />}</div>
-    <div hidden={view !== 'hub:monitor'}>{(monitorVisited || view === 'hub:monitor') && <MonitorPage active={view === 'hub:monitor'} onOpenDeploy={() => onSelectMode('hub:deploy')} />}</div>
+    <div hidden={view !== 'hub:monitor'}>{(monitorVisited || view === 'hub:monitor') && <MonitorPage active={view === 'hub:monitor'} onOpenDeploy={() => onSelectMode('hub:deploy')} onOpenOperate={() => onSelectMode('operate')} />}</div>
     {view !== "code" && !deploying && view !== 'hub:security' && view !== 'hub:monitor' && <FeatureRouter view={view} ctx={ctx} externalTurn={externalTurn} onSelectMode={onSelectMode} />}
   </>;
 };

@@ -236,7 +236,7 @@ export const AwsPolicyGuide: React.FC<{ region?: string; ecsContext?: EcsPolicyC
         }}>{policy.policy_json}</pre>
         {policy.watcher_policy_json && !policy.is_academy_account && (
           <details data-testid="watcher-role-guide" style={{ marginTop: 12, fontSize: 11, lineHeight: 1.6 }}>
-            <summary style={{ cursor: "pointer" }}>24시간 감시자 역할(선택) — 원클릭 IAM 셋업을 안 쓸 때</summary>
+            <summary style={{ cursor: "pointer" }}>상시 감시 역할(선택) — 원클릭 IAM 셋업을 안 쓸 때</summary>
             <ol style={{ margin: "8px 0 0", paddingLeft: 18 }}>
               <li>IAM 콘솔 → 역할 → 역할 만들기 → 「사용자 지정 신뢰 정책」에 아래 신뢰 정책을 붙여 넣습니다.</li>
               <li>권한 단계는 건너뛰고, 역할 이름을 <code>{policy.watcher_role || "recoder-watcher"}</code> 로 만듭니다.</li>
@@ -244,7 +244,7 @@ export const AwsPolicyGuide: React.FC<{ region?: string; ecsContext?: EcsPolicyC
             </ol>
             <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
               <button style={smallButton} onClick={() => { setCopied(false); postMessage("aws.policy.copy", { text: policy.watcher_trust_json }); }}>신뢰 정책 복사</button>
-              <button style={smallButton} onClick={() => { setCopied(false); postMessage("aws.policy.copy", { text: policy.watcher_policy_json }); }}>감시자 권한 복사</button>
+              <button style={smallButton} onClick={() => { setCopied(false); postMessage("aws.policy.copy", { text: policy.watcher_policy_json }); }}>상시 감시 권한 복사</button>
             </div>
             <pre style={{ marginTop: 8, maxHeight: 200, overflow: "auto", background: "var(--vscode-textCodeBlock-background, #1e1e1e)", borderRadius: 5, padding: 10 }}>{policy.watcher_policy_json}</pre>
           </details>

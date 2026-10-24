@@ -286,7 +286,7 @@ def tick() -> dict:
     svc = _service()
     if svc.get("status") != "ACTIVE":
         #: 서비스가 지워졌거나(정리) 내려가는 중 — 장애로 세지 않고, 하루에 한 번만 알린다.
-        missing = raise_event("missing", "감시하던 ECS 서비스를 찾지 못했습니다(지워졌거나 비활성). 필요 없으면 VS Code 에서 감시자를 지우세요.",
+        missing = raise_event("missing", "감시하던 ECS 서비스를 찾지 못했습니다(지워졌거나 비활성). 필요 없으면 VS Code 에서 상시 감시를 지우세요.",
                               source="tick", severity="high")
         return {"missing": True, "raised": bool(missing)}
     desired, running = int(svc.get("desiredCount") or 0), int(svc.get("runningCount") or 0)
@@ -324,10 +324,10 @@ def notify(config: dict, kind: str, detail: str, *, link: str = "", mail: bool =
     service = _env("WATCH_SERVICE")
     lines = [f"[ReCoder] {service} — {TITLES.get(kind, kind)}", detail]
     if link:
-        lines += ["", "이전 버전으로 되돌리려면(12시간 안에 한 번만 쓸 수 있어요):", link,
-                  "코드 수정안은 VS Code 의 ReCoder 모니터에서 검토하세요."]
+        lines += ["", "이전 버전으로 되돌리려면(12시간 안에 한 번만 쓸 수 있습니다):", link,
+                  "코드 수정안은 VS Code 의 ReCoder Operate 화면에서 검토하세요."]
     else:
-        lines += ["", "자세한 내용은 VS Code 의 ReCoder 모니터에서 볼 수 있어요."]
+        lines += ["", "자세한 내용은 VS Code 의 ReCoder Operate 화면에서 확인하세요."]
     body = "\n".join(lines)
     sent = []
     topic = str(config.get("topic") or "") if mail else ""
@@ -414,7 +414,7 @@ def http(event: dict) -> dict:
     if not item or item.get("status") != "pending" or int(item.get("expires") or 0) <= now:
         why = "이미 사용했거나" if item and item.get("status") != "pending" else "만료됐거나 없는"
         return _page(410, "쓸 수 없는 링크입니다",
-                     f"<p>{why} 링크입니다. VS Code 의 ReCoder 모니터에서 지금 상태를 확인하세요.</p>")
+                     f"<p>{why} 링크입니다. VS Code 의 ReCoder Operate 화면에서 지금 상태를 확인하세요.</p>")
     target, from_td = str(item.get("target") or ""), str(item.get("from_td") or "")
     if method == "GET":
         #: 메일 보안 검사기·링크 미리보기가 GET 을 열어도 아무 일도 일어나지 않게 — 실행은 아래 버튼(POST)만.
@@ -471,7 +471,7 @@ def _approve(token_id: str, target: str, from_td: str, now: float) -> dict:
                 severity="info", cooldown=False, extra={"target": target, "from_td": from_td})
     return _page(200, "롤백을 시작했습니다",
                  f"<div class=\"box\"><b>{html.escape(service)}</b> 을 {html.escape(_rev(target))} 으로 되돌리는 중입니다. "
-                 "1~3분 뒤 반영됩니다.</div><p><small>원인 코드는 VS Code 의 ReCoder 모니터에서 확인하세요.</small></p>")
+                 "1~3분 뒤 반영됩니다.</div><p><small>원인 코드는 VS Code 의 ReCoder Operate 화면에서 확인하세요.</small></p>")
 
 
 def _mark(token_id: str, status: str) -> None:

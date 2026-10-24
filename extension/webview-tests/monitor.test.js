@@ -11,7 +11,7 @@ Module._resolveFilename=resolve;
 const React=require('react');const {renderToStaticMarkup}=require('react-dom/server');
 const model=require('../out/webview-test/components/monitorModel');
 const {MonitorView}=require('../out/webview-test/components/MonitorPage');
-const {HUBS}=require('../out/webview-test/components/Hubs');
+const {HUBS,hubOf}=require('../out/webview-test/components/Hubs');
 
 const NOW=Date.parse('2026-10-24T08:00:00Z');
 const T=(h)=>Math.round(NOW/1000-h*3600);
@@ -44,15 +44,15 @@ test('2.0.48 승인 대기: 열린 알림의 대응만(롤백은 감시자 카�
  const h=model.hero(cur(),items,2);
  assert.equal(h.title,'새 기록 2건 · 승인 대기 2건');assert.match(h.sub,/지금 app:4/);
  assert.equal(model.hero(cur({events:[],alerts:[],offers:[]}),[],0).title,'이상 없음');
- assert.match(model.hero(cur({watcher:{installed:false}}),[],0).title,/PC 가 꺼지면/);
- assert.match(model.hero(cur({watcher:{installed:true,healthy:false,waiting_first_tick:false,last_tick:T(2)}}),[],0).title,/감시자를 확인/);
+ assert.equal(model.hero(cur({watcher:{installed:false}}),[],0).title,'상시 감시 꺼짐');
+ assert.match(model.hero(cur({watcher:{installed:true,healthy:false,waiting_first_tick:false,last_tick:T(2)}}),[],0).title,/상시 감시를 확인/);
  assert.equal(model.minutesAgo(T(0.5),NOW),'30분 전');assert.equal(model.minutesAgo(undefined,NOW),'아직');
 });
 
 // ── 화면 ──
 test('2.0.49 모니터 화면: 상태 한 줄 · 할 일 · 지금 · 최근 기록 · 감시 — 자세한 것은 눌러야, 이모지 없음',()=>{
  const html=renderToStaticMarkup(React.createElement(MonitorView,{data:{monitors:[{key:'r/c/app',service:'app',region:'r',cluster:'c'}],current:cur(),seen:SK(5.5)},now:NOW}));
- assert.match(html,/<h1>모니터<\/h1>/);assert.match(html,/data-testid="mon-hero"[\s\S]*승인 대기 2건/);
+ assert.match(html,/<h1>Operate<\/h1>/);assert.match(html,/data-testid="mon-operate"[\s\S]*운영 대응/);assert.match(html,/data-testid="mon-hero"[\s\S]*승인 대기 2건/);
  assert.match(html,/data-testid="mon-offer"[\s\S]*이전 버전으로 되돌리기[\s\S]*app:4 → app:3/);assert.match(html,/1\.2\.3\.4 차단/);
  assert.equal((html.match(/data-testid="mon-alert"/g)||[]).length,1);
  assert.match(html,/data-testid="stat-tasks"[\s\S]*2<small>\/ 2<\/small>[\s\S]*app:4/);
@@ -69,21 +69,24 @@ test('2.0.49 모니터 화면: 상태 한 줄 · 할 일 · 지금 · 최근 기
 
 test('2.0.49 모니터 화면: 감시자 없음 · 앱 없음 · 서비스 없음',()=>{
  const setup=renderToStaticMarkup(React.createElement(MonitorView,{data:{monitors:[],current:cur({watcher:{installed:false},events:[],offers:[],alerts:[]})},now:NOW}));
- assert.match(setup,/data-testid="mon-setup"/);assert.match(setup,/data-testid="mon-plan"[^>]*>설치</);assert.match(setup,/PC 가 꺼지면/);
+ assert.match(setup,/data-testid="mon-setup"/);assert.match(setup,/data-testid="mon-plan"[^>]*>설치</);assert.match(setup,/상시 감시 꺼짐/);assert.doesNotMatch(setup,/어요|해요|봐요/);
  assert.match(setup,/data-testid="mon-empty-timeline"/);
  const plan={role:{arn:'arn:aws:iam::1:role/recoder-watcher',exists:false},resources:[{kind:'Lambda',name:'x',detail:'d'}],permissions:'p',cost:'c',notes:['역할이 없습니다']};
  const planned=renderToStaticMarkup(React.createElement(MonitorView,{data:{monitors:[],current:cur({watcher:{installed:false}})},plan,now:NOW}));
  assert.match(planned,/recoder-watcher · 없음/);assert.match(planned,/학교 계정은 LabRole/);assert.match(planned,/<button[^>]*aria-disabled="true"[^>]*data-testid="mon-install"/);
  assert.doesNotMatch(planned,/data-testid="mon-plan"/);
  const none=renderToStaticMarkup(React.createElement(MonitorView,{data:{monitors:[],current:null},now:NOW}));
- assert.match(none,/data-testid="mon-no-monitors"/);assert.match(none,/지켜볼 앱이 아직 없어요/);assert.match(none,/배포하러 가기/);
+ assert.match(none,/data-testid="mon-no-monitors"/);assert.match(none,/배포된 앱이 없습니다/);assert.match(none,/배포 캔버스 열기/);assert.match(none,/data-testid="mon-operate"/);
  const gone=renderToStaticMarkup(React.createElement(MonitorView,{data:{monitors:[],current:cur({service_state:{status:'INACTIVE',running:0,desired:0,revision:'',task_definition:''}})},now:NOW}));
- assert.match(gone,/서비스를 찾지 못했어요/);
+ assert.match(gone,/서비스를 찾지 못했습니다/);
  const unknown=renderToStaticMarkup(React.createElement(MonitorView,{data:{monitors:[],current:cur({watcher:{installed:null,error:'AccessDenied'}})},now:NOW}));
- assert.match(unknown,/감시자 상태를 확인하지 못했어요 — AccessDenied/);
+ assert.match(unknown,/상시 감시 상태를 확인하지 못했습니다 — AccessDenied/);
 });
 
-test('2.0.48 위쪽 탭에 Monitor',()=>{ assert.deepEqual(HUBS.map(h=>h.id),['develop','deploy','security','monitor']); });
+test('2.0.49 위쪽 탭: Develop · Deploy · Security · Operate, 운영 대응은 Operate 아래',()=>{
+ assert.deepEqual(HUBS.map(h=>h.title),['Develop','Deploy','Security','Operate']);
+ assert.equal(hubOf('operate'),'monitor');
+});
 
 // ── 밤사이 요약 ──
 function memento(init={}){const m=new Map(Object.entries(init));return {get:(k,d)=>m.has(k)?m.get(k):d,update:async(k,v)=>{m.set(k,v);},m};}
@@ -99,7 +102,7 @@ test('2.0.48 밤사이 요약: 본 뒤 생긴 기록 · 승인 대기를 알리�
  const state=memento({[SEEN_KEY]:{'r/c/app':SK(5.5)}});
  const d=new MonitorDigest(source,state,()=>opened.push(1),b=>badges.push(b),win,0,1e9);
  assert.deepEqual(await d.run(NOW),{fresh:1,pending:2});
- assert.equal(shown.length,1);assert.match(shown[0],/밤사이 1건 · 승인 대기 2건 — app/);
+ assert.equal(shown.length,1);assert.match(shown[0],/새 기록 1건 · 승인 대기 2건 — app/);
  assert.deepEqual(badges.at(-1),{'r/c/app':2});
  await new Promise(r=>setTimeout(r,5));assert.equal(opened.length,1);
  await d.run(NOW);assert.equal(shown.length,1,'같은 내용은 다시 알리지 않는다');

@@ -43,7 +43,7 @@ export const HUBS: Array<{ id: HubId; icon: HubIconName; title: string; subtitle
   { id: "deploy", icon: "rocket", title: "Deploy", subtitle: "로컬 Docker부터 AWS까지", accent: "#f0b35b" },
   { id: "security", icon: "shield", title: "Security", subtitle: "배포 전 검사와 정책", accent: "#ef6b6b" },
   //: 2.0.48 — 기능 카드 없이 모니터 화면 하나(App 의 HubRouter 가 그린다)
-  { id: "monitor", icon: "activity", title: "Monitor", subtitle: "밤사이 일 · 승인 대기 · 24시간 감시자", accent: "#4ec9b0" },
+  { id: "monitor", icon: "activity", title: "Operate", subtitle: "배포 후 상태와 대응", accent: "#4ec9b0" },
 ];
 
 export const FEATURES: FeatureDef[] = [
@@ -56,7 +56,7 @@ export const FEATURES: FeatureDef[] = [
   { id: "ship", hub: "deploy", icon: "box", title: "로컬 Docker 배포", desc: "Dockerfile 생성 → 검사 → build → run → 헬스체크. 실패하면 이전 이미지로 되돌립니다.", action: "시작", primary: true, gate: (c) => ({ enabled: c.isDockerReady, hint: "Docker 필요" }) },
   { id: "deploy", hub: "deploy", icon: "cloud-upload", title: "배포 캔버스", desc: "프로젝트를 Docker · GitHub · ECS · S3로 연결하고, 승인과 보안 검사부터 실행 상태까지 확인합니다.", action: "열기", primary: true },
   { id: "replay", hub: "deploy", icon: "history", title: "롤백 · Replay", desc: "저장된 배포·롤백 이력을 보고 이전 버전 복귀 대상을 확인합니다.", action: "이력 보기" },
-  { id: "operate", hub: "deploy", icon: "activity", title: "운영 대응", desc: "장애 감지 → 원인 분석 → 조치 제안. 실행은 승인 후에만.", action: "열기", gate: (c) => ({ enabled: c.isOpsReady, hint: "AI · AWS 연결 필요" }) },
+  { id: "operate", hub: "monitor", icon: "activity", title: "운영 대응", desc: "장애 감지 → 원인 분석 → 조치 제안. 실행은 승인 후에만.", action: "열기", gate: (c) => ({ enabled: c.isOpsReady, hint: "AI · AWS 연결 필요" }) },
 
   { id: "scan", hub: "security", icon: "search", title: "취약점 스캔", desc: "이미지·의존성과 Dockerfile의 문제를 확인하세요.", action: "스캔", primary: true },
   { id: "secrets", hub: "security", icon: "key", title: "시크릿 검사", desc: "소스에 남은 API 키와 비밀번호를 검사하세요.", action: "검사" },

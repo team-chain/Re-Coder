@@ -40,7 +40,7 @@ const KIND_ICON: Record<string, string> = {
 export const kindIcon = (kind: string) => KIND_ICON[kind] ?? "alert";
 
 const SOURCE_TEXT: Record<string, string> = {
-  alarm: "감시자 · 경보", ecs: "감시자 · ECS", tick: "감시자 · 5분 확인", link: "승인 링크", vscode: "VS Code", core: "VS Code 가 켜져 있을 때",
+  alarm: "상시 감시 · 경보", ecs: "상시 감시 · ECS", tick: "상시 감시 · 5분 확인", link: "승인 링크", vscode: "VS Code", core: "VS Code 가 켜져 있을 때",
 };
 export const sourceText = (source: string) => SOURCE_TEXT[source] ?? source;
 
@@ -82,20 +82,20 @@ export function pendingAlerts(cur: Pick<MonitorCurrentView, "alerts">): AlertVie
 export function hero(cur: MonitorCurrentView, items: TimelineItem[], pending: number): { title: string; sub: string; tone: "ok" | "warn" | "bad" | "off" } {
   const fresh = items.filter((i) => i.fresh && i.tone !== "info").length;
   const rev = cur.service_state?.revision ? `지금 ${cur.service_state.revision}` : "";
-  const ticks = cur.watcher.ticks ? `감시자 ${cur.watcher.ticks.toLocaleString()}번 확인` : "";
+  const ticks = cur.watcher.ticks ? `상시 감시 ${cur.watcher.ticks.toLocaleString()}회 확인` : "";
   if (cur.service_state && cur.service_state.status !== "ACTIVE") {
-    return { title: "서비스를 찾지 못했어요", sub: "지워졌거나 다른 리전일 수 있어요 — 정리 화면에서 확인하세요", tone: "bad" };
+    return { title: "서비스를 찾지 못했습니다", sub: "지워졌거나 다른 리전일 수 있습니다 — 정리 화면에서 확인하세요", tone: "bad" };
   }
   if (!cur.watcher.installed) {
-    return { title: pending ? `승인 대기 ${pending}건` : "PC 가 꺼지면 아무도 안 봐요",
-      sub: "24시간 감시자를 설치하면 밤에도 감지 · 기록 · 알림을 해요" + (rev ? ` · ${rev}` : ""), tone: pending ? "warn" : "off" };
+    return { title: pending ? `승인 대기 ${pending}건` : "상시 감시 꺼짐",
+      sub: "설치하면 VS Code 가 꺼져 있어도 감지 · 기록 · 알림합니다" + (rev ? ` · ${rev}` : ""), tone: pending ? "warn" : "off" };
   }
-  const healthyNote = cur.watcher.healthy === false && !cur.watcher.waiting_first_tick ? "감시자 확인이 멈췄어요 — 설정을 확인하세요" : "";
+  const healthyNote = cur.watcher.healthy === false && !cur.watcher.waiting_first_tick ? "상시 감시 확인이 멈췄습니다 — 설정을 확인하세요" : "";
   if (fresh || pending) {
     return { title: [fresh ? `새 기록 ${fresh}건` : "", pending ? `승인 대기 ${pending}건` : ""].filter(Boolean).join(" · "),
       sub: [rev, healthyNote || ticks].filter(Boolean).join(" · "), tone: items.some((i) => i.fresh && i.tone === "bad") ? "bad" : "warn" };
   }
-  return { title: healthyNote ? "감시자를 확인하세요" : "이상 없음", sub: [rev, healthyNote || ticks].filter(Boolean).join(" · "),
+  return { title: healthyNote ? "상시 감시를 확인하세요" : "이상 없음", sub: [rev, healthyNote || ticks].filter(Boolean).join(" · "),
     tone: healthyNote ? "warn" : "ok" };
 }
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.50 — 2026-10-24 (Preview)
+
+**Monitor → Operate**
+- 위쪽 탭 이름을 **Operate**(배포 후 상태와 대응)로 바꿨습니다. Develop → Deploy → Security → Operate 순서입니다.
+- 「운영 대응」이 Operate 아래로 옮겨졌습니다(Operate 화면 맨 아래 「대응」).
+- 「24시간 감시자」를 「상시 감시」로, 화면 · 알림 · 메일 문구를 다른 화면과 같은 말투로 맞췄습니다.
+
 ## 2.0.49 — 2026-10-24 (Preview)
 
 **모니터 화면을 단순하게**

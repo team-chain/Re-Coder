@@ -1,5 +1,5 @@
 /**
- * 2.0.49 모니터 — 지금 괜찮은지 · 내가 할 일 · 최근 기록, 이 세 가지만 한 줄로 쭉.
+ * 2.0.49 Operate — 지금 괜찮은지 · 내가 할 일 · 최근 기록, 이 세 가지만 한 줄로 쭉.
  *
  *  · 처음 보이는 것은 상태 한 줄과 할 일뿐. 자세한 내용(기록 설명 · 감시 설정)은 눌러야 펼친다.
  *  · 밤에는 감시자가 감지 · 기록 · 알림 · 준비까지만 한다. AWS 를 바꾸는 버튼은 모두 확인을 한 번 더 거친다.
@@ -100,6 +100,7 @@ export interface MonitorViewProps {
   onSelect?: (key: string) => void;
   onRefresh?: () => void;
   onOpenDeploy?: () => void;
+  onOpenOperate?: () => void;
   onPlan?: (role: string) => void;
   onInstall?: (role: string, discord: string) => void;
   onUninstall?: () => void;
@@ -125,7 +126,7 @@ function Todo({ cur, busy, onRollback, onAct }: { cur: MonitorCurrentView; busy?
   if (!cur.offers.length && !alerts.length) return null;
   return (
     <>
-      <div className="label"><span>할 일</span><span>승인 전에는 아무것도 바뀌지 않아요</span></div>
+      <div className="label"><span>할 일</span><span>승인 전에는 바뀌지 않습니다</span></div>
       <div className="card">
         {cur.offers.map((o) => {
           const id = `rb:${o.target}`;
@@ -136,7 +137,7 @@ function Todo({ cur, busy, onRollback, onAct }: { cur: MonitorCurrentView; busy?
                 <div className="tx"><b>이전 버전으로 되돌리기</b><small>{o.title} · {revOf(o.from_td)} → {revOf(o.target)}</small></div>
                 {ask !== id && <div className="acts"><Button small onClick={() => setAsk(id)} disabled={!!busy} testId="mon-rollback">되돌리기</Button></div>}
               </div>
-              {ask === id && <Confirm testId="mon-rollback-confirm" text={<><b>{revOf(o.target)}</b> 로 되돌려요 · 무중단 1~3분</>} label="승인" busy={busy === "rollback"}
+              {ask === id && <Confirm testId="mon-rollback-confirm" text={<><b>{revOf(o.target)}</b> 로 되돌립니다 · 무중단 1~3분</>} label="승인" busy={busy === "rollback"}
                 onYes={() => onRollback?.(o)} onNo={() => setAsk("")} />}
             </React.Fragment>
           );
@@ -185,7 +186,7 @@ function Records({ items, now }: { items: TimelineItem[]; now: Date }) {
     <>
       <div className="label"><span>최근 기록</span>{items.length > 5 && <button type="button" onClick={() => setAll(!all)}>{all ? "접기" : `전체 ${Math.min(items.length, 30)}개`}</button>}</div>
       {!items.length
-        ? <div className="card empty" data-testid="mon-empty-timeline">아직 기록이 없어요</div>
+        ? <div className="card empty" data-testid="mon-empty-timeline">기록 없음</div>
         : <div className="card" data-testid="mon-timeline">
             {shown.map((i) => (
               <React.Fragment key={i.id}>
@@ -216,14 +217,14 @@ function Watcher({ cur, plan, busy, now, onPlan, onInstall, onUninstall, onSetti
   //: 설치 → 설치됨처럼 카드가 바뀌면 열려 있던 확인 단계를 닫는다(설치 확인이 '지우기' 확인으로 이어지지 않게).
   useEffect(() => { setAsk(false); setOpen(false); }, [w.installed]);
   if (w.installed === null) {
-    return <div className="card watch"><Line icon="alert" tone="warn">감시자 상태를 확인하지 못했어요 — {w.error || "AWS 연결을 확인하세요"}</Line></div>;
+    return <div className="card watch"><Line icon="alert" tone="warn">상시 감시 상태를 확인하지 못했습니다 — {w.error || "AWS 연결을 확인하세요"}</Line></div>;
   }
   if (!w.installed) {
     return (
       <div className="card" data-testid="mon-setup">
         <div className="watch">
           <span className="ib"><Icon name="shield" size={16} /></span>
-          <div className="tx"><b>24시간 감시자</b><small>PC 가 꺼져 있어도 내 AWS 안에서 지켜봐요 · 월 $0.1 미만</small></div>
+          <div className="tx"><b>상시 감시</b><small>PC 가 꺼져 있어도 감지 · 월 $0.1 미만</small></div>
           {!plan && <div className="acts"><Button small onClick={() => onPlan?.(role)} disabled={!!busy} testId="mon-plan">{busy === "plan" ? "확인 중…" : "설치"}</Button></div>}
         </div>
         {plan && (
@@ -235,12 +236,12 @@ function Watcher({ cur, plan, busy, now, onPlan, onInstall, onUninstall, onSetti
             </div>
             {plan.notes.map((n) => <Line key={n} icon="alert" tone="warn">{n}</Line>)}
             {plan.role.exists === false && (
-              <div className="field"><input className="rk-input" aria-label="감시자 역할" placeholder="다른 역할 이름 · 학교 계정은 LabRole" value={role} onChange={(e) => setRole(e.target.value)} />
+              <div className="field"><input className="rk-input" aria-label="상시 감시 역할" placeholder="다른 역할 이름 · 학교 계정은 LabRole" value={role} onChange={(e) => setRole(e.target.value)} />
                 <Button small variant="ghost" onClick={() => onPlan?.(role)} disabled={!!busy}>다시 확인</Button></div>
             )}
             <div className="field"><input className="rk-input" aria-label="디스코드 웹후크" placeholder="디스코드 웹후크(선택)" value={discord} onChange={(e) => setDiscord(e.target.value)} /></div>
             {ask
-              ? <div style={{ marginTop: 12 }}><Confirm testId="mon-install-confirm" text="위 리소스를 내 AWS 에 만들어요 · 언제든 지울 수 있어요" label="승인하고 설치" busy={busy === "install"}
+              ? <div style={{ marginTop: 12 }}><Confirm testId="mon-install-confirm" text="위 리소스를 AWS 에 만듭니다 · 언제든 지울 수 있습니다" label="승인하고 설치" busy={busy === "install"}
                   onYes={() => onInstall?.(role, discord)} onNo={() => setAsk(false)} /></div>
               : <div className="foot"><Button onClick={() => setAsk(true)} disabled={!!busy || plan.role.exists === false} testId="mon-install">설치</Button></div>}
           </div>
@@ -253,23 +254,23 @@ function Watcher({ cur, plan, busy, now, onPlan, onInstall, onUninstall, onSetti
     <div className="card" data-testid="mon-watcher">
       <div className="watch">
         <span className={`ib ${w.healthy || w.waiting_first_tick ? "" : "warn"}`}><Icon name="shield" size={16} /></span>
-        <div className="tx"><b>24시간 감시자</b><small>{state} · {[w.mail ? "메일" : "", w.discord ? "디스코드" : ""].filter(Boolean).join(" · ") || "VS Code 알림만"}</small></div>
+        <div className="tx"><b>상시 감시</b><small>{state} · {[w.mail ? "메일" : "", w.discord ? "디스코드" : ""].filter(Boolean).join(" · ") || "VS Code 알림만"}</small></div>
         <div className="acts"><Button small variant="ghost" onClick={() => setOpen(!open)} testId="mon-watch-settings">{open ? "닫기" : "설정"}</Button></div>
       </div>
       {open && (
         <div className="panel">
-          <div className="kv"><span>밤 롤백 링크</span><b>{w.approval_link ? (w.stable ? `${w.stable} 로` : "다음 배포부터") : "꺼짐 · VS Code 에서 승인"}</b></div>
+          <div className="kv"><span>롤백 승인 링크</span><b>{w.approval_link ? (w.stable ? `${w.stable} 로` : "다음 배포부터") : "꺼짐 · VS Code 에서 승인"}</b></div>
           <div className="kv"><span>자동 실행</span><b>꺼짐 · 모두 승인 후</b></div>
           <div className="field"><input className="rk-input" aria-label="디스코드 웹후크" placeholder={w.discord ? "새 디스코드 웹후크" : "디스코드 웹후크"} value={discord} onChange={(e) => setDiscord(e.target.value)} />
             <Button small variant="ghost" onClick={() => { onSettings?.({ discord }); setDiscord(""); }} disabled={!!busy || !discord.trim()}>저장</Button></div>
           <div className="field"><input className="rk-input" aria-label="알림 메일" placeholder="알림 받을 메일" value={email} onChange={(e) => setEmail(e.target.value)} />
             <Button small variant="ghost" onClick={() => { onSettings?.({ email }); setEmail(""); }} disabled={!!busy || !email.trim()}>구독</Button></div>
           {ask
-            ? <div style={{ marginTop: 12 }}><Confirm testId="mon-uninstall-confirm" text="감시자와 기록을 지워요" label="지우기" busy={busy === "uninstall"}
+            ? <div style={{ marginTop: 12 }}><Confirm testId="mon-uninstall-confirm" text="상시 감시와 기록을 지웁니다" label="지우기" busy={busy === "uninstall"}
                 onYes={() => onUninstall?.()} onNo={() => setAsk(false)} /></div>
             : <div className="foot">
                 {w.discord && <Button small variant="ghost" onClick={() => onSettings?.({ discord: "" })} disabled={!!busy}>디스코드 끄기</Button>}
-                <Button small variant="ghost" onClick={() => setAsk(true)} disabled={!!busy} testId="mon-uninstall">감시자 지우기</Button>
+                <Button small variant="ghost" onClick={() => setAsk(true)} disabled={!!busy} testId="mon-uninstall">상시 감시 지우기</Button>
               </div>}
         </div>
       )}
@@ -279,7 +280,7 @@ function Watcher({ cur, plan, busy, now, onPlan, onInstall, onUninstall, onSetti
 
 /** 확장과 주고받지 않는 화면(서버 렌더 테스트 · 하네스가 그대로 그린다). */
 export function MonitorView(props: MonitorViewProps) {
-  const { data, loading, error, message, busy, plan, onSelect, onRefresh, onOpenDeploy } = props;
+  const { data, loading, error, message, busy, plan, onSelect, onRefresh, onOpenDeploy, onOpenOperate } = props;
   const now = props.now ?? Date.now();
   const cur = data?.current ?? null;
   const items = useMemo(() => (cur ? timeline(cur, data?.seen ?? "") : []), [cur, data?.seen]);
@@ -289,7 +290,7 @@ export function MonitorView(props: MonitorViewProps) {
     <Kit className="rc-mon" data-testid="monitor">
       <style>{CSS}</style>
       <div className="hd">
-        <h1>모니터</h1>
+        <h1>Operate</h1>
         {cur && (
           <span className="app" title={`${cur.cluster} · ${cur.region}`}><Logo kind="ecs" />
             {data!.monitors.length > 1
@@ -306,9 +307,9 @@ export function MonitorView(props: MonitorViewProps) {
       {error && <div className="msg"><Line icon="alert" tone="bad">{error}</Line></div>}
       {!cur && !loading && !error && (
         <div className="card empty" data-testid="mon-no-monitors">
-          <Icon name="pulse" size={22} /><b>지켜볼 앱이 아직 없어요</b>
-          ECS 로 배포하면 여기에 나타나요
-          <div className="foot" style={{ justifyContent: "center" }}><Button small onClick={onOpenDeploy}>배포하러 가기</Button></div>
+          <Icon name="pulse" size={22} /><b>배포된 앱이 없습니다</b>
+          ECS 로 배포하면 여기에 표시됩니다
+          <div className="foot" style={{ justifyContent: "center" }}><Button small onClick={onOpenDeploy}>배포 캔버스 열기</Button></div>
         </div>
       )}
       {cur && h && (
@@ -325,12 +326,22 @@ export function MonitorView(props: MonitorViewProps) {
             onUninstall={props.onUninstall} onSettings={props.onSettings} />
         </>
       )}
+      {(cur || (!loading && !error)) && (
+        <>
+          <div className="label"><span>대응</span></div>
+          <div className="card watch" data-testid="mon-operate">
+            <span className="ib"><Icon name="pulse" size={16} /></span>
+            <div className="tx"><b>운영 대응</b><small>원인 분석 · 조치 제안</small></div>
+            <div className="acts"><Button small variant="ghost" onClick={onOpenOperate} testId="mon-open-operate">열기</Button></div>
+          </div>
+        </>
+      )}
     </Kit>
   );
 }
 
 /** 확장과 주고받는 쪽. active 일 때만 1분마다 새로 고치고, 본 기록을 '봤음'으로 남긴다. */
-export const MonitorPage: React.FC<{ active: boolean; onOpenDeploy: () => void }> = ({ active, onOpenDeploy }) => {
+export const MonitorPage: React.FC<{ active: boolean; onOpenDeploy: () => void; onOpenOperate?: () => void }> = ({ active, onOpenDeploy, onOpenOperate }) => {
   const { postMessage, useMessage } = useVSCodeApi();
   const [data, setData] = useState<MonitorData | null>(null);
   const [key, setKey] = useState("");
@@ -369,7 +380,7 @@ export const MonitorPage: React.FC<{ active: boolean; onOpenDeploy: () => void }
       //: 1분 새로 고침의 오류가 진행 중인 설치 · 롤백 버튼을 다시 켜지 않게 — 그 요청의 오류(op)일 때만 푼다.
       setLoading(false);
       if (p.op) { setBusy(""); }
-      setError(String(p.message ?? "모니터를 불러오지 못했습니다").replace(/^Error:\s*/, ""));
+      setError(String(p.message ?? "상태를 불러오지 못했습니다").replace(/^Error:\s*/, ""));
     }
     if (event.type === "monitor.plan") { setBusy(""); setError(""); setPlan(p as unknown as MonitorViewProps["plan"]); }
     if (event.type === "monitor.done") {
@@ -397,6 +408,7 @@ export const MonitorPage: React.FC<{ active: boolean; onOpenDeploy: () => void }
       onSelect={(k) => { setKey(k); setPlan(null); setMessage(null); load(k); }}
       onRefresh={() => load()}
       onOpenDeploy={onOpenDeploy}
+      onOpenOperate={onOpenOperate}
       onPlan={(role) => run("plan", "monitor.watch.plan", { role })}
       onInstall={(role, discord) => run("install", "monitor.watch.install", { role, discord, approved: true })}
       onUninstall={() => run("uninstall", "monitor.watch.uninstall", { approved: true })}

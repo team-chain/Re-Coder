@@ -35,7 +35,7 @@ export function digestText(items: Array<{ service: string; fresh: number; pendin
     const fresh = busy.reduce((n, i) => n + i.fresh, 0);
     const pending = busy.reduce((n, i) => n + i.pending, 0);
     const who = busy.map(i => i.service).slice(0, 3).join(', ') + (busy.length > 3 ? ` 외 ${busy.length - 3}개` : '');
-    return `[ReCoder] ${fresh ? `밤사이 ${fresh}건` : '새 기록 없음'}${pending ? ` · 승인 대기 ${pending}건` : ''} — ${who}`;
+    return `[ReCoder] ${fresh ? `새 기록 ${fresh}건` : '새 기록 없음'}${pending ? ` · 승인 대기 ${pending}건` : ''} — ${who}`;
 }
 
 export class MonitorDigest implements vscode.Disposable {
@@ -91,8 +91,8 @@ export class MonitorDigest implements vscode.Disposable {
             if ((fresh || pending) && signature !== told) {
                 await this.state.update(TOLD_KEY, signature);
                 const show = pending ? this.window.showWarningMessage : this.window.showInformationMessage;
-                void Promise.resolve(show(digestText(items), '모니터 열기')).then(choice => {
-                    if (choice === '모니터 열기') { this.openMonitor(); }
+                void Promise.resolve(show(digestText(items), 'Operate 열기')).then(choice => {
+                    if (choice === 'Operate 열기') { this.openMonitor(); }
                 });
             }
             return { fresh, pending };

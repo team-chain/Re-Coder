@@ -1,3 +1,9 @@
+# Monitor → Operate (2026-10-24, 2.0.50)
+
+- 사용자 피드백: 「모니터」 이름 · 말투가 기존 톤과 안 맞음 → 탭 제목 Operate(부제 「배포 후 상태와 대응」). 내부 id 는 그대로 monitor(hub:monitor, monitor.* 메시지, testid mon-*).
+- FEATURES 의 operate(운영 대응) hub 를 deploy → monitor 로 — 브레드크럼 · 위쪽 탭 강조가 Operate. Operate 화면 맨 아래 「대응」 줄(testid mon-operate → onOpenOperate).
+- 사용자에게 보이는 문구: 「24시간 감시자」→「상시 감시」, 「밤사이」→「새 기록」, 「모니터 열기」→「Operate 열기」, 「VS Code 모니터」→「VS Code 의 Operate 화면」, 화면 문구 ~요 → ~합니다(core watcher · ops_watch · handler 메시지 포함, 주석 · 로그는 그대로).
+
 # 모니터 화면 단순화 (2026-10-24, 2.0.49)
 
 - 사용자 피드백: 모니터가 빼곡하다(어제 다른 화면과 같은 문제). MonitorPage 보기 부분을 한 열(최대 720px)로 다시 씀 — 머리(모니터 · 서비스 칩 · 새로 고침 아이콘) · 상태 카드 · 할 일(롤백 제안 · 열린 알림, 버튼 최대 2개, 누르면 확인) · 지금(통계 3칸) · 최근 기록(5줄, 눌러야 설명, 「전체 n개」) · 감시(한 줄, 「설정」을 눌러야 펼침). 기능 · 메시지 · 승인 흐름은 2.0.48 그대로.

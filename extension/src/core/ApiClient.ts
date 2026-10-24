@@ -1806,7 +1806,7 @@ export class ApiClient {
         if (key) { qs.set('key', key); }
         if (light) { qs.set('light', 'true'); }
         const resp = await this.request<MonitorOverview>('GET', `/api/ops/watch/overview${qs.toString() ? `?${qs}` : ''}`, undefined, false, 90000);
-        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '모니터 정보를 불러오지 못했습니다'); }
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '운영 상태를 불러오지 못했습니다'); }
         return resp.data;
     }
 
@@ -1820,13 +1820,13 @@ export class ApiClient {
     /** POST /api/ops/watch/install — 승인한 뒤에만. IAM 역할 전파를 기다릴 수 있어 넉넉히. */
     async watchInstall(key: string, role: string, discord: string, approved: boolean): Promise<WatchResult> {
         const resp = await this.request<WatchResult>('POST', '/api/ops/watch/install', { key, role, discord, approved }, false, 300000);
-        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '감시자를 설치하지 못했습니다'); }
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '상시 감시를 설치하지 못했습니다'); }
         return resp.data;
     }
 
     async watchUninstall(key: string, approved: boolean): Promise<WatchResult> {
         const resp = await this.request<WatchResult>('POST', '/api/ops/watch/uninstall', { key, approved }, false, 180000);
-        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '감시자를 지우지 못했습니다'); }
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '상시 감시를 지우지 못했습니다'); }
         return resp.data;
     }
 

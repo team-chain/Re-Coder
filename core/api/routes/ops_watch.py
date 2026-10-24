@@ -120,9 +120,9 @@ def overview(key: str = "", now: Optional[float] = None, *, light: bool = False)
         try:
             evts = watcher.events(session, region=m["region"], cluster=m["cluster"], service=m["service"], limit=100)
         except Exception as exc:  # noqa: BLE001
-            gaps.append(f"감시자 기록을 읽지 못했습니다: {watcher._msg(exc)}")
+            gaps.append(f"상시 감시 기록을 읽지 못했습니다: {watcher._msg(exc)}")
     elif status.get("installed") is None:
-        gaps.append(f"감시자 상태를 확인하지 못했습니다: {status.get('error', '')}")
+        gaps.append(f"상시 감시 상태를 확인하지 못했습니다: {status.get('error', '')}")
     cur["events"] = evts
     cur["offers"] = watcher.offers(evts, current_td, now=now) if current_td else []
     cur["alerts"] = [a for a in ops_alerts.alerts() if a.get("key") == m["key"]][-50:]
