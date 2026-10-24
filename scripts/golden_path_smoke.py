@@ -540,7 +540,7 @@ def step6_deploy(client, token: str, static_files: list[dict]) -> dict:
     _step(6, "S3 정적 배포 (/api/deploy/s3)")
     resp = client.post(
         "/api/deploy/s3",
-        json={"project": PROJECT_NAME, "region": REGION, "files": static_files},
+        json={"approved": True, "project": PROJECT_NAME, "region": REGION, "files": static_files},
         headers=_headers(token),
     )
     if resp.status_code != 200:

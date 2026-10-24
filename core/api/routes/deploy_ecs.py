@@ -119,6 +119,22 @@ class ExtensionEcsDeployRequest(BaseModel):
     skip_opa: bool = False
     #: 0 으로 주면 서비스만 만들고 태스크는 안 띄운다(과금 0원).
     desired_count: Optional[int] = None
+    #: 3.0.2 — 사용자가 배포 확인 단계에서 승인한 결과. `True` 가 아니면 400.
+    approved: Any = None
+
+
+ECS_STOP_APPROVAL_REQUIRED = "서비스 중지는 사용자 확인이 필요합니다. 화면에서 중지를 확인한 뒤 다시 시도하세요."
+
+
+def require_deploy_approval(approved: Any) -> None:
+    """승인 없는 배포 요청 거절 — 403 이 아니라 400 이다(확장은 403 을 토큰 갱신 뒤 재시도한다)."""
+    from api.routes.ecs import ECS_DEPLOY_APPROVAL_REQUIRED
+
+    if approved is not True:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "approval_required", "message": ECS_DEPLOY_APPROVAL_REQUIRED},
+        )
 
 
 class EcsDeployStatusResponse(BaseModel):
@@ -470,6 +486,8 @@ async def deploy_ecs(
     """확장의 ECS 배포 버튼. 예전에는 이 주소가 없어서 404 였다."""
     from api.routes import ecs as ecs_routes
 
+    require_deploy_approval(body.approved)
+
     # `to_core_request` 는 이제 **필드 변환만** 한다 — git 도 파일 접근도
     # 없다. 브랜치 판정은 두 라우트의 합류점인 `ecs.start_deployment` 이
     # executor 에서 한 번만 한다. 그래서 여기서 스레드로 넘기지 않는다.
@@ -710,6 +728,12 @@ class EcsStopRequest(BaseModel):
     ecs_cluster: Optional[str] = None
     ecs_service: Optional[str] = None
     aws_region: Optional[str] = None
+    #: 3.0.2 — 사용자가 확인 창에서 중지를 고른 결과. `True` 가 아니면 400.
+    approved: Any = None
+
+
+class _NotManagedService(Exception):
+    pass
 
 
 class EcsStopResponse(BaseModel):
@@ -735,6 +759,12 @@ async def stop_ecs_service(body: EcsStopRequest) -> EcsStopResponse:
     from core import aws_infra
     from core.schemas import ECSDeployRequest as _Req
 
+    if body.approved is not True:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "approval_required", "message": ECS_STOP_APPROVAL_REQUIRED},
+        )
+
     cluster = (body.ecs_cluster or "").strip() or DEFAULT_CLUSTER
     service = (body.ecs_service or "").strip() or DEFAULT_SERVICE
     region = (body.aws_region or "").strip() or _Req(
@@ -744,7 +774,14 @@ async def stop_ecs_service(body: EcsStopRequest) -> EcsStopResponse:
     def _work() -> int:
         import boto3
 
+        from api.routes import aws_cleanup as cleanup_routes
+
         ecs = boto3.session.Session(region_name=region).client("ecs")
+        #: ReCoder 가 만든 서비스(태그·배포 기록)만 끈다 — 같은 계정의 다른 운영 서비스를 0 으로 내리지 않는다.
+        if not cleanup_routes.is_recoder_managed_service(
+            ecs, region=region, cluster=cluster, service=service
+        ):
+            raise _NotManagedService()
         return aws_infra.scale_service(
             ecs, cluster=cluster, service=service, desired_count=0
         )
@@ -752,6 +789,13 @@ async def stop_ecs_service(body: EcsStopRequest) -> EcsStopResponse:
     loop = _asyncio.get_running_loop()
     try:
         desired = await loop.run_in_executor(None, _work)
+    except _NotManagedService as exc:
+        from api.routes import aws_cleanup as cleanup_routes
+
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "not_managed", "message": cleanup_routes.NOT_MANAGED},
+        ) from exc
     except aws_infra.InfraError as exc:
         raise HTTPException(
             status_code=400,

@@ -93,6 +93,6 @@ def test_push_preserves_origin_and_never_writes_credentials(agent, monkeypatch, 
 def test_unauthenticated_push_is_an_actionable_error(agent, monkeypatch):
     agent._token = ''
     monkeypatch.setattr(gh, 'get_github_agent', lambda: agent)
-    result = asyncio.run(github.git_push_route({'workspace_path': '/fixture', 'auto_commit': False}))
+    result = asyncio.run(github.git_push_route({'workspace_path': '/fixture', 'auto_commit': False, 'approved': True}))
     assert result['status'] == 'error'
     assert 'GitHub 로그인' in result['message']

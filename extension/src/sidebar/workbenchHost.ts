@@ -179,12 +179,23 @@ export abstract class WorkbenchHost {
                     this._post({ type: 'wb.gh.createRepoResult', payload: { ok: false, error: '레포 이름이 비어 있음' } });
                     break;
                 }
+                //: 3.0.2 — 저장소를 만들고 이 폴더를 올리는 작업이라 확인 창에서 승인한 뒤에만.
+                const repoAction = '만들고 올리기';
+                const repoChoice = await vscode.window.showWarningMessage(
+                    `GitHub 에 ${p.private ? '비공개' : '공개'} 저장소 ${String(p.name)} 을(를) 만들고 이 폴더(${wsPath})의 커밋을 올립니다. 계속하시겠습니까?`,
+                    { modal: true }, repoAction,
+                );
+                if (repoChoice !== repoAction) {
+                    this._post({ type: 'wb.gh.createRepoResult', payload: { ok: false, error: '저장소 만들기를 취소했습니다. GitHub 는 바뀌지 않았습니다.' } });
+                    break;
+                }
                 try {
                     const result = await this._apiClient.githubCreateRepo({
                         workspace_path: wsPath,
                         name: String(p.name),
                         private: !!p.private,
                         description: (p.description as string) || '',
+                        approved: true,
                     });
                     const url = result.html_url ?? '';
                     const failed = workbenchFailure(result);
@@ -206,11 +217,22 @@ export abstract class WorkbenchHost {
                     this._post({ type: 'wb.gh.secretResult', payload: { ok: false, error: 'repo / name / value 모두 필요' } });
                     break;
                 }
+                //: 3.0.2 — Actions Secret 은 같은 이름이 있으면 덮어쓴다. 확인 창에서 승인한 뒤에만.
+                const secretAction = 'Secret 저장';
+                const secretChoice = await vscode.window.showWarningMessage(
+                    `${String(p.repo)} 저장소의 GitHub Actions Secret ${String(p.name)} 을(를) 저장합니다. 같은 이름의 Secret 이 있으면 새 값으로 바뀝니다. 계속하시겠습니까?`,
+                    { modal: true }, secretAction,
+                );
+                if (secretChoice !== secretAction) {
+                    this._post({ type: 'wb.gh.secretResult', payload: { ok: false, error: 'Secret 저장을 취소했습니다. GitHub 는 바뀌지 않았습니다.' } });
+                    break;
+                }
                 try {
                     const r = await this._apiClient.githubSetSecret({
                         repo: String(p.repo),
                         name: String(p.name),
                         value: String(p.value),
+                        approved: true,
                     });
                     const failed = workbenchFailure(r);
                     if (failed) { throw new Error(failed); }
@@ -232,11 +254,36 @@ export abstract class WorkbenchHost {
                     this._post({ type: 'wb.gh.pushResult', payload: { ok: false, error: '워크스페이스가 열려 있지 않음' } });
                     break;
                 }
+                //: 3.0.2 — 이미 커밋한 것만 올린다(auto_commit:false — 예전에는 작업 트리 전체를 자동 커밋했다).
+                //: 확인 창을 거치고, 강제 push 는 더 강한 두 번째 확인을 따로 받는다.
+                const force = p.force === true;
+                const branch = String((p.branch as string) || '').trim();
+                const pushAction = force ? '강제 push 계속' : 'push';
+                const pushChoice = await vscode.window.showWarningMessage(
+                    pushConfirmText(wsPath, branch, force), { modal: true }, pushAction,
+                );
+                if (pushChoice !== pushAction) {
+                    this._post({ type: 'wb.gh.pushResult', payload: { ok: false, error: 'push 를 취소했습니다. 원격 저장소는 바뀌지 않았습니다.' } });
+                    break;
+                }
+                if (force) {
+                    const forceAction = '원격 기록 덮어쓰기';
+                    const forceChoice = await vscode.window.showWarningMessage(
+                        `강제 push 는 원격 브랜치${branch ? ` ${branch}` : ''}의 기록을 지금 로컬 기록으로 바꿉니다. 다른 사람이 올린 커밋이 사라질 수 있습니다(원격이 마지막으로 본 상태와 다르면 Core 가 --force-with-lease 로 거절합니다). 정말 덮어쓰시겠습니까?`,
+                        { modal: true }, forceAction,
+                    );
+                    if (forceChoice !== forceAction) {
+                        this._post({ type: 'wb.gh.pushResult', payload: { ok: false, error: '강제 push 를 취소했습니다. 원격 저장소는 바뀌지 않았습니다.' } });
+                        break;
+                    }
+                }
                 try {
                     const r = await this._apiClient.gitPush({
                         workspace_path: wsPath,
-                        branch: (p.branch as string) || '',
-                        force: !!p.force,
+                        branch,
+                        force,
+                        auto_commit: false,
+                        approved: true,
                     });
                     const failed = workbenchFailure(r);
                     if (failed) { throw new Error(failed); }
@@ -397,7 +444,17 @@ export abstract class WorkbenchHost {
                         Number(p.container_port || 8000),
                     );
                     const planId = (plan as unknown as { plan_id?: string }).plan_id || '';
-                    this._post({ type: 'wb.local.deployProgress', payload: { stage: 'build', line: '[OK] 플랜 생성됨 — 실행 시작' } });
+                    //: 3.0.2 — 사용자가 본 적 없는 플랜을 승인하지 않는다. 플랜 요약을 확인 창에 보여 주고 고른 것만 실행한다.
+                    const deployAction = '배포 실행';
+                    const deployChoice = await vscode.window.showWarningMessage(
+                        describeLocalPlan(plan), { modal: true }, deployAction,
+                    );
+                    if (deployChoice !== deployAction) {
+                        try { await this._apiClient.executeDeployment(planId, false); } catch { /* 플랜은 코어에서 만료된다 */ }
+                        this._post({ type: 'wb.local.deployProgress', payload: { stage: 'build', finished: true, error: '배포를 취소했습니다.', line: '[취소] 배포 플랜을 승인하지 않아 실행하지 않았습니다.' } });
+                        break;
+                    }
+                    this._post({ type: 'wb.local.deployProgress', payload: { stage: 'build', line: '[OK] 플랜 승인됨 — 실행 시작' } });
                     const result = await this._apiClient.executeDeployment(planId, true);
                     if (['ok', 'success'].includes(result.status) && result.health_ok === true) {
                         this._post({
@@ -458,7 +515,14 @@ export abstract class WorkbenchHost {
                     break;
                 }
                 try {
-                    const r = await this._apiClient.approveGithubActions(proposalId, true);
+                    let r = await this._apiClient.approveGithubActions(proposalId, true);
+                    if (r.status === 'exists') {
+                        //: 내용이 다른 워크플로가 이미 있다 — 덮어쓸지 묻는다(기존 파일은 .recoder-prev 로 보관).
+                        const choice = await vscode.window.showWarningMessage(
+                            `프로젝트에 내용이 다른 워크플로 파일${r.path ? `(${r.path})` : ''}이 이미 있습니다. 새 초안으로 바꿀까요? (기존 파일은 .recoder-prev 로 보관)`,
+                            { modal: true }, '바꾸기');
+                        if (choice === '바꾸기') { r = await this._apiClient.approveGithubActions(proposalId, true, true); }
+                    }
                     if (!['saved', 'ok', 'success'].includes(r.status)) {
                         throw new Error(r.status === 'exists' ? '같은 이름의 워크플로 파일이 이미 있어 저장하지 않았습니다.' : `워크플로 저장 실패 (${r.status})`);
                     }
@@ -485,7 +549,20 @@ export abstract class WorkbenchHost {
                         this._post({ type: 'wb.deploy.ecs.statusResult', payload: { stage: 'failed', running: false, error: `사전 점검 실패 — ${ready.issues.join('; ')}` } });
                         break;
                     }
+                    //: 3.0.2 — 요금이 나오는 배포는 확인 창에서 승인한 뒤에만.
+                    const ecsAction = '배포 시작';
+                    const ecsChoice = await vscode.window.showWarningMessage(
+                        `${(p.aws_region as string) || '기본 리전'} 의 ECS ${(p.ecs_cluster as string) || 'recoder-cluster'}/${(p.ecs_service as string) || 'recoder-app'} 에 `
+                        + `${(p.image_name as string) || 'recoder-app'}:${(p.tag as string) || 'latest'} 을(를) 배포합니다. Fargate 태스크가 떠 있는 동안 AWS 요금이 발생합니다. 계속하시겠습니까?`,
+                        { modal: true }, ecsAction,
+                    );
+                    if (ecsChoice !== ecsAction) {
+                        this.pushLog('deploy', '[취소] ECS 배포를 승인하지 않았습니다.');
+                        this._post({ type: 'wb.deploy.ecs.statusResult', payload: { stage: 'failed', running: false, error: 'ECS 배포를 취소했습니다. AWS 는 바뀌지 않았습니다.' } });
+                        break;
+                    }
                     const r = await this._apiClient.deployEcs({
+                        approved: true,
                         workspace_path: wsPath,
                         image_name: (p.image_name as string) || 'recoder-app',
                         repo_name: (p.repo_name as string) || 'recoder-app',
@@ -1005,6 +1082,28 @@ export abstract class WorkbenchHost {
 }
 
 /** Core 가 HTTP 200 으로 돌려준 실패(status: error 등)를 실패로 읽는다. 성공이면 ''. */
+/** 3.0.2 — push 확인 창 문구. 무엇이 어디로 가는지(폴더·브랜치·강제 여부)를 그대로 보여 준다. */
+export function pushConfirmText(workspacePath: string, branch: string, force: boolean): string {
+    const where = branch ? `브랜치 ${branch}` : '지금 브랜치';
+    return `${workspacePath} 의 ${where}에 이미 커밋한 내용을 GitHub origin 으로 ${force ? '강제 push' : 'push'} 합니다. `
+        + '커밋하지 않은 변경은 올라가지 않습니다. 계속하시겠습니까?';
+}
+
+/** 3.0.2 — 로컬 Docker 배포 플랜을 확인 창에 보여 줄 요약. 사용자가 본 적 없는 플랜을 승인하지 않게. */
+export function describeLocalPlan(plan: unknown): string {
+    const p = (plan ?? {}) as { image?: string; container_name?: string; ports?: Record<string, string>; health_check_path?: string;
+        risk_level?: string; risk_reasons?: string[]; rollback_image?: string };
+    const ports = Object.entries(p.ports ?? {}).map(([host, container]) => `${host}→${container}`).join(', ') || '없음';
+    const lines = [
+        '다음 배포 플랜을 실행합니다. 이 컴퓨터의 Docker 에서 이미지를 빌드하고 컨테이너를 바꿔 띄웁니다.',
+        `이미지: ${p.image || '미정'} · 컨테이너: ${p.container_name || '미정'} · 포트: ${ports}`,
+        `헬스 체크: ${p.health_check_path || '/'}${p.rollback_image ? ` · 되돌릴 이미지: ${p.rollback_image}` : ''}`,
+    ];
+    if (p.risk_level) { lines.push(`위험도: ${p.risk_level}${p.risk_reasons?.length ? ` — ${p.risk_reasons.slice(0, 3).join(' / ')}` : ''}`); }
+    lines.push('실행하시겠습니까?');
+    return lines.join('\n');
+}
+
 export function workbenchFailure(result: unknown): string {
     const r = (result ?? {}) as { status?: string; message?: string; error?: string; detail?: string };
     const status = String(r.status ?? '').toLowerCase();

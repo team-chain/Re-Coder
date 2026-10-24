@@ -172,6 +172,15 @@ export function activate(context: vscode.ExtensionContext): void {
         )
     );
 
+    //: 3.0.2 — 명령 결과를 보여 줄 ReCoder 창의 화면을 연다. 사이드바는 시작 화면이라 결과를 보여 주지 않는다.
+    //: 창이 준비되기 전에 나온 결과는 SidebarProvider 가 쌓아 두었다가 준비되면 그 창으로 보낸다.
+    const openPanelResult = (view: 'build' | 'ship', start: () => void): void => {
+        ReCoderPanel.showView(context.extensionUri, sidebarProvider, view);
+        start();
+    };
+    let terminalErrorNoticeOpen = false;
+    let latestTerminalError: AnalyzeRequest | undefined;
+
     // ── Shell Integration listeners (§8.1 — primary output collection) ────────
     // registerShellIntegrationListeners wires up onDidEndTerminalShellExecution
     // so that terminal output actually flows into the buffer used by
@@ -189,8 +198,19 @@ export function activate(context: vscode.ExtensionContext): void {
                 command: output.command,
                 project_files_summary: buildProjectFilesSummary(workspacePath),
             };
-            sidebarProvider.triggerAnalysis(request);
-            void vscode.commands.executeCommand('recoder.sidebarView.focus');
+            //: 3.0.2 — 터미널 오류마다 화면을 빼앗지 않는다. 알림만 띄우고 [열기] 를 누르면 에러 분석 화면을 열어 분석한다.
+            //: 알림이 떠 있는 동안 난 오류는 가장 최근 것만 남긴다(알림이 쌓이지 않게).
+            latestTerminalError = request;
+            if (terminalErrorNoticeOpen) { return; }
+            terminalErrorNoticeOpen = true;
+            void vscode.window.showWarningMessage(
+                '터미널에서 오류를 감지했습니다. ReCoder 에러 분석 화면에서 원인과 수정안을 확인할 수 있습니다.', '열기',
+            ).then((choice) => {
+                terminalErrorNoticeOpen = false;
+                const pending = latestTerminalError;
+                latestTerminalError = undefined;
+                if (choice === '열기' && pending) { openPanelResult('build', () => sidebarProvider.triggerAnalysis(pending)); }
+            }, () => { terminalErrorNoticeOpen = false; });
         }
     );
 
@@ -230,8 +250,7 @@ export function activate(context: vscode.ExtensionContext): void {
                 project_files_summary: buildProjectFilesSummary(workspacePath),
             };
 
-            sidebarProvider.triggerAnalysis(request);
-            await vscode.commands.executeCommand('recoder.sidebarView.focus');
+            openPanelResult('build', () => sidebarProvider.triggerAnalysis(request));
         })
     );
 
@@ -260,11 +279,9 @@ export function activate(context: vscode.ExtensionContext): void {
                         command: output.command,
                         project_files_summary: buildProjectFilesSummary(workspacePath),
                     };
-                    sidebarProvider.triggerAnalysis(request);
+                    openPanelResult('build', () => sidebarProvider.triggerAnalysis(request));
                 }
             }).catch(console.error);
-
-            await vscode.commands.executeCommand('recoder.sidebarView.focus');
         })
     );
 
@@ -273,8 +290,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('recoder.generateDockerfile', async () => {
             await ensureCoreRunning(coreManager, sidebarProvider);
             sidebarProvider.switchToShipMode();
-            sidebarProvider.triggerDockerfileGeneration();
-            await vscode.commands.executeCommand('recoder.sidebarView.focus');
+            openPanelResult('ship', () => sidebarProvider.triggerDockerfileGeneration());
         })
     );
 
@@ -283,8 +299,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('recoder.generateGithubActions', async () => {
             await ensureCoreRunning(coreManager, sidebarProvider);
             sidebarProvider.switchToShipMode();
-            sidebarProvider.triggerGithubActionsGeneration();
-            await vscode.commands.executeCommand('recoder.sidebarView.focus');
+            openPanelResult('ship', () => sidebarProvider.triggerGithubActionsGeneration());
         })
     );
 
@@ -431,11 +446,22 @@ export function activate(context: vscode.ExtensionContext): void {
                 '삭제',
             );
             if (confirm !== '삭제') { return; }
-            await coreManager.clearAwsCredentials();
-            // 남이 띄운(공유) Core 는 restart 로 죽지 않으니 Core API 로도 해제한다.
-            try { await apiClient.clearAws(); } catch { /* Core 가 없으면 재시작이 처리 */ }
-            await coreManager.restart();
-            vscode.window.showInformationMessage('AWS 자격증명 삭제 완료');
+            try {
+                await coreManager.clearAwsCredentials();
+                //: 3.0.2 — Core API 로 해제가 확인되면 재시작하지 않는다(같은 Core 를 쓰는 다른 창의 작업을 끊지 않게).
+                //: Core 가 응답하지 않을 때만 재시작한다. 남이 띄운(공유) Core 는 재시작으로도 꺼지지 않는다.
+                let coreCleared = false;
+                try { await apiClient.clearAws(); coreCleared = true; } catch { /* 아래에서 재시작 */ }
+                if (coreCleared) {
+                    vscode.window.showInformationMessage('AWS 자격증명을 삭제하고 Core 의 AWS 연결을 해제했습니다.');
+                } else {
+                    await coreManager.restart();
+                    vscode.window.showWarningMessage('보안 금고의 AWS 자격증명은 삭제했지만 Core 가 응답하지 않아 Core 를 다시 시작했습니다. 터미널이나 다른 창에서 띄운 Core 를 쓰는 중이면 그 Core 를 직접 종료하세요.');
+                }
+            } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                vscode.window.showErrorMessage(`AWS 자격증명을 삭제하지 못했습니다: ${msg}`);
+            }
             sidebarProvider.triggerDiagnostics();
         })
     );

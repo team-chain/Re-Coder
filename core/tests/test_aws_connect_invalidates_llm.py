@@ -164,7 +164,7 @@ def test_role_setup_과_갱신도_같다(tmp_path, monkeypatch) -> None:
 
     r, pr = _prime_cache()
     br = breaker.breaker_for("bedrock:haiku")
-    resp = asyncio.run(aws.setup_aws_role(aws.AwsRoleSetupRequest(profile="dev", region=REGION)))
+    resp = asyncio.run(aws.setup_aws_role(aws.AwsRoleSetupRequest(profile="dev", region=REGION, approved=True)))
     assert resp.ok is True
     _assert_rebuilt(r, pr, br)
 

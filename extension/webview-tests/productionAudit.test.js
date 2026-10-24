@@ -108,7 +108,7 @@ test('승인 뒤 활성 프로젝트가 바뀌면 S3 배포를 멈춘다', async
     const sidebar = new SidebarProvider(vscode.Uri.file(b), {}, {}, {});
     const sent = [];
     sidebar.postMessage = (type, p) => { sent.push({ type, payload: p }); };
-    await sidebar.handleMessage({ type: 'workspace.deploy.s3', payload: { dir: '', region: 'ap-northeast-2', workspace_path: a } });
+    await sidebar.handleMessage({ type: 'workspace.deploy.s3', payload: { dir: '', region: 'ap-northeast-2', workspace_path: a, approved: true } });
     const result = sent.find(m => m.type === 'workspace.deploy.s3.result');
     assert.ok(result && result.payload.ok === false && /바뀌어/.test(result.payload.message));
   } finally { vscode.workspace.workspaceFolders = before; }

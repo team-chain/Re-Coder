@@ -12,7 +12,7 @@ Local Core — Q4: GitOps API Routes
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import Header, APIRouter, BackgroundTasks, HTTPException, Query
 
@@ -37,9 +37,22 @@ _pr_records: Dict[str, RollbackPRRecord] = {}
 # ArgoCD 동기화
 # ---------------------------------------------------------------------------
 
+class ApprovedArgoSyncRequest(ArgoSyncRequest):
+    """`/gitops/sync` 본문. prune(리소스 삭제)·force(강제 덮어쓰기)는 `approved: true` 가 함께 와야 한다."""
+
+    approved: Any = None
+
+
+#: 403 이 아니라 400 이다(확장 ApiClient 는 403 을 토큰 갱신 뒤 재시도한다).
+SYNC_APPROVAL_REQUIRED = (
+    "prune(클러스터 리소스 삭제)이나 force(강제 덮어쓰기)를 켠 동기화는 사용자 승인이 필요합니다. "
+    "변경 내용을 확인하고 승인한 뒤 다시 시도하세요."
+)
+
+
 @router.post("/sync", response_model=ArgoSyncRecord, status_code=202)
 async def sync_argocd_app(
-    request: ArgoSyncRequest,
+    request: ApprovedArgoSyncRequest,
     background_tasks: BackgroundTasks,
 ) -> ArgoSyncRecord:
     """
@@ -49,6 +62,9 @@ async def sync_argocd_app(
     동기화 실패 시 rollback_triggered=True → rollback PR 생성 권장.
     """
     from core.schemas import ArgoSyncPhase
+
+    if (request.prune or request.force) and request.approved is not True:
+        raise HTTPException(status_code=400, detail=SYNC_APPROVAL_REQUIRED)
     record = ArgoSyncRecord(
         project_id=request.project_id,
         app_name=request.app_name,

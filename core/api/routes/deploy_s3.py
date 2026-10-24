@@ -15,7 +15,7 @@ import json
 import logging
 import re
 import threading
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -101,6 +101,20 @@ class S3DeployRequest(BaseModel):
     files: list[dict]
     region: Optional[str] = None
     profile: Optional[str] = None
+    #: 3.0.2 — 버킷을 만들고 공개 웹사이트로 여는 작업이라 사용자 확인이 필요하다. `True` 가 아니면 400.
+    approved: Any = None
+
+
+#: 승인 없는 배포 거절 — 403 이 아니라 400 이다(확장 ApiClient 는 403 을 토큰 갱신 뒤 재시도한다).
+S3_APPROVAL_REQUIRED = (
+    "S3 배포는 버킷을 만들고 누구나 볼 수 있는 웹사이트로 공개하는 작업이라 사용자 승인이 필요합니다. "
+    "배포 내용을 확인하고 승인한 뒤 다시 시도하세요."
+)
+
+
+def _require_approval(request: "S3DeployRequest") -> None:
+    if request.approved is not True:
+        raise HTTPException(status_code=400, detail=S3_APPROVAL_REQUIRED)
 
 
 class S3DeployResponse(BaseModel):
@@ -474,6 +488,7 @@ def _deploy_sync(
 @router.post("/api/deploy/s3", response_model=S3DeployResponse)
 async def deploy_s3(request: S3DeployRequest) -> S3DeployResponse:
     """정적 사이트를 **사용자 자기 계정** S3 버킷에 배포하고 공개 URL 을 준다."""
+    _require_approval(request)
     if not (request.project or "").strip():
         raise HTTPException(status_code=400, detail="project 가 비어 있습니다.")
 
@@ -539,6 +554,7 @@ async def deploy_s3_stream(request: S3DeployRequest) -> StreamingResponse:
     상태코드로는 알릴 수 없다. 확장은 두 경로(요청 자체 실패 / 스트림 내
     실패)를 모두 다뤄야 한다.
     """
+    _require_approval(request)
     if not (request.project or "").strip():
         raise HTTPException(status_code=400, detail="project 가 비어 있습니다.")
 

@@ -958,12 +958,20 @@ export class ApiClient {
      * GitHub Actions 워크플로우 승인/저장.
      * approved=true 시 Core 가 .github/workflows/deploy.yml 에 저장.
      */
-    async approveGithubActions(proposalId: string, approved: boolean): Promise<{ status: string }> {
-        const resp = await this.request<{ status: string }>(
+    async approveGithubActions(proposalId: string, approved: boolean, overwrite: boolean = false): Promise<{
+        status: string; path?: string; diff?: string; backup_path?: string; overwritten?: boolean; message?: string;
+    }> {
+        //: 같은 경로에 내용이 다른 워크플로우가 있으면 코어는 `exists` 를 돌려주고 쓰지 않는다.
+        //: 사용자가 덮어쓰기를 확인하면 overwrite=true 로 다시 부른다(기존 파일은 .recoder-prev 로 남는다).
+        const resp = await this.request<{ status: string; path?: string; diff?: string; backup_path?: string; overwritten?: boolean }>(
             'POST',
-            `/api/deploy/github-actions/approve?proposal_id=${encodeURIComponent(proposalId)}&approved=${approved}`,
+            `/api/deploy/github-actions/approve?proposal_id=${encodeURIComponent(proposalId)}&approved=${approved}&overwrite=${overwrite === true}`,
         );
-        return { status: resp.data?.status ?? 'error' /* 서버 status 없으면 성공을 지어내지 않음 */ };
+        if (!resp.success || !resp.data) { return { status: 'error', message: resp.error }; }
+        return {
+            status: resp.data.status ?? 'error', // 서버 status 없으면 성공을 지어내지 않음
+            path: resp.data.path, diff: resp.data.diff, backup_path: resp.data.backup_path, overwritten: resp.data.overwritten,
+        };
     }
 
     // ── GitHub 인증 (VS Code OAuth → Core) ──────────────────────────────
@@ -1499,10 +1507,12 @@ export class ApiClient {
      * POST /api/aws/role/setup — 프로그램 안에서 최소권한 역할을 만들고 빌린다.
      * 권한이 모자라면 ok=false + mode="console_fallback" 으로 200 이 온다.
      */
-    async setupAwsRole(input: { profile?: string; region?: string } = {}): Promise<AwsRoleSetupResponse> {
+    async setupAwsRole(input: { profile?: string; region?: string; approved?: boolean } = {}): Promise<AwsRoleSetupResponse> {
         const resp = await this.request<AwsRoleSetupResponse>('POST', '/api/aws/role/setup', {
             profile: input.profile ?? '',
             region: input.region ?? '',
+            //: 3.0.2 — IAM 을 쓰는 요청은 사용자가 확인한 것만. 없으면 코어가 400 으로 거절한다.
+            approved: input.approved === true,
         }, false, 120000);   // CreateRole 직후 AssumeRole 전파 지연 재시도까지 포함
         if (!resp.success || !resp.data) {
             throw new Error(resp.error ?? 'AWS 역할 설정 실패');
@@ -1552,10 +1562,13 @@ export class ApiClient {
         files: Array<{ path: string; content: string; encoding: 'utf-8' | 'base64' }>;
         region?: string;
         profile?: string;
+        /** 3.0.2 — 사용자가 확인 단계에서 승인했는가. 없으면 코어가 400 으로 거절한다. */
+        approved?: boolean;
     }): Promise<S3DeployResult> {
         const body: Record<string, unknown> = {
             project: input.project,
             files: input.files,
+            approved: input.approved === true,
         };
         if (input.region) { body.region = input.region; }
         if (input.profile) { body.profile = input.profile; }
@@ -1590,6 +1603,8 @@ export class ApiClient {
             files: Array<{ path: string; content: string; encoding: 'utf-8' | 'base64' }>;
             region?: string;
             profile?: string;
+            /** 3.0.2 — 사용자가 확인 단계에서 승인했는가. 없으면 코어가 400 으로 거절한다. */
+            approved?: boolean;
         },
         onEvent: (event: S3DeployStreamEvent) => void,
         _retried = false,
@@ -1605,7 +1620,7 @@ export class ApiClient {
             throw new Error('코어가 아직 준비되지 않았습니다.');
         }
 
-        const body: Record<string, unknown> = { project: input.project, files: input.files };
+        const body: Record<string, unknown> = { project: input.project, files: input.files, approved: input.approved === true };
         if (input.region) { body.region = input.region; }
         if (input.profile) { body.profile = input.profile; }
 
@@ -1772,8 +1787,10 @@ export class ApiClient {
         branch?: string;
         skip_sbom?: boolean;
         skip_opa?: boolean;
+        /** 3.0.2 — 사용자가 배포 확인 단계에서 승인했는가. 없으면 코어가 400 으로 거절한다. */
+        approved?: boolean;
     }): Promise<{ status: string; message: string; deployment_id?: string }> {
-        const resp = await this.request<{ status: string; message: string; deployment_id?: string }>('POST', '/api/deploy/ecs', req);
+        const resp = await this.request<{ status: string; message: string; deployment_id?: string }>('POST', '/api/deploy/ecs', { ...req, approved: req.approved === true });
         if (!resp.success || !resp.data) {
             // 정책 게이트 거절(403 policy_denied 등)은 detail 을 실어 던진다 —
             // 호스트가 배너 대신 "차단 + 사유" 카드로 보여 줄 수 있게.
@@ -1830,8 +1847,9 @@ export class ApiClient {
         return resp.data;
     }
 
-    async watchSettings(key: string, settings: { discord?: string; email?: string }): Promise<WatchResult> {
-        const resp = await this.request<WatchResult>('POST', '/api/ops/watch/settings', { key, ...settings }, false, 60000);
+    async watchSettings(key: string, settings: { discord?: string; email?: string }, approved = false): Promise<WatchResult> {
+        //: 3.0.2 — 알림 대상을 바꾸는 요청도 사용자가 저장을 누른 것만(코어가 approved 없이는 거절한다).
+        const resp = await this.request<WatchResult>('POST', '/api/ops/watch/settings', { key, ...settings, approved: approved === true }, false, 60000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '설정을 저장하지 못했습니다'); }
         return resp.data;
     }
@@ -1866,8 +1884,8 @@ export class ApiClient {
     }
 
     /** POST /api/aws/cleanup/stop — 서비스 태스크 수 0(되살릴 수 있음). */
-    async cleanupStop(region: string, cluster: string, service: string): Promise<{ ok: boolean; message: string }> {
-        const resp = await this.request<{ ok: boolean; message: string }>('POST', '/api/aws/cleanup/stop', { region, cluster, service });
+    async cleanupStop(region: string, cluster: string, service: string, approved = false): Promise<{ ok: boolean; message: string }> {
+        const resp = await this.request<{ ok: boolean; message: string }>('POST', '/api/aws/cleanup/stop', { region, cluster, service, approved: approved === true });
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '서비스를 중지하지 못했습니다'); }
         return resp.data;
     }
@@ -1909,8 +1927,8 @@ export class ApiClient {
     }
 
     /** ECS 서비스의 태스크 수를 0 으로 내려 과금을 멈춘다(서비스는 남는다). */
-    async stopEcsService(req: { ecs_cluster: string; ecs_service: string; aws_region: string }): Promise<{ stopped: boolean; desired_count: number; message: string }> {
-        const resp = await this.request<{ stopped: boolean; desired_count: number; message: string }>('POST', '/api/deploy/ecs/stop', req, false, 60000);
+    async stopEcsService(req: { ecs_cluster: string; ecs_service: string; aws_region: string; approved?: boolean }): Promise<{ stopped: boolean; desired_count: number; message: string }> {
+        const resp = await this.request<{ stopped: boolean; desired_count: number; message: string }>('POST', '/api/deploy/ecs/stop', { ...req, approved: req.approved === true }, false, 60000);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'ECS 서비스 중지 실패'); }
         return resp.data;
     }
@@ -1954,13 +1972,14 @@ export class ApiClient {
     }
 
     /** POST /api/git/push — 원격 push (upstream 자동 설정). */
-    async gitPush(req: { workspace_path: string; branch?: string; force?: boolean; auto_commit?: boolean }): Promise<{
+    async gitPush(req: { workspace_path: string; branch?: string; force?: boolean; auto_commit?: boolean; approved?: boolean }): Promise<{
         status: string;
         message?: string;
         branch?: string;
     }> {
+        //: 3.0.2 — 사용자가 확인한 push 만. 강제 push 는 force:true 를 정확히 줄 때만(코어가 --force-with-lease 로).
         const resp = await this.request<{ status: string; message?: string; branch?: string }>(
-            'POST', '/api/git/push', req, false, 200000  // 큰 저장소·느린 망에서 30초로는 끊겼다
+            'POST', '/api/git/push', { ...req, force: req.force === true, approved: req.approved === true }, false, 200000  // 큰 저장소·느린 망에서 30초로는 끊겼다
         );
         if (!resp.success || !resp.data) {
             throw new Error(resp.error ?? 'git push 실패');
@@ -1974,9 +1993,10 @@ export class ApiClient {
         name: string;
         private: boolean;
         description?: string;
+        approved?: boolean;
     }): Promise<{ status: string; html_url?: string; message?: string }> {
         const resp = await this.request<{ status: string; html_url?: string; message?: string }>(
-            'POST', '/api/github/repo', req, false, 200000
+            'POST', '/api/github/repo', { ...req, approved: req.approved === true }, false, 200000
         );
         if (!resp.success || !resp.data) {
             throw new Error(resp.error ?? '레포 생성 실패');
@@ -1985,12 +2005,12 @@ export class ApiClient {
     }
 
     /** POST /api/github/secret — GitHub Actions Secret 등록. */
-    async githubSetSecret(req: { repo: string; name: string; value: string }): Promise<{
+    async githubSetSecret(req: { repo: string; name: string; value: string; approved?: boolean }): Promise<{
         status: string;
         message?: string;
     }> {
         const resp = await this.request<{ status: string; message?: string }>(
-            'POST', '/api/github/secret', req
+            'POST', '/api/github/secret', { ...req, approved: req.approved === true }
         );
         if (!resp.success || !resp.data) {
             throw new Error(resp.error ?? 'Secret 등록 실패');

@@ -354,6 +354,9 @@ def test_cleanup_routes(aws, monkeypatch, tmp_path):
     r = c.post("/api/aws/cleanup/delete", json={"region": REGION, "ids": ["ecr:recoder-shop"], "approved": True, "count": 1})
     assert r.status_code == 200 and r.json()["deleted"] == 1
     r = c.post("/api/aws/cleanup/stop", json={"region": REGION, "cluster": "recoder-cluster", "service": "recoder-shop"})
+    assert r.status_code == 400 and "확인" in r.json()["detail"]
+    r = c.post("/api/aws/cleanup/stop", json={"region": REGION, "cluster": "recoder-cluster", "service": "recoder-shop",
+                                              "approved": True})
     assert r.status_code == 200 and r.json()["ok"]
 
 

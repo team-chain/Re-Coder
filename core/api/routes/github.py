@@ -21,6 +21,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from typing import Any, Optional
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
@@ -41,12 +43,27 @@ class GhRepoCreateRequest(BaseModel):
     name: str
     private: bool = True
     description: str = ""
+    #: 3.0.2 — 저장소를 만들고 올리므로 사용자 확인이 필요하다. `True` 가 아니면 400.
+    approved: Any = None
 
 
 class GhSetSecretRequest(BaseModel):
     repo: str
     name: str
     value: str
+    #: 3.0.2 — Actions Secret 을 쓰거나 덮어쓰므로 사용자 확인이 필요하다. `True` 가 아니면 400.
+    approved: Any = None
+
+
+#: 승인 없는 GitHub 변경 거절 — 403 이 아니라 400 이다(확장 ApiClient 는 403 을 토큰 갱신 뒤 재시도한다).
+PUSH_APPROVAL_REQUIRED = "GitHub 에 올리는 작업은 사용자 확인이 필요합니다. 확인 창에서 승인한 뒤 다시 시도하세요."
+REPO_APPROVAL_REQUIRED = "GitHub 저장소를 만들고 올리는 작업은 사용자 확인이 필요합니다. 확인 창에서 승인한 뒤 다시 시도하세요."
+SECRET_APPROVAL_REQUIRED = "GitHub Actions Secret 을 저장하는 작업은 사용자 확인이 필요합니다. 확인 창에서 승인한 뒤 다시 시도하세요."
+
+
+def _require_approved(value: object, message: str) -> None:
+    if value is not True:
+        raise HTTPException(status_code=400, detail=message)
 
 
 class GhRepositoryConnectRequest(BaseModel):
@@ -101,6 +118,7 @@ async def github_list_repos() -> dict:
 @router.post("/api/github/repo")
 async def github_repo_create(body: GhRepoCreateRequest) -> dict:
     """새 레포 생성 + 워크스페이스 초기 push."""
+    _require_approved(body.approved, REPO_APPROVAL_REQUIRED)
     try:
         from github_agent import get_github_agent  # type: ignore
         return await asyncio.to_thread(
@@ -115,6 +133,7 @@ async def github_repo_create(body: GhRepoCreateRequest) -> dict:
 @router.post("/api/github/secret")
 async def github_set_secret(body: GhSetSecretRequest) -> dict:
     """GitHub Actions Secret 등록 (PyNaCl sealed-box 암호화)."""
+    _require_approved(body.approved, SECRET_APPROVAL_REQUIRED)
     try:
         from github_agent import get_github_agent  # type: ignore
         return await asyncio.to_thread(
@@ -170,12 +189,27 @@ async def github_logout() -> dict:
 
 @router.post("/api/git/push")
 async def git_push_route(body: dict) -> dict:
-    """원격 push. 로그인 없이 존재하지 않는 GitAgent.push를 호출하지 않는다."""
+    """원격 push. 로그인 없이 존재하지 않는 GitAgent.push를 호출하지 않는다.
+
+    3.0.2 — `approved: true` 가 없으면 400. 강제 push 는 `force: true` 를 정확히 줄 때만
+    `--force-with-lease` 로 한다. 브랜치 이름은 `git check-ref-format --branch` 기준으로 검사한다.
+    """
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="요청 형식이 올바르지 않습니다.")
+    _require_approved(body.get("approved"), PUSH_APPROVAL_REQUIRED)
     workspace_path = str(body.get("workspace_path", ""))
-    branch = str(body.get("branch", ""))
-    force = bool(body.get("force", False))
+    branch = str(body.get("branch", "") or "")
+    force = body.get("force") is True
     # Canvas approvals can explicitly push existing commits only. Preserve legacy defaults.
     auto_commit = body.get("auto_commit", True) is not False
+    try:
+        from github_agent import validate_branch_name  # type: ignore
+    except ImportError:  # pragma: no cover
+        from core.github_agent import validate_branch_name  # type: ignore
+    if branch:
+        problem = validate_branch_name(branch)
+        if problem:
+            raise HTTPException(status_code=400, detail=problem)
     try:
         from github_agent import get_github_agent  # type: ignore
         gh = get_github_agent()
