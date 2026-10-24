@@ -282,7 +282,7 @@ export const OperateMode: React.FC<OperateModeProps> = ({ isActive }) => {
 
       {incidents.length === 0 && !isFetching && host && (
         <div style={{ marginTop: 10, fontSize: 11, color: "var(--vscode-testing-iconPassed, #4caf50)" }}>
-          ✓ 인시던트 없음
+          인시던트 없음
         </div>
       )}
 
@@ -357,7 +357,7 @@ export const OperateMode: React.FC<OperateModeProps> = ({ isActive }) => {
           color: result.status === "executed" ? "var(--vscode-testing-iconPassed, #4caf50)" : "var(--vscode-editorError-foreground, #f44)",
           fontWeight: 600,
         }}>
-          {result.status === "executed" ? "✓ 원격 명령 실행 완료" : `실행 실패: ${result.status}`}
+          {result.status === "executed" ? "원격 명령 실행 완료" : `실행 실패: ${result.status}`}
           <div style={{ marginTop: 8 }}>
             <button style={btnSecondary} onClick={() => { setResult(null); setProposal(null); setSelectedAlert(null); }}>
               닫기

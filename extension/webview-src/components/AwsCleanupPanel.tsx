@@ -5,6 +5,7 @@
  *  · 태그 없는 옛 리소스는 "수동 확인 필요" 로 보여 주기만 한다(코어도 지우지 않는다).
  */
 import React, { useCallback, useEffect, useState } from "react";
+import { MarkGlyph } from "./ui/marks";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import { Checkbox } from "./Check";
 
@@ -199,7 +200,7 @@ export const AwsCleanupPanel: React.FC<{ defaultRegion?: string }> = ({ defaultR
       )}
       {results.length > 0 && (
         <div style={box} data-testid="cleanup-results">
-          {results.map(r => <div key={r.id} style={{ fontSize: 12 }}>{r.ok ? "✓" : r.skipped ? "–" : "✗"} {r.label ?? r.id} {r.name ? <code>{r.name}</code> : null} <span style={muted}>{r.message}</span></div>)}
+          {results.map(r => <div key={r.id} style={{ fontSize: 12 }}>{r.ok ? <MarkGlyph kind="ok" label="완료" /> : r.skipped ? <MarkGlyph kind="skip" label="건너뜀" /> : <MarkGlyph kind="bad" label="실패" />} {r.label ?? r.id} {r.name ? <code>{r.name}</code> : null} <span style={muted}>{r.message}</span></div>)}
         </div>
       )}
     </section>

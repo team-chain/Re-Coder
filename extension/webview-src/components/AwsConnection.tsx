@@ -178,7 +178,7 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
   if (status?.ready) {
     const permission = status.permission_check;
     return <div style={card}>
-      <div style={{ color: "var(--vscode-charts-green, #4ec9b0)", fontSize: 15, fontWeight: 700 }}>✓ AWS 연결됨</div>
+      <div style={{ color: "var(--vscode-charts-green, #4ec9b0)", fontSize: 15, fontWeight: 700 }}>AWS 연결됨</div>
       {(status.security_warnings ?? []).map((w) => (
         <div key={w} role="alert" data-testid="aws-security-warning" style={{ marginTop: 10, padding: "9px 10px", borderRadius: 5, background: "rgba(244, 135, 113, .12)", border: "1px solid rgba(244, 135, 113, .45)", color: "var(--vscode-errorForeground, #f48771)", fontSize: 11.5, lineHeight: 1.55 }}>
           <b>위험한 키입니다.</b> {w}
@@ -201,7 +201,7 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
         </div>
       )}
       {permission?.inspected && permission.missing_actions.length === 0 && permission.excessive_policies.length === 0 && (
-        <div style={{ marginTop: 12, padding: "9px 10px", borderRadius: 5, background: "rgba(78, 201, 176, .10)", border: "1px solid rgba(78, 201, 176, .32)", color: "var(--vscode-charts-green, #4ec9b0)", fontSize: 11 }}>✓ 권한 점검 완료: 기본 ECS 배포 권한이 확인되었습니다.</div>
+        <div style={{ marginTop: 12, padding: "9px 10px", borderRadius: 5, background: "rgba(78, 201, 176, .10)", border: "1px solid rgba(78, 201, 176, .32)", color: "var(--vscode-charts-green, #4ec9b0)", fontSize: 11 }}>권한 점검 완료: 기본 ECS 배포 권한이 확인되었습니다.</div>
       )}
       <details style={{ marginTop:20 }}><summary style={{ cursor:'pointer',fontSize:12,padding:'10px 0' }}>자격증명 관리</summary>
       <div style={{ marginTop: 11, color: "var(--vscode-descriptionForeground, #999)", fontSize: 11, lineHeight: 1.5 }}>

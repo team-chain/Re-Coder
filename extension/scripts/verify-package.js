@@ -10,6 +10,7 @@ function validatePackageFiles(files, { requireCore = false, target = `${process.
     'out/sidebar/canvasHost.js', 'out/codemap/analysisJob.js',
     'out/codemap/analysisWorker.js', 'out/codemap/analyzer.js',
     'out/webview/webview.js', 'media/icon.png', 'media/recoder-icon.svg',
+    'media/fonts/PretendardVariable.woff2', 'media/fonts/Pretendard-OFL.txt',
     'node_modules/ws/index.js', 'node_modules/ws/lib/websocket.js',
   ];
   const problems = required.filter(file => !names.has(file)).map(file => `Missing runtime file: ${file}`);

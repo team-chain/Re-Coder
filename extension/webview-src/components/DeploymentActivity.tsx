@@ -1,4 +1,5 @@
 import React from 'react';
+import { MarkGlyph } from "./ui/marks";
 import { describeS3Progress, s3UploadRatio, S3Progress } from './DeploymentCenter';
 import { DeliveryTrack } from './DeliveryTrack';
 
@@ -26,7 +27,7 @@ export function DeploymentActivity({ target, event }: { target: 'docker'|'s3'; e
     <div style={{display:'flex',justifyContent:'space-between',gap:12,marginBottom:8}}><strong>{target==='docker'?'Docker':'S3'} 배포</strong><span role="status" style={{color:failed?'#f38a91':complete?'#73d39b':'var(--vscode-foreground)'}}>{text}{ratio!==null?` · ${Math.round(ratio*100)}%`:''}</span></div>
     <DeliveryTrack stages={items.map(([,label])=>label)} index={complete?items.length:Math.max(0,index)} state={failed?'failed':complete?'done':pending?'pending':'running'} destination={target==='docker'?'Docker':'S3'}/>
     {ratio!==null&&<progress aria-label="파일 업로드 진행률" max={1} value={failed||pending?undefined:ratio} style={{width:'100%',height:6,accentColor:failed?'#f38a91':'#4faff0'}} />}
-    <ol style={{display:'flex',gap:'8px 16px',flexWrap:'wrap',listStyle:'none',padding:0,margin:'8px 0 0',fontSize:11,color:'var(--vscode-descriptionForeground,#99a9b9)'}}>{items.map(([key,label],i)=><li key={key} aria-current={key===step?'step':undefined} style={{color:key===step?'#8dceff':undefined}}>{i<index?'✓':`${i+1}.`} {label}</li>)}</ol>
+    <ol style={{display:'flex',gap:'8px 16px',flexWrap:'wrap',listStyle:'none',padding:0,margin:'8px 0 0',fontSize:11,color:'var(--vscode-descriptionForeground,#99a9b9)'}}>{items.map(([key,label],i)=><li key={key} aria-current={key===step?'step':undefined} style={{color:key===step?'#8dceff':undefined}}>{i<index?<MarkGlyph kind="ok" label="완료" />:`${i+1}.`} {label}</li>)}</ol>
     {event.key&&<div style={{fontSize:11,marginTop:6,overflowWrap:'anywhere',color:'var(--vscode-descriptionForeground)'}}>{event.key}</div>}
   </section>;
 }

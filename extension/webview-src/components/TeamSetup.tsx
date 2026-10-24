@@ -171,7 +171,7 @@ export const TeamSetup: React.FC<TeamSetupProps> = ({ teamMode, config, options,
           <div className="rc-ts-mode">
             <div style={{ flex: 1, minWidth: 0 }}>
               <b style={{ fontSize: 13.5 }}>팀 모드</b>
-              <div className="d">{teamMode ? "설계 → 여러 개발이 동시에 → 검토 → 테스트" : "리코더 한 명이 만들고, 요청이 크면 자동으로 나눕니다"}</div>
+              <div className="d">{teamMode ? "설계 → 여러 개발이 동시에 → 검토 → 테스트" : "AI 한 명이 만들고, 요청이 크면 자동으로 나눕니다"}</div>
             </div>
             <Switch checked={teamMode} onChange={onTeamMode} ariaLabel="팀 모드" />
           </div>

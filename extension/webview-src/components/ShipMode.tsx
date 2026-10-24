@@ -672,7 +672,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
     if (!deploymentId || pendingRollbackRef.current) { return; }
     pendingRollbackRef.current = deploymentId;
     setRollbackDecision("running");
-    postMessage("rollback", { deploymentId });
+    postMessage("rollback", { deploymentId, approved: true });
   }, [deploymentId, postMessage]);
 
   const btnPrimary: React.CSSProperties = {
@@ -745,7 +745,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
         ? `Critical: ${criticalCount}, High: ${highCount}`
         : highCount > 0
         ? `High: ${highCount}`
-        : "취약점 없음 ✓";
+        : "취약점 없음";
 
     return (
       <div
@@ -1017,7 +1017,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
       )}
       {step === "done" && deployResult?.screen?.ok === true && (
         <div data-testid="screen-verified" style={{ fontSize: 11, color: "#22c55e", marginBottom: 8 }}>
-          ✓ 화면 확인 완료{deployResult.screen.checked === "http" ? " (HTTP 응답 기준)" : ""}
+          화면 확인 완료{deployResult.screen.checked === "http" ? " (HTTP 응답 기준)" : ""}
         </div>
       )}
       {/* ── 빌드 후 보안 검사를 못 한 채 진행된 배포 ── */}
@@ -1055,7 +1055,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
         </div>
       ) : deployResult?.app_check?.status === "error" ? null : (
         <div style={{ background: "rgba(34,197,94,0.1)", border: "1px solid #22c55e", borderRadius: 5, padding: "10px 12px", color: "#22c55e", fontWeight: 600, marginBottom: 10 }}>
-          ✓ 배포 완료! Health Check 통과
+          배포 완료 · Health Check 통과
           {deployResult?.health_check_url && (
             <div style={{ fontSize: 10, fontWeight: 400, marginTop: 2, color: "#8fbf9f" }}>{deployResult.health_check_url}</div>
           )}
@@ -1110,7 +1110,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
           {rollbackDecision === "done" && rollbackResult && (
             <div style={{ marginTop: 8, padding: "8px 10px", borderRadius: 4, border: `1px solid ${rollbackResult.status === "ok" ? "#22c55e" : "#ef4444"}`, color: rollbackResult.status === "ok" ? "#22c55e" : "#ef4444", whiteSpace: "pre-wrap" }}>
               {rollbackResult.status === "ok"
-                ? `✓ 롤백 완료 — ${rollbackResult.rolled_back_to ?? "이전 버전"} 으로 되돌렸고 기록에 남았습니다.${rollbackResult.warning ? `
+                ? `롤백 완료 — ${rollbackResult.rolled_back_to ?? "이전 버전"} 으로 되돌렸고 기록에 남았습니다.${rollbackResult.warning ? `
 주의: ${rollbackResult.warning}` : ""}`
                 : `롤백 실패 — ${(rollbackResult.error || rollbackResult.stderr || "사유 없음").trim()}`}
             </div>
@@ -1145,7 +1145,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
 
       {step === "saved" && (
         <div style={{ background: "rgba(34,197,94,0.1)", border: "1px solid #22c55e", borderRadius: 5, padding: "10px 12px", color: "#22c55e", fontWeight: 600, marginBottom: 10 }}>
-          ✓ {activeFileLabel} 저장 완료
+          {activeFileLabel} 저장 완료
         </div>
       )}
 

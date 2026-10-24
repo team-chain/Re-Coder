@@ -35,6 +35,7 @@ import {
 import { PollingService } from '../core/PollingService';
 import { AnalysisJob } from '../codemap/analysisJob';
 import { CanvasHost } from './canvasHost';
+import { workingChanges } from './homeChanges';
 import { DiscordWebhook } from './discordWebhook';
 import { DiscordBotToken } from './discordBotToken';
 import { activeProjectPath, activeProjectUri, isInsideProjectRoot, onDidChangeActiveProject, projectFolders, selectActiveProject, useExternalProject } from '../activeProject';
@@ -1209,6 +1210,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 break;
             }
+            case 'home.changes': {
+                //: 3.0.2 홈 "바뀐 코드" — 읽기만 한다.
+                const changes = await workingChanges(activeProjectPath());
+                this.postMessageToWebview(requestWebview, 'home.changesResult', changes);
+                break;
+            }
             case 'monitor.badge.get': {
                 this.postMessageToWebview(requestWebview, 'monitor.badge', { count: this._monitorBadgeTotal() });
                 break;
@@ -1571,7 +1578,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 break;
             }
             case 'rollback': {
-                const { deploymentId } = payload as { deploymentId: string };
+                const { deploymentId, approved } = payload as { deploymentId: string; approved?: boolean };
+                if (approved !== true) {
+                    this.postMessage('deploy.rollbackResult', { deploymentId, status: 'error', error: '롤백은 승인한 뒤에만 실행합니다.' });
+                    break;
+                }
                 try {
                     const result = await this._apiClient.rollback(deploymentId);
                     this.postMessage('stateUpdate', { rollbackResult: result, ...this._state });
@@ -3335,9 +3346,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             ? webview.asWebviewUri(botAvatarPath)
             : '';
         const cspConnect = Array.from({ length: 17 }, (_, i) => `http://127.0.0.1:${17894 + i}`).join(' ');
+        //: 3.0.2 — 화면 글꼴(Pretendard, OFL)과 로고를 확장 안에서 싣는다(외부 요청 없음).
+        const fontUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'fonts', 'PretendardVariable.woff2'));
+        const logoUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'icon.png'));
 
         return `<!DOCTYPE html>
-<html lang="ko" data-recoder-layout="${layout}" data-recoder-bot-avatar="${botAvatarUri}">
+<html lang="ko" data-recoder-layout="${layout}" data-recoder-bot-avatar="${botAvatarUri}" data-recoder-logo="${logoUri}">
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -3346,12 +3360,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                  style-src 'unsafe-inline';
                  script-src 'nonce-${nonce}';
                  img-src ${webview.cspSource} https: data:;
+                 font-src ${webview.cspSource};
+                 frame-src https: http://localhost:* http://127.0.0.1:*;
                  connect-src ${cspConnect};" />
     <title>ReCoder</title>
     <style>
+        @font-face { font-family: 'Pretendard'; src: url('${fontUri}') format('woff2'); font-weight: 100 900; font-display: swap; }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
-            font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
+            font-family: 'Pretendard', var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
             font-size: var(--vscode-font-size, 13px);
             color: var(--vscode-editor-foreground, #ccc);
             background: var(--vscode-sideBar-background, #252526);

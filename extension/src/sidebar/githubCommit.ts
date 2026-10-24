@@ -14,7 +14,7 @@ async function git(root: string, args: string[]) {
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
   })).stdout;
 }
-function blockedFile(root: string, file: string): string {
+export function blockedFile(root: string, file: string): string {
   if (file.split('/').some(p => ['node_modules', '.recoder', '.aws', '.ssh', '.venv', 'venv', '.git'].includes(p)) || isSensitiveFile(file)) return '자격증명·로컬 설정 또는 의존성 파일';
   const full = path.resolve(root, file), relative = path.relative(root, full);
   if (relative.startsWith('..') || path.isAbsolute(relative)) return '프로젝트 밖의 경로';

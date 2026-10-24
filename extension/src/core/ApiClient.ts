@@ -1120,7 +1120,7 @@ export class ApiClient {
     async rollback(deploymentId: string): Promise<{ status: string; rolled_back_to?: string; warning?: string | null; error?: string; stderr?: string; health_ok?: boolean | null; health_check_url?: string | null; verification_resumed?: boolean; container_untouched?: boolean; restored_deployment_id?: string | null }> {
         //: 롤백은 stop/rm/run + 헬스 확인(최대 15초)이라 기본 30초로는 모자라다.
         const resp = await this.request<{ status: string; rolled_back_to?: string; warning?: string | null; stderr?: string }>(
-            'POST', '/api/deploy/rollback', { deployment_id: deploymentId }, false, 120000
+            'POST', '/api/deploy/rollback', { deployment_id: deploymentId, approved: true }, false, 120000
         );
         if (!resp.success || !resp.data) {
             //: 422(롤백 대상 없음)·404 등 코어의 사유를 버리지 않는다.

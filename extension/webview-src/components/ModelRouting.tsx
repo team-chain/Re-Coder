@@ -6,6 +6,7 @@
  * - 같은 요청을 두 공급자로 돌려 비용·교정 횟수·남은 오류·보안 점수를 나란히 보여 준다. 종합 승자는 정하지 않는다.
  */
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { MarkGlyph } from "./ui/marks";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import {
   CompareJob, ECONOMY_OPTIONS, ModelsState, OPERATION_LABEL, TIER_LABEL, compareChoices, compareRows, costCell, formatTokens,
@@ -134,7 +135,7 @@ export const ModelRoutingView: React.FC<ModelRoutingViewProps> = ({ state, job, 
           </TierCard>
           <TierCard tier="economy" provider={routing.economy.provider} model={routing.economy.model}>
             <div style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>{routing.economy_operations.map((o) => OPERATION_LABEL[o] ?? o).join(" · ")}</div>
-            {routing.economy.scrubbed && <div data-testid="economy-scrubbed" style={{ fontSize: 11, color: C.ok, marginTop: 4 }}>✓ 다른 공급자로 나가는 문맥은 비밀값을 가립니다</div>}
+            {routing.economy.scrubbed && <div data-testid="economy-scrubbed" style={{ fontSize: 11, color: C.ok, marginTop: 4 }}>다른 공급자로 나가는 문맥은 비밀값을 가립니다</div>}
             {!routing.economy.separate && <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>지금은 품질 공급자와 같습니다(기존 동작).</div>}
             {routing.economy.note && <div style={{ fontSize: 11, color: C.warn, marginTop: 4 }}>{routing.economy.note}</div>}
           </TierCard>
@@ -211,12 +212,12 @@ export const ModelRoutingView: React.FC<ModelRoutingViewProps> = ({ state, job, 
               <tbody>{rows.map((r) => (
                 <tr key={r.key} data-row={r.key}>
                   <td style={{ ...td, color: C.muted, whiteSpace: "nowrap" }}>{r.label}</td>
-                  {r.values.map((v, i) => <td key={i} style={{ ...td, fontWeight: r.better === i ? 700 : 400, color: r.better === i ? C.ok : C.fg }} data-better={r.better === i ? "true" : undefined}>{v}{r.better === i ? " ✓" : ""}</td>)}
+                  {r.values.map((v, i) => <td key={i} style={{ ...td, fontWeight: r.better === i ? 700 : 400, color: r.better === i ? C.ok : C.fg }} data-better={r.better === i ? "true" : undefined}>{v}{r.better === i ? <> <MarkGlyph kind="ok" size={11} label="더 나음" /></> : ""}</td>)}
                 </tr>))}
               </tbody>
             </table>
             {job.sides.filter((s) => s.error).map((s) => <div key={s.spec} style={{ color: C.err, fontSize: 11, marginTop: 6, wordBreak: "break-word" }}>{providerName(s.provider)}: {s.error}</div>)}
-            {job.status === "finished" && <div style={{ color: C.muted, fontSize: 10.5, marginTop: 8 }}>✓ 는 그 항목에서 더 나은 쪽입니다. 종합 판단은 결과 코드를 직접 보고 하세요 — 한 번의 비교는 우연의 영향을 받습니다.</div>}
+            {job.status === "finished" && <div style={{ color: C.muted, fontSize: 10.5, marginTop: 8 }}>초록 표시는 그 항목에서 더 나은 쪽입니다. 종합 판단은 결과 코드를 직접 보고 하세요 — 한 번의 비교는 우연의 영향을 받습니다.</div>}
           </div>
         )}
       </section>

@@ -182,7 +182,8 @@ async def _execute_team_deploy(
 
     try:
         client = get_client_for_guild(guild_id)
-        result = await client.deploy(payload)
+        # 승인 버튼(권한자)을 거친 요청만 여기까지 온다.
+        result = await client.deploy({**payload, "approved": True})
         deploy_id = result.get("deploy_id", "N/A")
 
         success_embed = discord.Embed(

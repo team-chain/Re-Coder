@@ -6,10 +6,10 @@ import { useHostLink } from "./hooks/useHostLink";
 import { loadUiState, saveUiState } from "./hooks/useVSCodeApi";
 import { usePolling } from "./hooks/usePolling";
 import { BuildMode } from "./components/BuildMode";
-import CodeAgent, { setPendingTargetFolder } from "./components/CodeAgent";
+import CodeAgent, { setPendingPrompt, setPendingTargetFolder } from "./components/CodeAgent";
 import type { ExternalTurn } from "./components/CodeAgent";
 import { MonitorBadge, MonitorPage } from "./components/MonitorPage";
-import { HubHome, HubPage, FeatureFrame, AdrPanel, SecurityHub, SecurityScanPanel, PolicyPanel, HUBS, hubOf, isHubView, isFeatureView } from "./components/Hubs";
+import { FeatureFrame, AdrPanel, SecurityHub, SecurityScanPanel, PolicyPanel, HUBS, HUB_ENTRY, HubTabs, hubOf, isHubView, isFeatureView } from "./components/Hubs";
 import type { HubId, FeatureId, ReadyCtx } from "./components/Hubs";
 import { ShipMode } from "./components/ShipMode";
 import { OperateMode } from "./components/OperateMode";
@@ -24,6 +24,9 @@ import DeploymentCanvas from "./components/canvas/DeploymentCanvas";
 import { AwsConnection } from './components/AwsConnection';
 import { CanvasDrawer } from './components/canvas/CanvasDrawer';
 import { canvasStyles } from './components/canvas/styles';
+import { THEME_CSS } from './components/shell/theme';
+import { BrandLogo, Glyph } from './components/shell/parts';
+import { HomeBento } from './components/shell/HomeBento';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -104,16 +107,13 @@ const Icon = {
 // ---------------------------------------------------------------------------
 
 const Hero: React.FC<{ onOpenWorkspace?: () => void }> = ({ onOpenWorkspace }) => (
-  <div style={{ padding: "18px 16px 8px", background: "var(--vscode-sideBar-background, #1e1e1e)" }}>
-    <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
-      <span style={{ color: "var(--vscode-foreground, #e0e0e0)", display: "inline-flex" }}><Icon.Logo size={22} /></span>
-      <span style={{ fontSize: 20, fontWeight: 600, color: "var(--vscode-foreground, #e0e0e0)", letterSpacing: "-0.01em" }}>ReCoder</span>
+  <div style={{ padding: "20px 16px 12px" }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+      <BrandLogo size={26} />
+      <span style={{ fontSize: 18, fontWeight: 700, color: "var(--rc-fg, var(--vscode-foreground, #e0e0e0))", letterSpacing: "-0.02em" }}>ReCoder</span>
     </div>
     {onOpenWorkspace && (
-      <button
-        onClick={onOpenWorkspace}
-        style={{ width: "100%", marginTop: 12, padding: "8px 10px", border: "none", borderRadius: 5, background: "var(--vscode-button-background, #0e639c)", color: "var(--vscode-button-foreground, #fff)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}
-      >
+      <button onClick={onOpenWorkspace} className="rc-btn p" style={{ width: "100%", marginTop: 14, height: 38 }}>
         ReCoder 창 열기
       </button>
     )}
@@ -222,18 +222,22 @@ const HubRouter: React.FC<{ view: ViewMode; ctx: ReadyCtx; externalTurn?: Extern
   const [deployVisited, setDeployVisited] = useState(deploying);
   const [securityVisited, setSecurityVisited] = useState(view === 'hub:security');
   const [monitorVisited, setMonitorVisited] = useState(view === 'hub:monitor');
+  const go = useCallback((v: string) => onSelectMode(v as ViewMode), [onSelectMode]);
   useEffect(() => { if (view === 'hub:monitor') setMonitorVisited(true); }, [view]);
   useEffect(() => { if (view === "code") setCodeVisited(true); }, [view]);
   useEffect(() => { if (deploying) setDeployVisited(true); if (view === 'hub:security') setSecurityVisited(true); }, [view, deploying]);
   return <>
     <div className="rc-code-page" hidden={view !== "code"}>
-      {(codeVisited || view === "code") && <FeatureFrame feature="code" onHome={() => onSelectMode("home")} onHub={h => onSelectMode(`hub:${h}`)}>
+      {(codeVisited || view === "code") && <FeatureFrame feature="code" ctx={ctx} onGo={go}>
         <CodeAgent isActive={ctx.isAiReady} externalTurn={externalTurn} onReviewRequired={onReviewRequired} connectionPending={connectionPending} connectionError={connectionError} onOpenHub={h => onSelectMode(`hub:${h}`)} />
       </FeatureFrame>}
     </div>
     <div hidden={!deploying}>{(deployVisited || deploying) && <FeatureRouter view="hub:deploy" ctx={ctx} onSelectMode={onSelectMode} />}</div>
-    <div hidden={view !== 'hub:security'}>{(securityVisited || view === 'hub:security') && <SecurityHub onHome={() => onSelectMode('home')} onHub={h => onSelectMode(`hub:${h}`)} />}</div>
-    <div hidden={view !== 'hub:monitor'}>{(monitorVisited || view === 'hub:monitor') && <MonitorPage active={view === 'hub:monitor'} onOpenDeploy={() => onSelectMode('hub:deploy')} onOpenOperate={() => onSelectMode('operate')} />}</div>
+    <div hidden={view !== 'hub:security'}>{(securityVisited || view === 'hub:security') && <SecurityHub onGo={go} />}</div>
+    <div hidden={view !== 'hub:monitor'}>{(monitorVisited || view === 'hub:monitor') && <>
+      <HubTabs hub="monitor" current="hub:monitor" ctx={ctx} onGo={go} />
+      <MonitorPage active={view === 'hub:monitor'} onOpenDeploy={() => onSelectMode('hub:deploy')} onOpenOperate={() => onSelectMode('operate')} />
+    </>}</div>
     {view !== "code" && !deploying && view !== 'hub:security' && view !== 'hub:monitor' && <FeatureRouter view={view} ctx={ctx} externalTurn={externalTurn} onSelectMode={onSelectMode} />}
   </>;
 };
@@ -325,17 +329,16 @@ const WorkspaceConnection: React.FC = () => {
 };
 
 const FeatureRouter: React.FC<{ view: ViewMode; ctx: ReadyCtx; externalTurn?: ExternalTurn | null; onSelectMode: (m: ViewMode) => void }> = ({ view, ctx, externalTurn, onSelectMode }) => {
-  const goHome = () => onSelectMode("home");
-  const goHub = (h: HubId) => onSelectMode(`hub:${h}`);
+  const go = (v: string) => onSelectMode(v as ViewMode);
   if (view === "home") {
-    return <HubHome ctx={ctx} onSelect={goHub} />;
+    return <HomeBento active go={go} />;
   }
   if (isHubView(view) && view !== "hub:deploy") {
-    const hub = view.slice(4) as HubId;
-    return <HubPage hub={hub} ctx={ctx} onOpen={(f) => onSelectMode(f)} onHome={goHome} onHub={goHub} />;
+    //: 허브마다 첫 화면이 있다(Develop → 코드 생성). 예전 카드 페이지는 거치지 않는다.
+    const entry = HUB_ENTRY[view.slice(4) as HubId];
+    if (entry && entry !== view && isFeatureView(entry)) return <FeatureRouter view={entry as ViewMode} ctx={ctx} externalTurn={externalTurn} onSelectMode={onSelectMode} />;
+    return null;
   }
-  // Home's Deploy card and the top-level tab both send hub:deploy.
-  // Keep the legacy deploy entry working, but show the canvas immediately on either route.
   if (view !== "hub:deploy" && !isFeatureView(view)) { return null; }
   const feature: FeatureId = view === "hub:deploy" ? "deploy" : view;
   let body: React.ReactNode = null;
@@ -346,14 +349,43 @@ const FeatureRouter: React.FC<{ view: ViewMode; ctx: ReadyCtx; externalTurn?: Ex
     case "adr": body = <AdrPanel />; break;
     case "models": body = <ModelRouting />; break;
     case "ship": body = <ShipMode isAiReady={ctx.isAiReady} isDockerReady={ctx.isDockerReady} />; break;
-    case "deploy": return <DeploymentCanvas navigation={HUBS.map(h=><button key={h.id} aria-pressed={h.id==='deploy'} onClick={()=>goHub(h.id)}>{h.title}</button>)} onOpenDocker={() => onSelectMode("ship")} onOpenOperate={() => onSelectMode("operate")} isAiReady={ctx.isAiReady} isDockerReady={ctx.isDockerReady} isOpsReady={ctx.isOpsReady} />;
+    case "deploy": return <FeatureFrame feature="deploy" ctx={ctx} onGo={go}><DeploymentCanvas navigation={HUBS.map(h=><button key={h.id} aria-pressed={h.id==='deploy'} onClick={()=>onSelectMode(HUB_ENTRY[h.id] as ViewMode)}>{h.title}</button>)} onOpenDocker={() => onSelectMode("ship")} onOpenOperate={() => onSelectMode("operate")} isAiReady={ctx.isAiReady} isDockerReady={ctx.isDockerReady} isOpsReady={ctx.isOpsReady} /></FeatureFrame>;
     case "replay": body = <Replay />; break;
     case "operate": body = <OperateMode isActive={ctx.isOpsReady} />; break;
-    case "scan": body = <SecurityScanPanel kinds={["trivy", "hadolint"]} title="취약점 스캔" note="이미지·의존성은 Trivy, Dockerfile 은 Hadolint 로 검사합니다. 결과는 배포 승인 카드의 위험도에 반영돼요." />; break;
-    case "secrets": body = <SecurityScanPanel kinds={["gitleaks"]} title="시크릿 검사" note="저장소에 API 키·비밀번호 같은 값이 평문으로 남았는지 gitleaks 규칙으로 확인합니다. 찾은 값의 원문은 화면에 표시하지 않아요." />; break;
+    case "scan": body = <SecurityScanPanel kinds={["trivy", "hadolint"]} title="취약점 스캔" note="이미지 · 의존성은 Trivy, Dockerfile 은 Hadolint 로 검사합니다. 결과는 배포 승인 카드의 위험도에 반영됩니다." />; break;
+    case "secrets": body = <SecurityScanPanel kinds={["gitleaks"]} title="시크릿 검사" note="저장소에 API 키 · 비밀번호 같은 값이 평문으로 남았는지 gitleaks 규칙으로 확인합니다. 찾은 값의 원문은 화면에 표시하지 않습니다." />; break;
     case "policy": body = <PolicyPanel />; break;
   }
-  return <FeatureFrame feature={feature} onHome={goHome} onHub={goHub}>{body}</FeatureFrame>;
+  return <FeatureFrame feature={feature} ctx={ctx} onGo={go}>{body}</FeatureFrame>;
+};
+
+/** 3.0.2 화면 아래 요청창 — 적은 글을 코드 생성 입력칸으로 넘긴다(보내기는 그 화면에서 한 번 더 확인). */
+const Dock: React.FC<{ onSubmit: (text: string) => void }> = ({ onSubmit }) => {
+  const [text, setText] = useState("");
+  const submit = () => { const t = text.trim(); if (!t) return; onSubmit(t); setText(""); };
+  return <form className="rc-dock" role="search" aria-label="요청" onSubmit={(e) => { e.preventDefault(); submit(); }}>
+    <span className="rc-dock-ai" aria-hidden="true"><Glyph name="spark" size={15} /></span>
+    <input aria-label="ReCoder 에 요청" placeholder="무엇이든 요청하세요 · 기능 추가, 오류 원인, 배포" value={text} onChange={(e) => setText(e.target.value)} />
+    <kbd>Enter</kbd>
+    <button type="submit" className="rc-dock-go" aria-label="코드 생성으로 보내기" aria-disabled={!text.trim()}><Glyph name="arrow" size={17} sw={2.3} /></button>
+  </form>;
+};
+
+/** 위 막대의 프로젝트 이름 — 캔버스 스냅숏에서 한 번 읽는다. */
+const ProjectChip: React.FC = () => {
+  const { postMessage, useMessage } = useVSCodeApi();
+  const [p, setP] = useState<{ name: string; branch: string } | null>(null);
+  const id = useRef(`chip-${Date.now()}`);
+  useEffect(() => { postMessage("canvas.snapshot", { requestId: id.current }); }, [postMessage]);
+  useMessage(useCallback(({ type, payload }) => {
+    const x = (payload ?? {}) as { requestId?: string; snapshot?: { projectName?: string; git?: { branch?: string } } };
+    if (type === "canvas.snapshotResult" && x.snapshot && (x.requestId === id.current || x.requestId?.startsWith("home-snap-"))) {
+      setP({ name: x.snapshot.projectName || "", branch: x.snapshot.git?.branch || "" });
+    }
+    if (type === "canvas.projectChanged") { id.current = `chip-${Date.now()}`; postMessage("canvas.snapshot", { requestId: id.current }); }
+  }, [postMessage]));
+  if (!p?.name) return null;
+  return <span className="rc-proj" title={p.branch ? `${p.name} · ${p.branch}` : p.name}><b>{p.name}</b>{p.branch && <span>{p.branch}</span>}</span>;
 };
 
 //: 테스트에서 직접 렌더할 수 있도록 export 한다. 이 레이아웃에서 설계 결정
@@ -365,44 +397,41 @@ export const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
 }) => {
   const activeHub = isHubView(view) ? view.slice(4) : isFeatureView(view) ? hubOf(view) : '';
   const showReview = useCallback(() => onSelectMode("code"), [onSelectMode]);
+  //: 코드 생성(자기 입력칸이 있다) · 배포 캔버스 · 로컬 Docker(아래쪽 조작부가 있다)에서는 아래 요청창을 감춘다.
+  const dock = !["code", "hub:develop", "hub:deploy", "deploy", "ship"].includes(view);
   return (
-    <div className="rc-workspace">
-      <style>{`
-        .rc-workspace{height:100vh;display:grid;grid-template-columns:minmax(0,1fr);overflow:hidden;position:relative;background:var(--vscode-editor-background,#181818);color:var(--vscode-foreground,#e0e0e0)}
-        .rc-workspace-header{display:flex;align-items:center;gap:12px;min-height:62px;padding:10px 24px;border-bottom:1px solid var(--vscode-panel-border,#2a2a2a);flex-wrap:wrap}
-        .rc-workspace-header button{font:inherit;font-size:12px;cursor:pointer;color:inherit;background:transparent;border:1px solid var(--vscode-panel-border,#333);border-radius:6px;padding:6px 10px}
-        .rc-workspace-header .rc-brand{display:flex;align-items:center;gap:8px;border:0;padding-left:0;font-size:15px;font-weight:600}
-        .rc-workspace-header .rc-status-toggle{display:flex;align-items:center;gap:7px;color:var(--vscode-descriptionForeground,#aaa);border:0;font-size:11px;padding:6px}
-        .rc-global-nav{display:flex;align-items:center;gap:4px;margin-left:24px}.rc-nav-badge{display:inline-grid;place-items:center;min-width:16px;height:16px;padding:0 4px;margin-left:6px;border-radius:99px;background:var(--vscode-editorWarning-foreground,#cca700);color:var(--vscode-editor-background,#1b1500);font-size:10.5px;font-weight:700;line-height:1;vertical-align:1px}.rc-workspace-header .rc-global-nav button{border:0;padding:9px 14px;color:var(--vscode-descriptionForeground,#929ba7)}.rc-workspace-header .rc-global-nav button[aria-current=page]{background:var(--vscode-list-activeSelectionBackground,#263748);color:var(--vscode-list-activeSelectionForeground,#eef5ff)}
-        .rc-workspace-header .rc-quick-button{margin-left:auto;display:flex;align-items:center;gap:7px;border:0;color:var(--vscode-descriptionForeground,#aaa);font-size:11px}.rc-quick-button kbd{font-family:var(--vscode-editor-font-family,monospace);font-size:10px;border:1px solid var(--vscode-panel-border,#444);border-bottom-width:2px;border-radius:4px;padding:0 5px;color:var(--vscode-foreground,#ddd)}
-        .rc-workspace-connection{margin-left:0}.rc-workspace-header .rc-connection-button{display:flex;align-items:center;gap:7px;border:0;background:transparent;font-size:11px;color:var(--vscode-descriptionForeground,#aaa)}.rc-connection-dot{height:6px;width:6px;border-radius:50%;background:#d2a760}.rc-connection-dot[data-ready=true]{background:#56bf91}
+    <div className="rc-workspace rc-app">
+      <style>{THEME_CSS}{`
+        .rc-workspace{height:100vh;display:flex;flex-direction:column;overflow:hidden;position:relative;color:var(--rc-fg)}
         .rc-workspace .rc-local-hub-nav,.rc-workspace .rc-mode-nav{display:none!important}.rc-workspace [hidden]{display:none!important}
-        .rc-workspace-content{flex:1;min-height:0;overflow:auto;padding:28px 32px}
-        .rc-workspace button:focus-visible{outline:2px solid var(--vscode-focusBorder,#75b9ef);outline-offset:3px}
-        .rc-code-page{width:100%;max-width:1080px;margin:0 auto}
-        @media(max-width:850px){.rc-workspace-content{padding:16px}.rc-workspace-header{padding:10px 16px}}
-        @media(max-width:720px){.rc-global-nav{order:5;width:100%;margin:0;justify-content:center;border-top:1px solid var(--vscode-panel-border,#333);padding-top:8px}.rc-workspace-header{gap:6px}.rc-workspace-header .rc-status-toggle{max-width:18px;overflow:hidden;white-space:nowrap;padding:4px}.rc-status-toggle>span{flex-shrink:0}.rc-workspace-header .rc-brand{font-size:13px}.rc-workspace-header .rc-connection-button{font-size:10px;padding:4px}.rc-workspace-header>button:last-child{font-size:11px}}
+        .rc-workspace button:focus-visible{outline:2px solid var(--rc-teal);outline-offset:2px}
+        .rc-code-page{width:100%;max-width:1180px;margin:0 auto}
+        .rc-workspace-connection{display:flex}
       `}</style>
-      <section style={{ minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", borderRight: "1px solid var(--vscode-panel-border, #333)" }}>
-        <div className="rc-workspace-header">
-          <button className="rc-brand" onClick={() => onSelectMode("home")} aria-label="ReCoder 홈"><Icon.Logo size={22} />ReCoder</button>
-          <nav className="rc-global-nav" aria-label="작업 선택">{HUBS.map(h => <button key={h.id} aria-current={activeHub === h.id ? 'page' : undefined} onClick={() => onSelectMode(`hub:${h.id}`)}>{h.title}{h.id === 'monitor' && <MonitorBadge />}</button>)}</nav>
+      <header className="rc-top rc-workspace-header">
+        <button className="rc-brand" onClick={() => onSelectMode("home")} aria-label="ReCoder 홈"><BrandLogo size={28} />ReCoder</button>
+        <ProjectChip />
+        <nav className="rc-pills rc-global-nav" aria-label="작업 선택">
+          <button aria-current={view === "home" ? 'page' : undefined} onClick={() => onSelectMode("home")}>홈</button>
+          {HUBS.map(h => <button key={h.id} aria-current={activeHub === h.id ? 'page' : undefined} onClick={() => onSelectMode(HUB_ENTRY[h.id] as ViewMode)}>{h.title}{h.id === 'monitor' && <MonitorBadge />}</button>)}
+        </nav>
+        <div className="rc-top-right">
           <QuickAccess onSelectMode={onSelectMode} />
           <WorkspaceConnection />
           <StatusBadge pending={diagnosticsPending} error={diagnosticsError} compact diagnostics={diagnostics} coreStatus={coreStatus} expanded={showDiagnostics} onToggle={onToggleDiagnostics} />
         </div>
+      </header>
 
-        {hostLost && <div role="alert" data-testid="host-link-lost" style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 24px", borderBottom: "1px solid var(--vscode-inputValidation-warningBorder, #b89500)", background: "var(--vscode-inputValidation-warningBackground, rgba(204,167,0,.12))", color: "var(--vscode-foreground, #ddd)", fontSize: 12.5, lineHeight: 1.5 }}>
-          <strong style={{ flex: "none" }}>확장과 연결이 끊겼습니다</strong>
-          <span style={{ color: "var(--vscode-descriptionForeground, #aaa)" }}>이 창에서 보낸 요청은 처리되지 않습니다. Ctrl+Shift+P → <b>Developer: Reload Window</b> 로 창을 다시 불러오세요.</span>
-        </div>}
-        {showDiagnostics && <div id="workspace-diagnostics" style={{ borderBottom: "1px solid var(--vscode-panel-border, #333)", maxHeight: 260, overflowY: "auto" }}><DiagnosticsPanel diagnostics={diagnostics} /><CostTracker costSummary={costSummary} /></div>}
+      {hostLost && <div role="alert" data-testid="host-link-lost" style={{ display: "flex", alignItems: "center", gap: 10, margin: "0 22px 10px", padding: "10px 14px", borderRadius: 12, border: "1px solid color-mix(in srgb,var(--rc-warn) 45%,transparent)", background: "color-mix(in srgb,var(--rc-warn) 10%,transparent)", color: "var(--rc-fg)", fontSize: 12.5, lineHeight: 1.5 }}>
+        <strong style={{ flex: "none" }}>확장과 연결이 끊겼습니다</strong>
+        <span style={{ color: "var(--rc-fg2)" }}>이 창에서 보낸 요청은 처리되지 않습니다. Ctrl+Shift+P → <b>Developer: Reload Window</b> 로 창을 다시 불러오세요.</span>
+      </div>}
+      {showDiagnostics && <div id="workspace-diagnostics" style={{ margin: "0 22px 10px", border: "1px solid var(--rc-line2)", borderRadius: 14, background: "var(--rc-solid)", maxHeight: 280, overflowY: "auto" }}><DiagnosticsPanel diagnostics={diagnostics} /><CostTracker costSummary={costSummary} /></div>}
 
-        <div className="rc-workspace-content">
-          <HubRouter view={view} ctx={{ isAiReady, isDockerReady, isOpsReady }} externalTurn={externalTurn} onSelectMode={onSelectMode} onReviewRequired={showReview} connectionPending={diagnosticsPending || coreStatus === null} connectionError={diagnosticsError || (coreStatus && coreStatus !== "ok" ? "Core에 연결할 수 없습니다." : "")} />
-        </div>
-      </section>
-
+      <main className={`rc-main rc-workspace-content${dock ? "" : " rc-no-dock"}`}>
+        <HubRouter view={view === "hub:develop" ? "code" : view} ctx={{ isAiReady, isDockerReady, isOpsReady }} externalTurn={externalTurn} onSelectMode={onSelectMode} onReviewRequired={showReview} connectionPending={diagnosticsPending || coreStatus === null} connectionError={diagnosticsError || (coreStatus && coreStatus !== "ok" ? "Core에 연결할 수 없습니다." : "")} />
+      </main>
+      {dock && <Dock onSubmit={(t) => { setPendingPrompt(t); onSelectMode("code"); }} />}
     </div>
   );
 };
@@ -558,11 +587,12 @@ const App: React.FC = () => {
     />;
   }
 
-  return <div style={{ height: "100vh", background: "var(--vscode-sideBar-background, #1e1e1e)" }}>
+  return <div className="rc-app" style={{ height: "100vh", background: "var(--rc-bg, var(--vscode-sideBar-background, #1e1e1e))" }}>
+    <style>{THEME_CSS}</style>
     <Hero onOpenWorkspace={() => postMessage("openWorkbench")} />
     <StatusBadge diagnostics={diagnostics} coreStatus={coreHealth?.status ?? null} pending={diagnosticsPending} error={diagnosticsError} expanded={showDiagnostics} onToggle={() => setShowDiagnostics(v => !v)} />
     {showDiagnostics && <DiagnosticsPanel diagnostics={diagnostics} />}
-    <p style={{ padding: "12px 16px", fontSize: 12, lineHeight: 1.7, color: "var(--vscode-descriptionForeground, #999)" }}>개발, 배포, 보안 작업을 ReCoder 창에서 이어가세요.</p>
+    <p style={{ padding: "12px 16px", fontSize: 12.5, lineHeight: 1.7, color: "var(--rc-fg2, var(--vscode-descriptionForeground, #999))" }}>개발 · 배포 · 보안 · 운영을 ReCoder 창에서 이어가세요.</p>
   </div>;
 };
 

@@ -233,7 +233,7 @@ export const BuildMode: React.FC<BuildModeProps> = ({ isActive, externalTurn, on
           color: approvalResult === "approved" ? "#22c55e" : "#ef4444",
           fontWeight: 600,
         }}>
-          {approvalResult === "approved" ? "✓ 패치가 성공적으로 적용되었습니다" : "✗ 패치가 거절되었습니다"}
+          {approvalResult === "approved" ? "패치를 적용했습니다" : "패치를 거절했습니다"}
         </div>
       )}
 

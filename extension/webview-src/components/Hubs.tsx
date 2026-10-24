@@ -18,6 +18,8 @@ import { scanCounts } from './ShipMode';
 import { adrStatus } from './adrStatus';
 import { isNotApplicable } from './securityGate';
 import { SecurityFixList } from './SecurityFixList';
+import { Ring } from './shell/parts';
+import { FeatureHero, hasHero } from './shell/FeatureHero';
 
 export type HubId = "develop" | "deploy" | "security" | "monitor";
 export type FeatureId =
@@ -192,13 +194,47 @@ export const HubPage: React.FC<{ hub: HubId; ctx: ReadyCtx; onOpen: (f: FeatureI
   </div>
 );
 
-// ── 기능 프레임 (브레드크럼 + 기존 컴포넌트) ─────────────────────────────
-export const FeatureFrame: React.FC<{ feature: FeatureId; onHome: () => void; onHub: (h: HubId) => void; children: React.ReactNode }> = ({ feature, onHome, onHub, children }) => (
-  <div>
-    <HubCrumb hub={hubOf(feature)} feature={feature} onHome={onHome} onHub={onHub} />
-    {children}
-  </div>
-);
+// ── 허브 안 탭 (3.0.2) ───────────────────────────────────────────────────
+//: 위쪽 큰 탭(Develop · Deploy · Security · Operate)을 고르면 그 허브의 첫 화면이 바로 열리고,
+//: 그 아래 한 줄 탭에 허브의 모든 기능이 늘 보인다(카드 페이지를 한 번 더 거치지 않는다).
+export const HUB_TABS: Record<HubId, Array<{ view: string; label: string; feature?: FeatureId }>> = {
+  develop: [{ view: "code", label: "코드 생성", feature: "code" }, { view: "build", label: "에러 분석", feature: "build" }, { view: "map", label: "아키텍처", feature: "map" }, { view: "adr", label: "설계 기록", feature: "adr" }, { view: "models", label: "AI 모델 · 비용", feature: "models" }],
+  deploy: [{ view: "hub:deploy", label: "배포 캔버스", feature: "deploy" }, { view: "ship", label: "로컬 Docker", feature: "ship" }, { view: "replay", label: "배포 기록 · 롤백", feature: "replay" }],
+  security: [{ view: "hub:security", label: "전체 검사" }, { view: "scan", label: "취약점 스캔", feature: "scan" }, { view: "secrets", label: "시크릿 검사", feature: "secrets" }, { view: "policy", label: "정책 게이트", feature: "policy" }],
+  monitor: [{ view: "hub:monitor", label: "상태" }, { view: "operate", label: "운영 대응", feature: "operate" }],
+};
+/** 위쪽 큰 탭이 여는 첫 화면. */
+export const HUB_ENTRY: Record<HubId, string> = { develop: "code", deploy: "hub:deploy", security: "hub:security", monitor: "hub:monitor" };
+
+export const HubTabs: React.FC<{ hub: HubId; current: string; ctx?: ReadyCtx; onGo: (view: string) => void }> = ({ hub, current, ctx, onGo }) => {
+  const shipGate = ctx && hub === "deploy" ? FEATURE_BY_ID.ship.gate!(ctx) : { enabled: true };
+  return (
+    <div className="rc-hub-tabs" style={{ display: "flex", alignItems: "flex-end", gap: 12, flexWrap: "wrap" }}>
+      <nav className="rc-subtabs" aria-label={`${HUBS.find(h => h.id === hub)!.title} 기능`} style={{ flex: 1, minWidth: 0 }}>
+        {HUB_TABS[hub].map(t => {
+          const g = t.feature && ctx && FEATURE_BY_ID[t.feature].gate ? FEATURE_BY_ID[t.feature].gate!(ctx) : { enabled: true };
+          return <button key={t.view} aria-current={current === t.view ? "page" : undefined} title={g.enabled ? undefined : g.hint} onClick={() => onGo(t.view)}>{t.label}</button>;
+        })}
+      </nav>
+      {!shipGate.enabled && <div style={{ marginBottom: 14 }}><DockerFix /></div>}
+    </div>
+  );
+};
+
+// ── 기능 프레임 (허브 탭 + 기존 컴포넌트) ────────────────────────────────
+export const FeatureFrame: React.FC<{ feature: FeatureId; ctx?: ReadyCtx; onGo?: (view: string) => void; onHome?: () => void; onHub?: (h: HubId) => void; children: React.ReactNode }> = ({ feature, ctx, onGo, onHub, children }) => {
+  const hub = hubOf(feature);
+  const current = feature === "deploy" ? "hub:deploy" : feature;
+  const go = onGo ?? ((v: string) => { if (v.startsWith("hub:")) onHub?.(v.slice(4) as HubId); });
+  return (
+    <div className="rc-feature-frame">
+      <HubTabs hub={hub} current={current} ctx={ctx} onGo={go} />
+      {hub === "develop" && ctx && !ctx.isAiReady && (feature === "code" || feature === "build") && <div style={{ marginBottom: 16 }}><AiConnectBanner /></div>}
+      {hasHero(feature) && <FeatureHero kind={feature} />}
+      <div className="rc-feature-body">{children}</div>
+    </div>
+  );
+};
 
 // ── ADR 목록/본문 ─────────────────────────────────────────────────────────
 interface AdrItem { file: string; title: string; id: string; }
@@ -302,52 +338,71 @@ export const SecurityScanPanel: React.FC<{ kinds: ScanKind[]; title: string; not
   }, [send]);
   const label: Record<ScanKind, string> = { trivy: '이미지 · 의존성', hadolint: 'Dockerfile', gitleaks: '시크릿' };
 
+  const VC = { bad: "var(--rc-bad,#ff8b8b)", warn: "var(--rc-warn,#f0b35b)", ok: "var(--rc-ok,#7ed3a2)" };
   const verdict = (r?: ScanResultLite) => {
     if (!r) return { text: "미실행", color: C.muted };
     if (r.status !== "ok" && isNotApplicable(r, r.scan_type as ScanKind)) return { text: "해당 없음", color: C.muted };
     if (r.status !== "ok") {
       //: raw 메시지가 아니라 코어가 분류한 원인 → 다음 행동.
-      return { text: '검사 미확인', color: "#f0b35b" };
+      return { text: '검사 미확인', color: VC.warn };
     }
     const counts = scanCounts({ ...r, exit_code:0, findings:r.findings });
-    if (!counts) return { text:'검사 미확인', color:'#f0b35b' };
+    if (!counts) return { text:'검사 미확인', color:VC.warn };
     const c = counts.critical, h = counts.high;
     const n = Math.max(Array.isArray(r.findings) ? r.findings.length : 0, r.medium_count ?? 0);
-    if (c || h) return { text: `심각 ${c} · 높음 ${h}`, color: "#ff8b8b" };
-    if (n) return { text: `발견 ${n}건 (낮음·중간)`, color: "#f0b35b" };
-    return { text: "이상 없음", color: "#7ed3a2" };
+    if (c || h) return { text: `심각 ${c} · 높음 ${h}`, color: VC.bad };
+    if (n) return { text: `발견 ${n}건 (낮음·중간)`, color: VC.warn };
+    return { text: "이상 없음", color: VC.ok };
   };
 
   return (
     <div className="rc-scan-panel" aria-busy={running !== null}>
       <style>{`
-        .rc-scan-panel{border:1px solid ${C.line};border-radius:12px;padding:24px;background:transparent}
-        .rc-scan-heading{display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-bottom:24px}
-        .rc-scan-heading h2{font-size:17px;font-weight:600;margin:0 0 8px}.rc-scan-heading p{font-size:12px;color:${C.muted};line-height:1.6;margin:0;max-width:480px}
-        .rc-scan-row{border-top:1px solid ${C.line}}.rc-scan-row summary{cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:20px 0;list-style:none;font-size:13px}.rc-scan-row summary::-webkit-details-marker{display:none}
-        .rc-scan-row summary span{font-size:11px}.rc-scan-row summary span::after{content:' ＋';color:${C.muted}}.rc-scan-row[open] summary span::after{content:' −'}
-        .rc-scan-detail{font-size:12px;line-height:1.7;color:${C.muted};padding:0 0 20px}.rc-scan-detail p{margin:0 0 12px;overflow-wrap:anywhere}
-        .rc-security-page{max-width:860px;margin:20px auto}.rc-security-policy{margin-top:22px}.rc-security-policy>summary{cursor:pointer;color:${C.muted};font-size:12px;padding:12px 0}
+        .rc-scan-panel{border:1px solid var(--rc-line,${C.line});border-radius:18px;padding:22px;background:var(--rc-tile,transparent)}
+        .rc-scan-heading{display:flex;align-items:center;gap:20px;flex-wrap:wrap;margin-bottom:20px}
+        .rc-scan-heading .t{flex:1;min-width:220px}
+        .rc-scan-heading h2{font-size:18px;font-weight:650;letter-spacing:-.02em;margin:0 0 6px}.rc-scan-heading p{font-size:12.5px;color:${C.muted};line-height:1.6;margin:0;max-width:520px}
+        .rc-scan-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px}
+        .rc-scan-row{border:1px solid var(--rc-line,${C.line});border-radius:14px;background:var(--rc-tile2,transparent)}
+        .rc-scan-row summary{cursor:pointer;display:flex;flex-direction:column;gap:6px;padding:16px;list-style:none;font-size:13px}.rc-scan-row summary::-webkit-details-marker{display:none}
+        .rc-scan-row summary strong{font-size:14px;font-weight:600}.rc-scan-row summary span{font-size:12px;display:flex;align-items:center;gap:7px}
+        .rc-scan-row summary span:before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
+        .rc-scan-row[open]{grid-column:1/-1}
+        .rc-scan-detail{font-size:12.5px;line-height:1.7;color:${C.muted};padding:0 16px 16px}.rc-scan-detail p{margin:0 0 12px;overflow-wrap:anywhere}
+        .rc-security-page{max-width:1080px;margin:0 auto}.rc-security-policy{margin-top:22px}.rc-security-policy>summary{cursor:pointer;color:${C.muted};font-size:12.5px;padding:12px 0}
       `}</style>
-      <div className="rc-scan-heading"><div><h2>{title}</h2><p>{note}</p></div><button onClick={() => run(kinds)} disabled={running !== null} style={{ ...btnStyle(true, running === null), padding:'10px 16px' }}>{running ? '검사 중…' : '보안 검사 시작'}</button></div>
+      {(() => {
+        const done = kinds.filter(k => results[k]);
+        const v = kinds.map(k => verdict(results[k]));
+        const bad = v.some(x => x.color === VC.bad), warn = v.some(x => x.color === VC.warn);
+        const tone: "ok" | "warn" | "bad" | "off" = !done.length ? "off" : bad ? "bad" : warn ? "warn" : "ok";
+        const label = running ? "검사 중" : !done.length ? "검사 전" : bad ? "차단" : warn ? "확인 필요" : done.length < kinds.length ? "일부 완료" : "통과";
+        return <div className="rc-scan-heading">
+          <Ring value={done.length / kinds.length} tone={tone} size={86}><b style={{ fontSize: label.length > 3 ? 12.5 : 17, letterSpacing: "-.02em" }}>{label}</b></Ring>
+          <div className="t"><h2>{title}</h2><p>{note}</p></div>
+          <button onClick={() => run(kinds)} disabled={running !== null} className="rc-btn p" aria-disabled={running !== null}>{running ? '검사 중…' : '보안 검사 시작'}</button>
+        </div>;
+      })()}
+      <div className="rc-scan-grid">
       {kinds.map(k => {
         const v = verdict(results[k]);
         return (
           <details key={k} className="rc-scan-row">
             <summary><strong>{label[k]}</strong><span style={{ color: running === k ? C.link : v.color }}>{running === k ? '검사 중…' : v.text}</span></summary>
-            <div className="rc-scan-detail"><p style={{ whiteSpace:'pre-line' }}>{k} · {securityResultDetail(results[k])}</p><button onClick={() => run([k])} disabled={running !== null} style={btnStyle(false, running === null)}>{label[k]}만 검사</button></div>
+            <div className="rc-scan-detail"><p style={{ whiteSpace:'pre-line' }}>{k} · {securityResultDetail(results[k])}</p><button onClick={() => run([k])} disabled={running !== null} className="rc-btn sm">{label[k]}만 검사</button></div>
           </details>
         );
       })}
+      </div>
       <div role="status" style={{ marginTop: 12, color: C.muted, fontSize: 11 }}>{running ? `${label[running]} 검사 중` : '항목을 누르면 결과와 개별 검사 메뉴가 열립니다.'}</div>
       <SecurityFixList results={results} running={running !== null} onRescan={run} />
     </div>
   );
 };
 
-export const SecurityHub: React.FC<{ onHome: () => void; onHub: (hub: HubId) => void }> = ({ onHome, onHub }) => <section className="rc-security-page">
-  <HubCrumb hub="security" onHome={onHome} onHub={onHub} />
-  <div style={{ marginTop:32 }}><SecurityScanPanel kinds={['trivy','hadolint','gitleaks']} title="배포 전 확인" note="이미지, Dockerfile, 소스에 남은 비밀값을 한 번에 검사하세요." /></div>
+export const SecurityHub: React.FC<{ onHome?: () => void; onHub?: (hub: HubId) => void; onGo?: (view: string) => void }> = ({ onHub, onGo }) => <section className="rc-security-page">
+  <HubTabs hub="security" current="hub:security" onGo={onGo ?? ((v) => { if (v.startsWith("hub:")) onHub?.(v.slice(4) as HubId); })} />
+  <div><SecurityScanPanel kinds={['trivy','hadolint','gitleaks']} title="배포 전 확인" note="이미지, Dockerfile, 소스에 남은 비밀값을 한 번에 검사하세요." /></div>
   <details className="rc-security-policy"><summary>배포 승인 · 차단 기준 보기</summary><PolicyPanel /></details>
 </section>;
 

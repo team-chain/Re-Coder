@@ -85,12 +85,14 @@ if(process.env.HARNESS_PROGRESS==='1') {
 let receiver, queue = [];
 const webview = {postMessage:async m=>{queue.push(m);return true;},onDidReceiveMessage(fn){receiver=fn;return{dispose(){}};}};
 provider.attachWorkspacePanel(webview);
-const html = `<!doctype html><html lang="ko" data-recoder-layout="workspace"><meta charset="utf-8"><title>ReCoder production flow fixture</title><style>body{margin:0;background:#181818;color:#ddd;font-family:Segoe UI,sans-serif}button{cursor:pointer}</style><div id="root"></div><script>
+const html = `<!doctype html><html lang="ko" data-recoder-layout="workspace" data-recoder-logo="/logo.png"><meta charset="utf-8"><title>ReCoder production flow fixture</title><style>@font-face{font-family:Pretendard;src:url(/font.woff2) format("woff2");font-weight:100 900}body{margin:0;background:#181818;color:#ddd;font-family:Segoe UI,sans-serif}button{cursor:pointer}</style><body class="${process.env.HARNESS_LIGHT ? "vscode-light" : "vscode-dark"}"><div id="root"></div><script>
 window.acquireVsCodeApi=()=>({postMessage:message=>{if(new URLSearchParams(location.search).has('dropGraph')&&message.type==='canvas.graph')return;return fetch('/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(message)});},getState:()=>null,setState:()=>{}});
 setInterval(async()=>{for(const m of await(await fetch('/events')).json())window.dispatchEvent(new MessageEvent('message',{data:m}));},30);
 </script><script src="/webview.js"></script></html>`;
 http.createServer(async(req,res)=>{
   if(req.url==='/webview.js'){res.setHeader('Content-Type','text/javascript');return fs.createReadStream(path.join(__dirname,'../out/webview/webview.js')).pipe(res);}
+  if(req.url==='/font.woff2'){res.setHeader('Content-Type','font/woff2');return fs.createReadStream(path.join(__dirname,'../media/fonts/PretendardVariable.woff2')).pipe(res);}
+  if(req.url==='/logo.png'){res.setHeader('Content-Type','image/png');return fs.createReadStream(path.join(__dirname,'../media/icon.png')).pipe(res);}
   if(req.url==='/events'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify(queue));queue=[];return;}
   if(req.url==='/message'&&req.method==='POST'){
     let data='';for await(const c of req)data+=c;

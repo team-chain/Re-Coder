@@ -148,6 +148,13 @@ export interface ExternalTurn { requestId: number; instruction: string; targetFo
 //: 코드 화면이 처음 그려질 때 꺼내 쓴다(메시지가 화면보다 먼저 와서 사라지던 문제).
 let pendingTargetFolder: string | null = null;
 export function setPendingTargetFolder(folder: string): void { pendingTargetFolder = folder; }
+//: 3.0.2 — 화면 아래 요청창에 적은 글을 코드 생성 입력칸으로 넘긴다(보내기는 사용자가 확인하고 누른다).
+let pendingPrompt: string | null = null;
+export const PROMPT_EVENT = "recoder:prompt";
+export function setPendingPrompt(text: string): void {
+  pendingPrompt = text;
+  if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent(PROMPT_EVENT, { detail: text }));
+}
 
 
 //: 모달 창 안에서 Tab 이 창 밖(뒤의 입력창·머리글)으로 나가지 않게 돈다.
@@ -167,7 +174,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
   const { postMessage, useMessage } = useVSCodeApi();
 
   //: 쓰던 요청은 화면이 다시 그려져도(창 다시 불러오기·확장 재시작) 남는다.
-  const [input, setInput] = useState(() => { const d = loadUiState().codeDraft; return typeof d === "string" ? d : ""; });
+  const [input, setInput] = useState(() => { if (pendingPrompt) { const t = pendingPrompt; pendingPrompt = null; return t; } const d = loadUiState().codeDraft; return typeof d === "string" ? d : ""; });
   useEffect(() => { saveUiState({ codeDraft: input }); }, [input]);
   const [targetFolder, setTargetFolder] = useState(() => { const f = pendingTargetFolder ?? ""; pendingTargetFolder = null; return f; });
   const [contextFiles, setContextFiles] = useState<CtxFile[]>([]);
@@ -449,6 +456,19 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
       });
     }
   }, [onReviewRequired]));
+
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const onPrompt = (e: Event) => {
+      const t = String((e as CustomEvent).detail ?? "");
+      if (!t) return;
+      pendingPrompt = null;
+      setInput(t);
+      window.setTimeout(() => inputRef.current?.focus(), 0);
+    };
+    window.addEventListener(PROMPT_EVENT, onPrompt);
+    return () => window.removeEventListener(PROMPT_EVENT, onPrompt);
+  }, []);
 
   const send = useCallback(() => {
     const text = input.trim();

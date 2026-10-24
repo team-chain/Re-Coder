@@ -50,6 +50,8 @@ class DeployConfirmModal(ui.Modal, title="배포 확인"):
                 "service": self._service,
                 "image_tag": self._image_tag,
                 "region": self._region,
+                # 'DEPLOY' 확인을 거친 요청만 여기까지 온다 — 코어는 approved 없이는 배포하지 않는다.
+                "approved": True,
             })
 
             embed = discord.Embed(

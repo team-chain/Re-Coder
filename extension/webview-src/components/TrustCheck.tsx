@@ -3,16 +3,17 @@
  * 이 점검은 배포를 새로 막지 않는다. "막힘"은 이미 배포를 막는 검사(Dockerfile 안전 검사)의 결과다.
  */
 import React from "react";
+import { MarkGlyph } from "./ui/marks";
 
 export interface TrustItem { key: string; principle: string; status: "pass" | "warn" | "block" | "info"; title: string; detail: string; fix: string }
 export interface TrustPrinciple { key: string; label: string; summary: string; status: "pass" | "warn" | "block"; items: TrustItem[] }
 export interface TrustReport { target: string; principles: TrustPrinciple[]; counts: Record<"pass" | "warn" | "block" | "info", number>; scanned_files: number; truncated: boolean; note?: string }
 
-const TONE: Record<string, { icon: string; color: string; label: string }> = {
-  pass: { icon: "✓", color: "var(--vscode-testing-iconPassed, #3ddc97)", label: "통과" },
+const TONE: Record<string, { icon: React.ReactNode; color: string; label: string }> = {
+  pass: { icon: <MarkGlyph kind="ok" size={9} />, color: "var(--vscode-testing-iconPassed, #3ddc97)", label: "통과" },
   info: { icon: "i", color: "var(--vscode-descriptionForeground, #93a8bc)", label: "참고" },
   warn: { icon: "!", color: "var(--vscode-editorWarning-foreground, #f7b955)", label: "주의" },
-  block: { icon: "✕", color: "var(--vscode-editorError-foreground, #ff6573)", label: "막힘" },
+  block: { icon: <MarkGlyph kind="bad" size={9} />, color: "var(--vscode-editorError-foreground, #ff6573)", label: "막힘" },
 };
 
 const Mark: React.FC<{ status: string }> = ({ status }) => {

@@ -9,6 +9,7 @@
  * 지어낸 대화·가짜 진행률은 넣지 않는다. 비용은 단가를 아는 호출만 더하고, 모르면 "단가 미설정"으로 따로 센다.
  */
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { MarkGlyph } from "./ui/marks";
 import { Icon } from "./ui/icons";
 import { CHARACTER_SRC } from "./recoderCharacter";
 import { prettyModel, formatCost } from "./teamConfig";
@@ -220,12 +221,12 @@ export const AgentVillage: React.FC<AgentVillageProps> = ({ roster, view, paused
         <div className="rc-av-stages" aria-label="진행 단계">
           {stagesOf(shown).map((s, i, all) => (
             <React.Fragment key={s.label}>
-              <span className={`rc-av-stage ${s.state}`}>{s.state === "done" ? "✓ " : ""}{s.label}</span>
+              <span className={`rc-av-stage ${s.state}`}>{s.state === "done" ? <><MarkGlyph kind="ok" size={10} label="완료" /> </> : ""}{s.label}</span>
               {i < all.length - 1 && <span className="rc-av-arrow" aria-hidden="true">›</span>}
             </React.Fragment>
           ))}
         </div>
-        <div className="rc-av-grid" role="listbox" aria-label="리코더">
+        <div className="rc-av-grid" role="listbox" aria-label="AI 팀원">
           {cards.map(({ m, c }) => (
             <button key={m.id} type="button" role="option" aria-selected={m.id === sel.id} data-agent={m.id}
               className={`rc-av-card${m.id === sel.id ? " sel" : ""}`} onClick={() => { setSelected(m.id); setPickedFile(null); }}>
@@ -280,7 +281,7 @@ export const AgentVillage: React.FC<AgentVillageProps> = ({ roster, view, paused
               {code ? <pre className="rc-av-code" data-testid="village-code">{code}</pre>
                 : <div className="rc-av-empty">{writingNow ? `${fileToShow} 작성 중 — 파일이 완성되면 내용이 보입니다.` : "아직 완성한 파일이 없습니다."}</div>}
               {!files?.[fileToShow ?? ""] && code && <div className="rc-av-empty">앞 40줄 · 비밀값 모양은 가림</div>}
-            </> : <div className="rc-av-empty">{sel.role === "test" ? "테스트는 코드를 쓰지 않고 실행 중인 앱에 요청을 보내 확인합니다." : sel.role === "review" ? "검토는 다른 리코더의 파일을 읽고 고칩니다." : "아직 완성한 파일이 없습니다."}</div>
+            </> : <div className="rc-av-empty">{sel.role === "test" ? "테스트는 코드를 쓰지 않고 실행 중인 앱에 요청을 보내 확인합니다." : sel.role === "review" ? "검토는 다른 팀원의 파일을 읽고 고칩니다." : "아직 완성한 파일이 없습니다."}</div>
           )}
           {tab === "checks" && (
             sel.role === "test" ? (testCriteria.length ? (

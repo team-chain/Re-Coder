@@ -8,7 +8,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import { Button, Kit, Line } from "./ui/kit";
 import { Icon } from "./ui/icons";
-import { CHARACTER_SRC } from "./recoderCharacter";
+import { AreaChart } from "./shell/parts";
 import { Logo } from "./canvas/Scene";
 import {
   AlertView, MonitorCurrentView, MonitorData, Offer, TimelineItem, clock, hero, kindIcon, minutesAgo, pendingAlerts, revOf,
@@ -16,7 +16,10 @@ import {
 } from "./monitorModel";
 
 const CSS = `
-.rc-mon{max-width:720px;margin:0 auto}
+.rc-mon{max-width:1320px;margin:0 auto}
+.rc-mon-grid{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:16px;align-items:start}
+.rc-mon-grid>div>.label:first-child{margin-top:0}
+@media (max-width:900px){.rc-mon-grid{grid-template-columns:1fr}}
 .rc-mon .hd{display:flex;align-items:center;gap:10px;margin-bottom:16px}
 .rc-mon .hd h1{margin:0;font-size:19px;font-weight:650}
 .rc-mon .app{display:flex;align-items:center;gap:7px;height:30px;padding:0 10px 0 6px;border-radius:10px;background:var(--rk-surface);font-size:12.5px;min-width:0}
@@ -27,10 +30,10 @@ const CSS = `
 .rc-mon .icon-btn:hover{background:var(--rk-surface)}.rc-mon .icon-btn:focus-visible{outline:2px solid var(--vscode-focusBorder,#3d8bff)}
 .rc-mon .icon-btn[aria-busy=true] svg{animation:rc-mon-spin 1s linear infinite}
 @keyframes rc-mon-spin{to{transform:rotate(360deg)}}
-.rc-mon .card{background:var(--rk-surface);border-radius:16px}
-.rc-mon .hero{display:flex;align-items:center;gap:14px;padding:18px 20px}
-.rc-mon .hero img{width:46px;height:46px;flex:none}
-.rc-mon .hero b{font-size:16px;font-weight:650;display:block;line-height:1.35}
+.rc-mon .card{background:var(--rc-tile,var(--rk-surface));border:1px solid var(--rc-line,transparent);border-radius:18px;overflow:hidden}
+.rc-mon .hero{position:relative;padding:18px 20px 0;background:linear-gradient(165deg,rgba(53,169,209,.12),transparent 55%),var(--rc-tile,var(--rk-surface))}
+.rc-mon .hero .chart{margin:10px -20px 0}
+.rc-mon .hero b{font-size:20px;font-weight:700;letter-spacing:-.02em;display:block;line-height:1.35}
 .rc-mon .hero p{margin:3px 0 0;color:var(--rk-fg2);font-size:12.5px}
 .rc-mon .hero .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:8px;vertical-align:2px;background:var(--rk-ok)}
 .rc-mon .hero[data-tone=warn] .dot{background:var(--rk-warn)}.rc-mon .hero[data-tone=bad] .dot{background:var(--rk-bad)}.rc-mon .hero[data-tone=off] .dot{background:var(--rk-fg3)}
@@ -38,15 +41,15 @@ const CSS = `
 .rc-mon .label button{all:unset;cursor:pointer;color:var(--vscode-textLink-foreground,#3d8bff);font-weight:400}
 .rc-mon .todo{display:flex;align-items:center;gap:12px;padding:12px 14px 12px 16px}
 .rc-mon .todo+.todo,.rc-mon .confirm+.todo{border-top:1px solid var(--rk-hair)}
-.rc-mon .ib{width:32px;height:32px;border-radius:10px;display:grid;place-items:center;flex:none;background:var(--rk-surface2);color:var(--rk-fg2)}
-.rc-mon .ib.bad{background:color-mix(in srgb,var(--rk-bad) 14%,transparent);color:var(--rk-bad)}
-.rc-mon .ib.warn{background:color-mix(in srgb,var(--rk-warn) 14%,transparent);color:var(--rk-warn)}
-.rc-mon .ib.info{background:var(--rk-accent-soft);color:var(--rk-accent)}
+.rc-mon .ib{width:22px;height:32px;display:grid;place-items:center;flex:none;color:var(--rk-fg3)}
+.rc-mon .ib.bad{color:var(--rk-bad)}
+.rc-mon .ib.warn{color:var(--rk-warn)}
+.rc-mon .ib.info{color:var(--rc-teal,var(--rk-accent))}
 .rc-mon .tx{flex:1;min-width:0}.rc-mon .tx b{display:block;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .rc-mon .tx small{display:block;color:var(--rk-fg3);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .rc-mon .acts{display:flex;gap:6px;flex:none}
 .rc-mon .acts .rk-btn{width:auto}
-.rc-mon .confirm{margin:0 14px 12px 60px;padding:10px 12px;border-radius:11px;background:color-mix(in srgb,var(--rk-warn) 10%,transparent);font-size:12.5px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.rc-mon .confirm{margin:0 14px 12px 50px;padding:10px 12px;border-radius:11px;background:color-mix(in srgb,var(--rk-warn) 10%,transparent);font-size:12.5px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .rc-mon .confirm span{flex:1;min-width:180px}
 .rc-mon .stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}
 .rc-mon .stat{padding:14px 16px;min-width:0}.rc-mon .stat+.stat{border-left:1px solid var(--rk-hair)}
@@ -58,14 +61,14 @@ const CSS = `
 .rc-mon .ev+.ev,.rc-mon .more+.ev{border-top:1px solid var(--rk-hair)}
 .rc-mon .ev:hover{background:var(--rk-surface)}.rc-mon .ev:focus-visible{outline:2px solid var(--vscode-focusBorder,#3d8bff);outline-offset:-2px}
 .rc-mon .ev time{width:44px;flex:none;color:var(--rk-fg3);font-variant-numeric:tabular-nums;font-size:12px}
-.rc-mon .ev .ib{width:26px;height:26px;border-radius:8px}
+.rc-mon .ev .ib{width:18px;height:26px}
 .rc-mon .ev .new{width:6px;height:6px;border-radius:50%;background:var(--rk-accent);flex:none}
-.rc-mon .more{padding:0 16px 12px 88px;color:var(--rk-fg2);font-size:12.5px;line-height:1.55;overflow-wrap:anywhere}
+.rc-mon .more{padding:0 16px 12px 80px;color:var(--rk-fg2);font-size:12.5px;line-height:1.55;overflow-wrap:anywhere}
 .rc-mon .more small{display:block;color:var(--rk-fg3);margin-top:4px}
 .rc-mon .empty{padding:22px 18px;text-align:center;color:var(--rk-fg3);font-size:12.5px}
 .rc-mon .empty b{display:block;color:var(--rk-fg);font-size:14px;margin:6px 0 2px}
 .rc-mon .watch{display:flex;align-items:center;gap:12px;padding:12px 14px 12px 16px}
-.rc-mon .panel{padding:2px 16px 14px 60px}
+.rc-mon .panel{padding:2px 16px 14px 50px}
 .rc-mon .kv{display:flex;justify-content:space-between;gap:12px;padding:8px 0;font-size:12.5px}.rc-mon .kv+.kv{border-top:1px solid var(--rk-hair)}
 .rc-mon .kv span{color:var(--rk-fg2);flex:none}.rc-mon .kv b{flex:1;min-width:0;font-weight:500;text-align:right;overflow-wrap:anywhere}
 .rc-mon .field{display:flex;gap:8px;margin-top:10px}.rc-mon .field .rk-input{flex:1;min-width:0}.rc-mon .field .rk-btn{width:auto;flex:none;height:34px}
@@ -313,20 +316,33 @@ export function MonitorView(props: MonitorViewProps) {
         </div>
       )}
       {cur && h && (
-        <>
-          <div className="card hero" data-tone={h.tone} data-testid="mon-hero"><img src={CHARACTER_SRC} alt="" />
-            <div style={{ minWidth: 0 }}><b><span className="dot" />{h.title}</b><p>{h.sub}</p></div></div>
-          {cur.gaps.map((g) => <Line key={g} icon="alert" tone="warn">{g}</Line>)}
-          <Todo cur={cur} busy={busy} onRollback={props.onRollback} onAct={props.onAct} />
-          <div className="label"><span>지금</span><span>최근 24시간</span></div>
-          <Stats cur={cur} />
-          <Records items={items} now={new Date(now)} />
-          <div className="label"><span>감시</span></div>
-          <Watcher cur={cur} plan={plan ?? null} busy={busy} now={now} onPlan={props.onPlan} onInstall={props.onInstall}
-            onUninstall={props.onUninstall} onSettings={props.onSettings} />
-        </>
+        <div className="rc-mon-grid">
+          <div>
+            <div className="card hero" data-tone={h.tone} data-testid="mon-hero">
+              <div style={{ minWidth: 0 }}><b><span className="dot" />{h.title}</b><p>{h.sub}</p></div>
+              {cur.series && cur.series.requests.length > 1 ? <div className="chart"><AreaChart values={cur.series.requests} errors={cur.series.errors} height={120} /></div> : <div style={{ height: 18 }} />}
+            </div>
+            {cur.gaps.map((g) => <Line key={g} icon="alert" tone="warn">{g}</Line>)}
+            <div className="label"><span>지금</span><span>최근 24시간</span></div>
+            <Stats cur={cur} />
+            <Records items={items} now={new Date(now)} />
+          </div>
+          <div>
+            {pending === 0 && <><div className="label"><span>할 일</span></div><div className="card empty" data-testid="mon-calm">승인할 일이 없습니다</div></>}
+            <Todo cur={cur} busy={busy} onRollback={props.onRollback} onAct={props.onAct} />
+            <div className="label"><span>감시</span></div>
+            <Watcher cur={cur} plan={plan ?? null} busy={busy} now={now} onPlan={props.onPlan} onInstall={props.onInstall}
+              onUninstall={props.onUninstall} onSettings={props.onSettings} />
+            <div className="label"><span>대응</span></div>
+            <div className="card watch" data-testid="mon-operate">
+              <span className="ib"><Icon name="pulse" size={16} /></span>
+              <div className="tx"><b>운영 대응</b><small>원인 분석 · 조치 제안</small></div>
+              <div className="acts"><Button small variant="ghost" onClick={onOpenOperate} testId="mon-open-operate">열기</Button></div>
+            </div>
+          </div>
+        </div>
       )}
-      {(cur || (!loading && !error)) && (
+      {!cur && !loading && !error && (
         <>
           <div className="label"><span>대응</span></div>
           <div className="card watch" data-testid="mon-operate">

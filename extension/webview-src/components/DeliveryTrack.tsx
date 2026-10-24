@@ -7,7 +7,7 @@
  * 실패하면 박스를 내려놓고 멈추며, 완료되면 목적지에 박스를 넣는다.
  */
 import React, { useEffect, useRef, useState } from "react";
-import { characterImg, CHARACTER_NAME } from "./recoderCharacter";
+import { characterImg } from "./recoderCharacter";
 
 export type DeliveryState = "running" | "pending" | "done" | "failed";
 
@@ -100,14 +100,14 @@ export function DeliveryTrack({ index, stages, state, destination }: DeliveryTra
 
   const creep = state === "running" && clamped < n ? creepFor(now - enteredAt.current, typical) : 0;
   const ratio = state === "done" ? 1 : Math.min(1, (clamped + creep) / n);
-  const label = state === "done" ? `${destination}에 배달 완료`
-    : state === "failed" ? `${stages[Math.min(clamped, n - 1)] ?? ""} 단계에서 멈췄어요`
+  const label = state === "done" ? `${destination} 배포 완료`
+    : state === "failed" ? `${stages[Math.min(clamped, n - 1)] ?? ""} 단계에서 멈췄습니다`
     : state === "pending" ? "도착해서 응답을 기다리는 중"
     : `${stages[Math.min(clamped, n - 1)] ?? ""} 중`;
 
   return (
     <div className={`rc-dt ${state}`} data-testid="delivery-track" data-state={state} data-ratio={ratio.toFixed(3)}
-      role="img" aria-label={`${CHARACTER_NAME}가 배포 박스를 옮기는 중 — ${label}`}
+      role="img" aria-label={`배포 진행 — ${label}`}
       style={{ ["--rc-dt-step" as string]: `${stepSeconds(segmentMs)}s` } as React.CSSProperties}>
       <style>{css}</style>
       <div className="rc-dt-line"><div className="rc-dt-fill" style={{ width: `${ratio * 100}%` }} /></div>
@@ -115,7 +115,7 @@ export function DeliveryTrack({ index, stages, state, destination }: DeliveryTra
         <span key={name} title={name} className={`rc-dt-cp${i < clamped || state === "done" ? " ok" : i === clamped ? " now" : ""}`}
           style={{ left: `calc(14px + (100% - 66px) * ${i / n})` }} />
       ))}
-      <div className="rc-dt-walker" style={{ left: `calc(14px + (100% - 66px) * ${ratio})` }} title={`${CHARACTER_NAME} · ${label}`}>
+      <div className="rc-dt-walker" style={{ left: `calc(14px + (100% - 66px) * ${ratio})` }} title={label}>
         <span className="body" dangerouslySetInnerHTML={{ __html: characterImg(40) }} />
         <span className="box" dangerouslySetInnerHTML={{ __html: BOX }} />
       </div>

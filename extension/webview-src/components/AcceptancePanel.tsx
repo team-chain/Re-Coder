@@ -5,6 +5,7 @@
  * 앱을 띄우지 못함) 지어내지 않고 "자동 시험 안 함"과 그 이유를 쓴다.
  */
 import React, { useState } from "react";
+import { MarkGlyph } from "./ui/marks";
 import { KIND_LABEL, SpecKind } from "./specModel";
 
 export interface AcceptanceStep { method: string; path: string; status: number | null; response?: string; problem?: string }
@@ -63,7 +64,7 @@ const css = `
 `;
 
 const VERDICT_TEXT: Record<string, string> = { passed: "통과", failed: "실패", unverifiable: "확인 불가" };
-const MARK: Record<string, string> = { passed: "✓", failed: "✕", unverifiable: "–" };
+const MARK: Record<string, React.ReactNode> = { passed: <MarkGlyph kind="ok" size={10} />, failed: <MarkGlyph kind="bad" size={10} />, unverifiable: <MarkGlyph kind="skip" size={10} /> };
 
 /** 머리 배지(순수) — "6/6 통과", "4/6 통과 · 실패 2", 시험 안 함. */
 export function acceptanceBadge(a: AcceptanceSummary | null | undefined, criteria: number): { text: string; tone: "ok" | "bad" | "mid" } {

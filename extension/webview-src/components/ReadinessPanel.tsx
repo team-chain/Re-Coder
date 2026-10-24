@@ -5,6 +5,7 @@
  * 보여 준다. 판정은 Core 가 하고, 화면은 표시와 "자동 수정" 요청만 한다.
  */
 import React from "react";
+import { MarkGlyph } from "./ui/marks";
 import {GroundedRepairPanel, RepairStage} from './GroundedRepairPanel';
 import { shortIssue } from "./issueText";
 
@@ -50,7 +51,7 @@ export const ReadinessPanel: React.FC<{
           <li key={issue.code} data-code={issue.code} style={{ borderTop: "1px solid #333", padding: "6px 0" }}>
             {/* 문제는 첫 문장만. 자동 수정이 되는 항목은 버튼이 곧 해결이라 해결 문장을 접어 둔다. */}
             <div style={{ color: issue.severity === "error" ? "#f87171" : "#f5b454" }} title={issue.message}>
-              {issue.severity === "error" ? "✗ " : "! "}{shortIssue(issue.message)}
+              {issue.severity === "error" ? <MarkGlyph kind="bad" label="오류" /> : <MarkGlyph kind="warn" label="주의" />} {shortIssue(issue.message)}
             </div>
             {issue.auto_fix
               ? <details style={{ color: "#999", marginTop: 2 }}><summary style={{ cursor: "pointer" }}>자세히</summary><div>{issue.message}</div><div>해결: {issue.fix}</div></details>

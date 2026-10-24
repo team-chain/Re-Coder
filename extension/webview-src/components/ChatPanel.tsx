@@ -4,6 +4,7 @@
  * 대화는 /api/chat 으로만 보내며, 이 패널 자체는 워크스페이스 파일을 수정하지 않는다.
  */
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { MarkGlyph } from "./ui/marks";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import type { CtxFile } from "./CodeAgent";
 
@@ -347,7 +348,7 @@ export const ChatPanel: React.FC<{ isAiReady: boolean; connectionPending?: boole
           return (
             <div key={message.id} role={selectable ? "checkbox" : undefined} aria-checked={selectable ? selected : undefined} onClick={selectable ? () => toggleDeleteSelection(message.id) : undefined} style={{ display: "flex", justifyContent: mine ? "flex-end" : "flex-start", alignItems: "flex-start", gap: 7, marginBottom: message.error ? 18 : 13, cursor: selectable ? "pointer" : "default", opacity: selectable && !selected ? .72 : 1 }}>
               {selectable && (
-                <span aria-hidden="true" style={{ flex: "0 0 auto", width: 19, height: 19, marginTop: mine ? 8 : 22, borderRadius: "50%", display: "grid", placeItems: "center", border: `1px solid ${selected ? "#49a8d1" : "var(--vscode-panel-border, #5a5a5a)"}`, background: selected ? "#3188ae" : "transparent", color: "#fff", fontSize: 13, fontWeight: 800 }}>{selected ? "✓" : ""}</span>
+                <span aria-hidden="true" style={{ flex: "0 0 auto", width: 19, height: 19, marginTop: mine ? 8 : 22, borderRadius: "50%", display: "grid", placeItems: "center", border: `1px solid ${selected ? "#49a8d1" : "var(--vscode-panel-border, #5a5a5a)"}`, background: selected ? "#3188ae" : "transparent", color: "#fff", fontSize: 13, fontWeight: 800 }}>{selected ? <MarkGlyph kind="ok" size={11} /> : ""}</span>
               )}
               {!mine && (
                 <div aria-label="ReCoder" style={{ flex: "0 0 auto", width: 29, height: 29, margin: "18px 7px 0 0", overflow: "hidden", borderRadius: "50%", background: "#17212d", boxShadow: "inset 0 0 0 1px rgba(255,255,255,.22)" }}>
@@ -450,7 +451,7 @@ const ActionCard: React.FC<{ message: ChatMessage; onApprove: () => void; onCanc
   return (
     <div style={{ marginTop: 8, border: `1px solid ${border}`, borderRadius: 9, background: "#1b2530", overflow: "hidden", boxShadow: "0 6px 18px rgba(0,0,0,.3)", maxWidth: 420 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 11px", background: head, borderBottom: `1px solid ${border}`, fontWeight: 700, fontSize: 12, color: "#e6f0f8" }}>
-        <span>{accepted ? (complete ? "✓ 적용 완료" : st.steps.some(step => step.state === "fail") ? "작업 중단 · 내용 확인" : "승인됨 · 변경 검토") : st.status === "error" ? "진행 실패" : st.status === "approving" ? "준비 중" : "생성 승인"}</span>
+        <span>{accepted ? (complete ? "적용 완료" : st.steps.some(step => step.state === "fail") ? "작업 중단 · 내용 확인" : "승인됨 · 변경 검토") : st.status === "error" ? "진행 실패" : st.status === "approving" ? "준비 중" : "생성 승인"}</span>
         {!accepted && badge && <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 600, padding: "2px 7px", borderRadius: 999, background: "#3a2a10", color: "#f0b35b", border: "1px solid #6b4a17" }}>{badge}</span>}
         {accepted && <span style={{ marginLeft: "auto", ...mono, fontSize: 10, color: "#8fd9ad", padding: "2px 7px", borderRadius: 999, background: "#1f3328", border: "1px solid #2f6b4a", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{folderLabel}</span>}
       </div>
@@ -493,7 +494,7 @@ const ActionCard: React.FC<{ message: ChatMessage; onApprove: () => void; onCanc
                 <span style={{ width: 14, height: 14, borderRadius: "50%", display: "grid", placeItems: "center", fontSize: 9, fontWeight: 800,
                   background: s.state === "ok" ? "#2f6b4a" : s.state === "run" ? "#3794ff" : s.state === "fail" ? "#8b3a3a" : "transparent",
                   border: s.state === "wait" ? "1px solid #4a5560" : "none",
-                  color: s.state === "wait" ? "transparent" : "#fff" }}>{s.state === "ok" ? "✓" : s.state === "run" ? "…" : s.state === "fail" ? "!" : "·"}</span>
+                  color: s.state === "wait" ? "transparent" : "#fff" }}>{s.state === "ok" ? <MarkGlyph kind="ok" size={10} /> : s.state === "run" ? "…" : s.state === "fail" ? "!" : "·"}</span>
                 <span style={s.key.startsWith("apply:") ? mono : undefined}>{s.label}</span>
                 {s.note && <span style={{ color: "#8a95a0", fontSize: 10.5 }}>· {s.note}</span>}
               </li>
@@ -508,7 +509,7 @@ const ActionCard: React.FC<{ message: ChatMessage; onApprove: () => void; onCanc
               return <div style={{ marginTop: 7, color: "#8a95a0", fontSize: 10.5 }}>결정 카드는 왼쪽 코드 작성 패널에 떠요. 선택을 마치면 여기서 이어집니다.</div>;
             }
             if (allApplied) {
-              return <div style={{ marginTop: 8, color: "#8fd9ad", fontSize: 11 }}>✓ {ops.length}개 파일이 {st.targetFolder || "프로젝트 루트"}에 저장됐어요.</div>;
+              return <div style={{ marginTop: 8, color: "#8fd9ad", fontSize: 11 }}>{ops.length}개 파일이 {st.targetFolder || "프로젝트 루트"}에 저장했습니다.</div>;
             }
             return (
               <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 9 }}>

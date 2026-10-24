@@ -26,7 +26,7 @@ test('진행 기록은 실제 이벤트를 누가 무엇을 했는지로 적는�
  assert.equal(run(many).records.length,30);
 });
 
-test('전체 점검이 완성 파일을 고쳐도 완료 수·단계 ✓ 는 줄지 않고 "다듬는 중" 만 붙는다',()=>{
+test('전체 점검이 완성 파일을 고쳐도 완료 수·단계 완료 표시는 줄지 않고 "다듬는 중" 만 붙는다',()=>{
  const {polishingCount}=require('../out/webview-test/components/teamState');
  const built=[{step:'planned',total:7,files:FILES},...FILES.map((f,i)=>({step:'file_done',agent:'agent-1',file:f.file,done_count:i+1}))];
  let v=run([...built,{step:'consistency',message:'전체 점검'},{step:'fixing',agent:'review',file:'src/db.js',message:'전체 점검 — src/db.js 고치는 중'},
@@ -34,7 +34,7 @@ test('전체 점검이 완성 파일을 고쳐도 완료 수·단계 ✓ 는 줄
  assert.equal(v.files.filter(f=>f.state==='done').length,7,'완료로 센다');
  assert.equal(polishingCount(v),2);assert.equal(polishingCount(v,0),1);
  const html=V({roster:buildRoster(2),view:v,width:900});
- assert.match(html,/✓ 공통 기반 2\/2/);assert.match(html,/✓ 화면 2\/2/);
+ assert.match(html,/rc-av-stage done"><svg[^>]*aria-label="완료"[\s\S]*?공통 기반 2\/2/);assert.match(html,/rc-av-stage done"><svg[\s\S]*?화면 2\/2/);
  assert.deepEqual(stagesOf(v).map(x=>x.state),['done','done','done','now'],'다듬는 중에도 단계 ✓ 는 그대로');
  const board=renderToStaticMarkup(React.createElement(TeamBoard,{roster:buildRoster(2),view:v}));
  assert.match(board,/2개 다듬는 중/);assert.match(board,/파일 7\/7/);

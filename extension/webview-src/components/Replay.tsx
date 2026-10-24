@@ -64,7 +64,7 @@ export function ReplayView({ state, source, search, onSource, onSearch, onRefres
   const busy = Boolean(state.busyKey);
   const result = selected && state.result?.key === selected.key ? state.result : null;
   return <section style={{ fontSize: 13, lineHeight: 1.6 }} aria-label="배포 이력 및 롤백">
-    <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}><h3 style={{ margin: 0 }}>배포 이력 · 롤백</h3><button onClick={onRefresh} disabled={state.loading || busy} style={button}>{state.loading ? "불러오는 중…" : "새로고침"}</button></div>
+    <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}><span /><button onClick={onRefresh} disabled={state.loading || busy} style={button}>{state.loading ? "불러오는 중…" : "새로고침"}</button></div>
     <p style={{ color: muted }}>이 컴퓨터에 저장된 배포 기록입니다. 현재 실행 상태와 과금 여부는 별도로 확인하세요.</p>
     <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
       <select aria-label="배포 유형" value={source} onChange={e => onSource(e.target.value)} style={{ padding: 7 }}><option value="all">전체</option><option value="ecs">ECS</option><option value="local">로컬</option></select>
