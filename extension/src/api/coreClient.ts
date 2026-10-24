@@ -288,11 +288,12 @@ export class CoreClient {
     }
 
     /** 원격 push */
-    async gitPush(workspacePath: string, branch: string = '', force: boolean = false): Promise<{
+    async gitPush(workspacePath: string, branch: string = '', force: boolean = false, approved: boolean = false): Promise<{
         status: string; message: string; remote_url: string;
     }> {
+        //: 3.0.2 — 사용자가 확인한 push 만(approved), 작업 트리 전체를 자동 커밋하지 않는다(auto_commit:false).
         return this._post('/api/git/push', {
-            workspace_path: workspacePath, branch, force,
+            workspace_path: workspacePath, branch, force: force === true, auto_commit: false, approved: approved === true,
         }) as any;
     }
 
@@ -373,8 +374,10 @@ export class CoreClient {
         branch?: string;
         skip_sbom?: boolean;
         skip_opa?: boolean;
+        /** 3.0.2 — 사용자가 승인했는가. 없으면 코어가 400 으로 거절한다. */
+        approved?: boolean;
     }): Promise<{ status: string; message: string }> {
-        return this._post('/api/deploy/ecs', payload) as any;
+        return this._post('/api/deploy/ecs', { ...payload, approved: payload.approved === true }) as any;
     }
 
     async getECSDeployStatus(): Promise<{

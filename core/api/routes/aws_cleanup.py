@@ -8,7 +8,7 @@ import re
 import threading
 import time
 import uuid
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -67,6 +67,50 @@ class StopRequest(BaseModel):
     region: str = Field(..., pattern=_REGION)
     cluster: str = Field(..., pattern=r"^[A-Za-z0-9_-]{1,255}$")
     service: str = Field(..., pattern=r"^[A-Za-z0-9_-]{1,255}$")
+    #: 3.0.2 — 사용자가 확인 창에서 "중지" 를 고른 결과. 없으면 400.
+    approved: Any = None
+
+
+STOP_APPROVAL_REQUIRED = "서비스 중지는 사용자 확인이 필요합니다. 화면에서 중지를 확인한 뒤 다시 시도하세요."
+NOT_MANAGED = ("ReCoder 가 배포한 서비스로 확인되지 않아 중지하지 않았습니다 — "
+               "recoder:managed 태그나 이 컴퓨터의 배포 기록이 있는 서비스만 중지합니다.")
+
+
+class NotManagedError(Exception):
+    """ReCoder 가 만든 서비스라는 근거(태그·배포 기록)가 없다."""
+
+
+def _in_memory_records() -> list[dict]:
+    try:
+        try:
+            from api.routes import ecs as ecs_routes  # type: ignore
+        except ImportError:  # pragma: no cover
+            from core.api.routes import ecs as ecs_routes  # type: ignore
+        return [{"cluster": r.cluster, "service": r.service, "region": r.region}
+                for r in list(ecs_routes._deploy_records.values())]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def is_recoder_managed_service(ecs, *, region: str, cluster: str, service: str) -> bool:
+    """서비스가 ReCoder 것인지 — `recoder:managed=true` 태그가 있거나 이 컴퓨터의 배포 기록에 있으면 참.
+
+    중지(태스크 0)는 되살릴 수 있어도 운영 중인 남의 서비스를 끄면 장애다. 이름만 보고 판단하지 않는다.
+    """
+    for record in [*deploy_records(), *_in_memory_records()]:
+        if (record.get("cluster") == cluster and record.get("service") == service
+                and (record.get("region") or region) == region):
+            return True
+    try:
+        found = ecs.describe_services(cluster=cluster, services=[service], include=["TAGS"]).get("services") or []
+    except Exception as exc:  # noqa: BLE001 - 확인하지 못하면 관리 대상으로 보지 않는다
+        logger.info("서비스 태그를 확인하지 못했습니다 %s/%s: %s", cluster, service, exc)
+        return False
+    for svc in found:
+        if svc.get("serviceName") == service or str(svc.get("serviceArn", "")).endswith(f"/{service}"):
+            if aws_cleanup._managed(aws_cleanup._tags_dict(svc.get("tags"))):
+                return True
+    return False
 
 
 class DeleteRequest(BaseModel):
@@ -192,9 +236,20 @@ async def plan(body: PlanRequest) -> dict:
 
 @router.post("/stop")
 async def stop(body: StopRequest) -> dict:
+    if body.approved is not True:
+        raise HTTPException(status_code=400, detail=STOP_APPROVAL_REQUIRED)
+
+    def work() -> dict:
+        clients = clients_for(body.region)
+        if not is_recoder_managed_service(clients["ecs"], region=body.region, cluster=body.cluster,
+                                          service=body.service):
+            raise NotManagedError()
+        return aws_cleanup.stop(clients, region=body.region, cluster=body.cluster, service=body.service)
+
     try:
-        return await asyncio.to_thread(aws_cleanup.stop, clients_for(body.region), region=body.region,
-                                       cluster=body.cluster, service=body.service)
+        return await asyncio.to_thread(work)
+    except NotManagedError as exc:
+        raise HTTPException(status_code=400, detail=NOT_MANAGED) from exc
     except Exception as exc:  # noqa: BLE001
         raise _aws_error(exc) from exc
 

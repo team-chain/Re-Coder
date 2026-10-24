@@ -176,7 +176,7 @@ def test_extension_deploy_button_reaches_the_agent(app_client, monkeypatch):
 
     resp = client.post(
         "/api/deploy/ecs",
-        json={"ecs_cluster": "recoder-cluster", "ecs_service": "recoder-app"},
+        json={"approved": True, "ecs_cluster": "recoder-cluster", "ecs_service": "recoder-app"},
     )
     assert resp.status_code == 200, resp.text
     # 사이드바는 status === 'ok' 일 때만 폴링을 시작한다.
@@ -203,7 +203,7 @@ def test_policy_denial_is_403_not_503(app_client, monkeypatch):
         return _Deny()
 
     monkeypatch.setattr(opa_module.opa_client, "evaluate", _evaluate)
-    resp = client.post("/api/deploy/ecs", json={})
+    resp = client.post("/api/deploy/ecs", json={"approved": True})
     assert resp.status_code == 403
     assert resp.json()["detail"]["error"] == "policy_denied"
 
@@ -235,7 +235,7 @@ def test_unreachable_opa_falls_back_to_the_local_rules(app_client, monkeypatch):
     monkeypatch.setattr(opa_module.opa_client, "evaluate", _evaluate)
     monkeypatch.setattr(ecs_routes._ecs_agent, "deploy", _fake_deploy)
 
-    resp = client.post("/api/deploy/ecs", json={})
+    resp = client.post("/api/deploy/ecs", json={"approved": True})
     assert resp.status_code == 200, resp.text
 
 
@@ -262,7 +262,7 @@ def test_a_deny_that_survives_the_local_fallback_is_still_reported(
     # SBOM 을 끄면 로컬 규칙 1번(SBOM 필수)에 걸린다.
     resp = client.post(
         "/api/ecs/deploy",
-        json={"project_id": "p", "cluster": "c", "service": "s",
+        json={"approved": True, "project_id": "p", "cluster": "c", "service": "s",
               "image": "i", "generate_sbom": False},
     )
     assert resp.status_code >= 400, "폴백이 게이트를 없애버렸다"
@@ -282,7 +282,7 @@ def test_a_broken_policy_client_is_not_reported_as_an_opa_outage(
         raise TypeError("evaluate() got an unexpected keyword argument 'policy_path'")
 
     monkeypatch.setattr(opa_module.opa_client, "evaluate", _explode)
-    resp = client.post("/api/deploy/ecs", json={})
+    resp = client.post("/api/deploy/ecs", json={"approved": True})
     assert resp.status_code == 500
     assert resp.json()["detail"]["error"] == "policy_evaluation_crashed"
 
@@ -318,7 +318,7 @@ def test_status_endpoint_reports_the_live_record(app_client, monkeypatch):
         return record
 
     monkeypatch.setattr(ecs_routes._ecs_agent, "deploy", _fake_deploy)
-    client.post("/api/deploy/ecs", json={"ecs_cluster": "recoder-cluster"})
+    client.post("/api/deploy/ecs", json={"approved": True, "ecs_cluster": "recoder-cluster"})
 
     body = client.get("/api/deploy/ecs/status").json()
     assert body["running"] is True
@@ -395,7 +395,7 @@ def test_automatic_health_check_reaches_aws_registration(
     body = {"workspace_path": str(tmp_path), "container_port": 3456, "desired_count": 0}
     if endpoint == "/api/ecs/deploy":
         body.update(project_id="p", cluster="c", service="s")
-    response = client.post(endpoint, json=body)
+    response = client.post(endpoint, json={**body, "approved": True})
     assert response.status_code in {200, 202}, response.text
     assert len(registered) == 1
     container = registered[0]["containerDefinitions"][0]
@@ -974,7 +974,7 @@ def test_only_a_plain_allow_proceeds(app_client, monkeypatch):
             return _Result()
 
         monkeypatch.setattr(opa_module.opa_client, "evaluate", _evaluate)
-        resp = client.post("/api/deploy/ecs", json={})
+        resp = client.post("/api/deploy/ecs", json={"approved": True})
         assert resp.status_code == 403, f"{decision} 이 통과했다"
         assert resp.json()["detail"]["error"] == expected_error, decision
 
@@ -1000,9 +1000,9 @@ def test_a_second_deploy_while_one_is_running_is_rejected(app_client, monkeypatc
     monkeypatch.setattr(ecs_routes._ecs_agent, "deploy", _never_finishes)
 
     body = {"ecs_cluster": "recoder-cluster", "ecs_service": "recoder-app"}
-    assert client.post("/api/deploy/ecs", json=body).status_code == 200
+    assert client.post("/api/deploy/ecs", json={**body, "approved": True}).status_code == 200
 
-    second = client.post("/api/deploy/ecs", json=body)
+    second = client.post("/api/deploy/ecs", json={**body, "approved": True})
     assert second.status_code == 409, "같은 서비스에 배포가 두 개 떴다"
     assert second.json()["detail"]["error"] == "deployment_in_progress"
     assert len(started) == 1
@@ -1019,8 +1019,8 @@ def test_a_different_service_is_not_blocked(app_client, monkeypatch):
         return ECSDeployRecord(status=ECSDeployStatus.IN_PROGRESS)
 
     monkeypatch.setattr(ecs_routes._ecs_agent, "deploy", _never_finishes)
-    client.post("/api/deploy/ecs", json={"ecs_service": "app-a"})
-    other = client.post("/api/deploy/ecs", json={"ecs_service": "app-b"})
+    client.post("/api/deploy/ecs", json={"approved": True, "ecs_service": "app-a"})
+    other = client.post("/api/deploy/ecs", json={"approved": True, "ecs_service": "app-b"})
     assert other.status_code == 200, "다른 서비스 배포까지 막고 있다"
 
 
@@ -1214,7 +1214,7 @@ def test_start_response_uses_the_token_the_sidebar_recognises(app_client, monkey
         return ECSDeployRecord(status=ECSDeployStatus.SUCCEEDED)
 
     monkeypatch.setattr(ecs_routes._ecs_agent, "deploy", _fake_deploy)
-    body = client.post("/api/deploy/ecs", json={}).json()
+    body = client.post("/api/deploy/ecs", json={"approved": True}).json()
 
     recognised = _extension_literals("status")
     assert "ok" in recognised, "확장이 더 이상 status === 'ok' 를 안 본다"
@@ -2418,7 +2418,7 @@ def test_cancel_only_marks_a_request_so_the_409_guard_still_holds(app_client):
 
     second = client.post(
         "/api/ecs/deploy",
-        json={"project_id": "p", "cluster": "c", "service": "s", "image": "i"},
+        json={"approved": True, "project_id": "p", "cluster": "c", "service": "s", "image": "i"},
     )
     assert second.status_code == 409, (
         "취소 요청 뒤 같은 서비스에 두 번째 파이프라인이 들어왔다"
@@ -2935,7 +2935,7 @@ def test_starting_a_deployment_writes_it_to_disk_before_running(app_client, monk
 
     resp = client.post(
         "/api/ecs/deploy",
-        json={"project_id": "p", "cluster": "kluster", "service": "svc",
+        json={"approved": True, "project_id": "p", "cluster": "kluster", "service": "svc",
               "image": "i"},
     )
     assert resp.status_code == 202, resp.text
@@ -3073,7 +3073,7 @@ def test_the_deploy_button_works_without_an_opa_server(
 
     monkeypatch.setattr(ecs_routes._ecs_agent, "deploy", _fake_deploy)
 
-    resp = client.post("/api/deploy/ecs", json={})
+    resp = client.post("/api/deploy/ecs", json={"approved": True})
     assert resp.status_code == 200, (
         f"OPA 서버가 없다고 배포가 막혔다: {resp.status_code} {resp.text}"
     )
@@ -3091,7 +3091,7 @@ def test_the_fallback_says_it_used_local_rules(app_client_without_opa, monkeypat
         return record
 
     monkeypatch.setattr(ecs_routes._ecs_agent, "deploy", _fake_deploy)
-    client.post("/api/deploy/ecs", json={})
+    client.post("/api/deploy/ecs", json={"approved": True})
 
     assert seen and "policy_warning" in seen[0].provisioned, (
         "로컬 폴백을 썼다는 사실을 사용자에게 안 알렸다"
@@ -3110,7 +3110,7 @@ def test_the_fallback_still_applies_the_preset_rules(app_client_without_opa, mon
 
     resp = client.post(
         "/api/ecs/deploy",
-        json={"project_id": "p", "cluster": "c", "service": "s", "image": "i",
+        json={"approved": True, "project_id": "p", "cluster": "c", "service": "s", "image": "i",
               "generate_sbom": False},
     )
     assert resp.status_code >= 400, (
@@ -3945,7 +3945,7 @@ def test_genuinely_concurrent_deploys_do_not_both_start(monkeypatch, tmp_path):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
             return await asyncio.gather(*(
-                c.post("/api/ecs/deploy", json=body) for _ in range(3)
+                c.post("/api/ecs/deploy", json={**body, "approved": True}) for _ in range(3)
             ))
 
     codes = sorted(r.status_code for r in asyncio.run(_fire_three()))
@@ -3979,7 +3979,7 @@ def test_a_failure_before_the_gate_releases_the_reservation(app_client, monkeypa
         "image": "123456789012.dkr.ecr.us-east-1.amazonaws.com/recoder-app:v1",
         "region": "us-east-1",
     }
-    first = client.post("/api/ecs/deploy", json=body)
+    first = client.post("/api/ecs/deploy", json={**body, "approved": True})
     assert boom["count"] == 1
     assert first.status_code >= 500
 
@@ -4014,7 +4014,7 @@ def test_a_failure_before_the_gate_releases_the_reservation(app_client, monkeypa
         return record
 
     monkeypatch.setattr(ecs_routes._ecs_agent, "deploy", _fake_deploy)
-    assert client.post("/api/ecs/deploy", json=body).status_code == 202
+    assert client.post("/api/ecs/deploy", json={**body, "approved": True}).status_code == 202
 
 
 def test_a_cancelled_request_does_not_leave_the_service_locked(monkeypatch, tmp_path):
@@ -4137,7 +4137,7 @@ def test_a_low_approval_level_cannot_skip_the_policy_gate_through_the_route(
 
     for level in (1, 2, 3, 4):
         ecs_routes._deploy_records.clear()
-        resp = client.post("/api/ecs/deploy", json={**body, "approval_level": level})
+        resp = client.post("/api/ecs/deploy", json={**body, "approved": True, "approval_level": level})
         assert resp.status_code == 403, (
             f"승인 레벨 {level} 로 스캔·SBOM 없는 프로덕션 배포가 통과했다: "
             f"{resp.status_code} {resp.text}"
@@ -4149,7 +4149,7 @@ def test_a_low_approval_level_cannot_skip_the_policy_gate_through_the_route(
 
     # 반대 방향 — 정상 요청은 레벨 1 로 보내도 통과해야 한다.
     ecs_routes._deploy_records.clear()
-    ok = client.post("/api/ecs/deploy", json={
+    ok = client.post("/api/ecs/deploy", json={"approved": True,
         **body, "approval_level": 1, "run_security_scan": True,
         "generate_sbom": True, "environment": "", "branch": "",
     })
@@ -4564,7 +4564,7 @@ def test_the_environment_is_normalised_before_it_reaches_either_engine(
     monkeypatch.setattr(opa_module.opa_client, "evaluate", _evaluate)
     monkeypatch.setattr(ecs_routes._ecs_agent, "deploy", _fake_deploy)
 
-    resp = client.post("/api/ecs/deploy", json={
+    resp = client.post("/api/ecs/deploy", json={"approved": True,
         "project_id": "p", "cluster": "recoder-cluster", "service": "recoder-app",
         "image": "123456789012.dkr.ecr.us-east-1.amazonaws.com/recoder-app:v1",
         "region": "us-east-1", "environment": env_name, "branch": "main",
@@ -4606,7 +4606,7 @@ def test_the_core_route_also_refuses_a_claimed_branch(tmp_path, app_client, monk
     monkeypatch.setattr(opa_module.opa_client, "evaluate", _evaluate)
     monkeypatch.setattr(ecs_routes._ecs_agent, "deploy", _fake_deploy)
 
-    resp = client.post("/api/ecs/deploy", json={
+    resp = client.post("/api/ecs/deploy", json={"approved": True,
         "project_id": "p", "cluster": "recoder-cluster", "service": "recoder-app",
         "image": "123456789012.dkr.ecr.us-east-1.amazonaws.com/recoder-app:v1",
         "region": "us-east-1", "workspace_path": str(repo),

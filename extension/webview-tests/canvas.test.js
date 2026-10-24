@@ -119,6 +119,8 @@ test('prepare never deploys; explicit approval executes once through the existin
  const s=setup();await s.send('canvas.prepare',{config});assert.equal(s.executions.length,0);
  const id=s.plan().id;await s.send('canvas.execute',{planId:id,approved:true});await s.send('canvas.execute',{planId:id,approved:true});
  assert.equal(s.executions.length,1);assert.equal(s.executions[0].type,'workspace.deploy.ecs');assert.equal(s.executions[0].payload.ecs_service,'custom-service');
+ //: 3.0.2 — 승인 카드를 거친 실행만 approved:true 를 싣는다(호스트는 없으면 거절한다).
+ assert.equal(s.executions[0].payload.approved,true);
  // 승인 카드에 보인 이미지 이름이 ECR 저장소 이름으로 전달된다(서비스 이름이 아니라).
  assert.equal(s.executions[0].payload.repo_name,'app');
 });
@@ -162,7 +164,7 @@ test('changed preflight or denied permissions block the new entry point',async()
  const t=setup();await t.send('canvas.prepare',{config});t.api.checkAwsPermissions=async()=>({ready:true,permission_check:{inspected:true,missing_actions:['ecs:UpdateService']}});await t.send('canvas.execute',{planId:t.plan().id,approved:true});assert.equal(t.executions.length,0);
 });
 test('GitHub push explicitly disables automatic commit and force; scanner failure prevents push',async()=>{
- const s=setup();await s.send('canvas.prepare',{config:{...config,target:'github'}});await s.send('canvas.execute',{planId:s.plan().id,approved:true});assert.deepEqual(s.pushes,[{workspace_path:'/project',branch:'main',force:false,auto_commit:false}]);
+ const s=setup();await s.send('canvas.prepare',{config:{...config,target:'github'}});await s.send('canvas.execute',{planId:s.plan().id,approved:true});assert.deepEqual(s.pushes,[{workspace_path:'/project',branch:'main',force:false,auto_commit:false,approved:true}]);
  const t=setup();await t.send('canvas.prepare',{config:{...config,target:'github'}});t.api.runScan=async()=>({status:'not_run',exit_code:0});await t.send('canvas.execute',{planId:t.plan().id,approved:true});assert.equal(t.pushes.length,0);
 });
 test('invalid requests cannot silently adopt a region or invalid resource size',()=>{
@@ -201,7 +203,7 @@ test('S3 approval selects the build directory and binds the actual filtered file
   fs.writeFileSync(path.join(workspace,'dist/index.html'),'<h1>changed</h1>');
   await s.send('canvas.execute',{planId:s.plan().id,approved:true});assert.equal(s.executions.length,0);assert.ok(s.output.at(-1).payload.message.includes('정적 파일'));
   await s.send('canvas.prepare',{config:{...config,target:'s3'},autoDir:true});
-  await s.send('canvas.execute',{planId:s.plan().id,approved:true});assert.equal(s.executions[0].type,'workspace.deploy.s3');assert.equal(s.executions[0].payload.dir,'dist');
+  await s.send('canvas.execute',{planId:s.plan().id,approved:true});assert.equal(s.executions[0].type,'workspace.deploy.s3');assert.equal(s.executions[0].payload.dir,'dist');assert.equal(s.executions[0].payload.approved,true);
   await s.send('canvas.prepare',{config:{...config,target:'s3',dir:path.join(workspace,'dist')}});
   assert.equal(s.plan().config.dir,'dist');
   await s.send('canvas.execute',{planId:s.plan().id,approved:true});assert.equal(s.executions[1].payload.dir,'dist');

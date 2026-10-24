@@ -33,6 +33,8 @@ type ActionState = {
   //: 있다"는 혼란의 원인은 적용 버튼이 다른 패널에만 있던 것.
   ops?: Array<{ file: string; content: string; action?: string }>;
   targetFolder?: string;
+  //: 3.0.2 — 생성 결과에 붙은 프로젝트 루트. [모두 적용] 이 그 사이 바뀐 활성 프로젝트에 쓰지 않게 함께 보낸다.
+  projectRoot?: string;
   applying?: boolean;
 };
 
@@ -145,7 +147,7 @@ export const ChatPanel: React.FC<{ isAiReady: boolean; connectionPending?: boole
     } else if (msg.type === "code.generating" || msg.type === "code.planResult" || msg.type === "code.result" || msg.type === "code.applied" || msg.type === "code.error") {
       //: CodeAgent 가 처리하는 같은 이벤트를 여기서도 듣고 카드의 진행 단계만 갱신한다.
       //: 결정 모달·diff·적용 버튼은 CodeAgent 가 그대로 담당한다.
-      const payload = (msg.payload ?? {}) as { requestId?: number; ackKey?: string; ok?: boolean; message?: string; decisions?: unknown[]; ops?: Array<{ file: string; content: string; action?: string }> };
+      const payload = (msg.payload ?? {}) as { requestId?: number; ackKey?: string; ok?: boolean; message?: string; decisions?: unknown[]; ops?: Array<{ file: string; content: string; action?: string }>; projectRoot?: string };
       const rid = payload.requestId ?? (payload.ackKey ? Number(String(payload.ackKey).split(":")[0]) : undefined);
       if (rid === undefined || Number.isNaN(rid)) return;
       setMessages((current) => current.map((item) => {
@@ -164,7 +166,7 @@ export const ChatPanel: React.FC<{ isAiReady: boolean; connectionPending?: boole
           const files = ops.map((op) => op.file);
           set("plan", "ok", "선택 완료");
           set("gen", "ok", `${files.length}개 파일 생성됨`);
-          return { ...item, actionState: { ...st, steps, filesDone: files, ops } };
+          return { ...item, actionState: { ...st, steps, filesDone: files, ops, projectRoot: payload.projectRoot ?? st.projectRoot } };
         } else if (msg.type === "code.applied" && payload.ackKey) {
           const file = String(payload.ackKey).split(":").slice(1).join(":");
           const key = `apply:${file}`;
@@ -223,7 +225,7 @@ export const ChatPanel: React.FC<{ isAiReady: boolean; connectionPending?: boole
       for (const op of ops) steps.push({ key: `apply:${op.file}`, label: op.file, state: "run" });
       return { ...item, actionState: { ...item.actionState, steps, applying: true } };
     }));
-    postMessage("code.applyAll", { ops, targetFolder: st.targetFolder ?? "" });
+    postMessage("code.applyAll", { ops, targetFolder: st.targetFolder ?? "", projectRoot: st.projectRoot ?? "" });
   }, [postMessage]);
 
   const pickActionFolder = useCallback((message: ChatMessage) => {

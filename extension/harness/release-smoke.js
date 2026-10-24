@@ -100,7 +100,7 @@ async function installed(ext, home) {
     assert.equal((await api('/api/github/status')).status, 'unauthenticated');
     const github = await api('/api/github/repository/connect', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repository:'fixture/repo',create:false})});
     assert.equal(github.status, 'error');assert.match(github.message, /GitHub 인증/);
-    const push = await api('/api/git/push', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace_path:workspace,branch:'main',auto_commit:false})});
+    const push = await api('/api/git/push', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace_path:workspace,branch:'main',auto_commit:false,approved:true})});
     assert.equal(push.status,'error');assert.match(push.message,/GitHub 로그인/);
     const post = (route, body) => api(route, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     const commerceRoot = path.join(home, 'empty commerce project');

@@ -292,9 +292,38 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     postMessage(type: string, payload: unknown): void {
         if (this._view) { void this._view.webview.postMessage({ type, payload }); }
+        //: 3.0.2 — 명령 팔레트·우클릭 명령의 결과를 ReCoder 창으로 보낸다. 사이드바는 시작 화면이라 결과를
+        //: 보여 주지 않는다. 창이 아직 준비(webview.ready) 전이면 쌓아 두었다가 준비되면 보낸다.
+        const delivery = this._panelDelivery;
+        if (delivery && delivery.types.has(type) && Date.now() < delivery.until
+            && !(this._workspacePanelWebview && this._workspaceReady)) {
+            this._panelQueue.push({ type, payload });
+            if (this._panelQueue.length > 20) { this._panelQueue.shift(); }
+            return;
+        }
         if (this._workspacePanelWebview) {
             void this._workspacePanelWebview.postMessage({ type, payload });
         }
+    }
+
+    /** 3.0.2 — 이 종류의 결과는 ReCoder 창이 준비된 뒤에 그 창으로 보낸다(10분 동안). */
+    private _panelDelivery: { types: Set<string>; until: number } | null = null;
+    private _panelQueue: Array<{ type: string; payload: unknown }> = [];
+    /** 창이 준비된 직후 복원한 화면이 그려질 틈을 두고 쌓인 결과를 보낸다(ms). */
+    static PANEL_FLUSH_DELAY_MS = 300;
+
+    expectPanelResults(types: string[]): void {
+        this._panelDelivery = { types: new Set(types), until: Date.now() + 10 * 60 * 1000 };
+        this._panelQueue = [];
+    }
+
+    private _flushPanelQueue(webview: vscode.Webview): void {
+        if (!this._panelQueue.length) { return; }
+        const queued = this._panelQueue.splice(0);
+        this._panelDelivery = null;
+        setTimeout(() => {
+            for (const message of queued) { void webview.postMessage(message); }
+        }, SidebarProvider.PANEL_FLUSH_DELAY_MS);
     }
 
     /** 요청-응답 메시지는 요청을 보낸 Webview로만 돌려보낸다. */
@@ -402,6 +431,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private _pendingCodeTarget: string | null = null;
 
     triggerAnalysis(request: Partial<AnalyzeRequest>): void {
+        //: 결과는 ReCoder 창의 에러 분석 화면이 보여 준다 — 창이 막 열리는 중이면 준비된 뒤 보낸다.
+        this.expectPanelResults(['core.analyzeStarted', 'build.analysis.result', 'build.analysis.error', 'errorMessage']);
         this.postMessage('core.analyzeStarted', {});
         void this.handleAnalyze(request);
     }
@@ -413,11 +444,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     triggerDockerfileGeneration(): void {
         const workspacePath = activeProjectPath();
+        this.expectPanelResults(['proposalReady', 'errorMessage']);
         void this.handleGenerateDockerfile(workspacePath, undefined);
     }
 
     triggerGithubActionsGeneration(): void {
         const workspacePath = activeProjectPath();
+        this.expectPanelResults(['proposalReady', 'errorMessage']);
         void this.handleGenerateGithubActions(workspacePath, undefined);
     }
 
@@ -586,8 +619,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
             if (roleArn) {
                 //: 역할 모드였으면 역할까지 다시 빌린다. 실패(폴백)해도 기반 연결은 살아 있다.
+                //: 이미 사용자가 확인 창에서 승인해 만든 같은 역할(저장된 역할 ARN)을 다시 빌리는 것이라 approved 를 싣는다.
                 const role = await this._apiClient.setupAwsRole({
-                    profile: stored?.kind === 'profile' ? stored.profile : '', region: stored?.region ?? '',
+                    profile: stored?.kind === 'profile' ? stored.profile : '', region: stored?.region ?? '', approved: true,
                 });
                 if (role.ok && role.status) {
                     status = role.status;
@@ -970,11 +1004,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 break;
             }
             case 'approveGithubActions': {
-                const { proposalId, approved } = payload as { proposalId: string; approved: boolean };
-                const ghResult = await this._apiClient.approveGithubActions(proposalId, approved);
+                const { proposalId, approved, overwrite } = (payload ?? {}) as { proposalId?: string; approved?: boolean; overwrite?: boolean };
+                //: 3.0.2 — 저장 결과(저장됨 · 이미 있음 · 실패)를 화면에 돌려준다. 예전에는 아무 표시가 없었고,
+                //: 같은 경로에 다른 파일이 있으면 코어가 쓰지 않았는데도 화면은 알 수 없었다.
+                if (!proposalId) {
+                    this.postMessageToWebview(requestWebview, 'githubActions.saveResult', { status: 'error', message: '저장할 워크플로우가 없습니다. 다시 생성하세요.' });
+                    break;
+                }
+                const ghResult = await this._apiClient.approveGithubActions(proposalId, approved === true, overwrite === true);
                 this.postMessage('stateUpdate', { ...this._state });
+                this.postMessageToWebview(requestWebview, 'githubActions.saveResult', { proposalId, ...ghResult });
                 if (ghResult.status === 'error') {
-                    this.postMessage('errorMessage', { message: 'GitHub Actions 승인 실패' });
+                    this.postMessage('errorMessage', { message: `GitHub Actions 워크플로우를 저장하지 못했습니다.${ghResult.message ? ` ${ghResult.message}` : ''}` });
                 }
                 break;
             }
@@ -1093,9 +1134,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
             case 'workspace.deploy.ecs': {
                 const req = (payload ?? {}) as Parameters<ApiClient['deployEcs']>[0];
+                //: 3.0.2 — 요금이 나오는 배포는 화면의 확인 단계에서 승인한 것만(approved:true) 코어로 보낸다.
+                if (req.approved !== true) {
+                    this.postMessageToWebview(requestWebview, 'workspace.deploy.ecs.error', {
+                        message: 'ECS 배포는 배포 내용을 확인하고 승인한 뒤에만 시작합니다. 확인 단계에서 [승인하고 배포] 를 누르세요.',
+                    });
+                    break;
+                }
                 try {
                     const result = await this._apiClient.deployEcs({
                         ...req,
+                        approved: true,
                         workspace_path: req.workspace_path || activeProjectPath(),
                     });
                     this.postMessageToWebview(requestWebview, 'workspace.deploy.result', result);
@@ -1187,8 +1236,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     if (op !== 'settings' && p.approved !== true) { throw new Error('승인 카드에서 승인한 뒤에만 실행합니다.'); }
                     const result = op === 'install' ? await this._apiClient.watchInstall(p.key, p.role ?? '', p.discord ?? '', true)
                         : op === 'uninstall' ? await this._apiClient.watchUninstall(p.key, true)
+                        //: 알림 설정은 화면의 [저장] 클릭이 확인이다 — 코어는 approved 없이는 거절한다.
                         : op === 'settings' ? await this._apiClient.watchSettings(p.key, {
-                            ...(typeof p.discord === 'string' ? { discord: p.discord } : {}), ...(p.email ? { email: p.email } : {}) })
+                            ...(typeof p.discord === 'string' ? { discord: p.discord } : {}), ...(p.email ? { email: p.email } : {}) }, true)
                         : await this._apiClient.watchRollback(p.key, p.target_td ?? '', p.from_td ?? '', true);
                     this.postMessageToWebview(requestWebview, 'monitor.done', { op, ...result });
                     const data = await this._apiClient.monitorOverview(p.key);
@@ -1242,7 +1292,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 const p = (payload ?? {}) as { region?: string; cluster?: string; service?: string };
                 try {
                     if (!p.region || !p.cluster || !p.service) { throw new Error('중지할 서비스를 다시 고르세요.'); }
-                    const result = await this._apiClient.cleanupStop(p.region, p.cluster, p.service);
+                    //: 3.0.2 — 운영 중인 서비스를 한 번 클릭으로 끄지 않는다. 배포 캔버스의 중지와 같은 확인 창.
+                    const action = '서비스 중지';
+                    const choice = await vscode.window.showWarningMessage(
+                        `${p.cluster}/${p.service} (${p.region}) 의 실행 태스크를 0개로 줄입니다. 공개 주소가 멈추고 실행 요금이 멈춥니다. 서비스 설정은 남아 다음 배포 때 다시 뜹니다.`,
+                        { modal: true }, action,
+                    );
+                    if (choice !== action) {
+                        this.postMessageToWebview(requestWebview, 'aws.cleanup.stopResult', { ok: false, cancelled: true, message: '서비스 중지를 취소했습니다. AWS 는 바뀌지 않았습니다.' });
+                        break;
+                    }
+                    const result = await this._apiClient.cleanupStop(p.region, p.cluster, p.service, true);
                     this.postMessageToWebview(requestWebview, 'aws.cleanup.stopResult', result);
                     await this.refreshCleanupPlan(requestWebview, p.region);
                 } catch (err) {
@@ -1357,7 +1417,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 break;
             }
-            case 'deploy.readiness.check':
             case 'deploy.db.choice': {
                 //: DB 테이블 구조가 앱과 다를 때 — 새 DB 로 시작(기존 DB 는 남김) 또는 그대로 사용.
                 const p = (payload ?? {}) as { planId?: string; containerName?: string; choice?: string };
@@ -1390,6 +1449,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 break;
             }
+            //: 3.0.2 — 'check' 라벨이 위의 DB 선택 분기에 붙어 있어 점검 요청이 "선택을 확인하세요" 오류가 됐다.
+            case 'deploy.readiness.check':
             case 'deploy.readiness.fix': {
                 //: 로컬 Docker 배포 화면의 "배포 준비 점검". 자동 수정은 사용자가 누른 한 건만.
                 const p = (payload ?? {}) as { code?: string; requestId?: string };
@@ -1706,7 +1767,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     this.postMessageToWebview(requestWebview, 'ui.restore', this._restoredUiState);
                     this._restoredUiState = null;
                 }
-                if (requestWebview && requestWebview === this._workspacePanelWebview) { this._workspaceReady = true; }
+                if (requestWebview && requestWebview === this._workspacePanelWebview) {
+                    this._workspaceReady = true;
+                    this._flushPanelQueue(requestWebview);
+                }
                 if (this._pendingWheel && requestWebview && requestWebview === this._workspacePanelWebview) {
                     //: 그 사이 휠이 닫혔으면(Esc·시간 초과) 늦게 띄우지 않는다.
                     if (this._pendingWheel.mode === 'edit' || isWheelOpen()) {
@@ -1803,7 +1867,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 // **코어에는 이 라우트가 완성돼 있었고 확장이 부르지 않았다.**
                 // 버킷 생성·공개 설정·업로드·URL 조립까지 다 되어 있는데,
                 // 사용자 파일을 읽어 보내는 쪽이 없어서 통째로 도달 불가능이었다.
-                const p = (payload ?? {}) as { dir?: string; region?: string; workspace_path?: string };
+                const p = (payload ?? {}) as { dir?: string; region?: string; workspace_path?: string; approved?: boolean };
+                //: 3.0.2 — 버킷을 만들고 공개 웹사이트로 여는 작업이라 화면의 확인 단계에서 승인한 것만 보낸다.
+                if (p.approved !== true) {
+                    this.postMessage('workspace.deploy.s3.result', {
+                        ok: false,
+                        message: 'S3 배포는 공개 범위와 올릴 폴더를 확인하고 승인한 뒤에만 시작합니다. 확인 단계에서 [승인하고 배포] 를 누르세요.',
+                    });
+                    break;
+                }
                 //: 배포 캔버스는 승인한 프로젝트 경로를 함께 보낸다 — 승인 뒤 활성 프로젝트가 바뀌었으면 멈춘다.
                 const workspacePath = activeProjectPath();
                 if (p.workspace_path && workspacePath && !samePath(p.workspace_path, workspacePath)) {
@@ -1897,6 +1969,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         ),
                         files,
                         region: (p.region ?? '').trim() || undefined,
+                        approved: true,
                     }, (event) => {
                         this.postMessage('workspace.deploy.s3.progress', event);
                     });
@@ -2091,8 +2164,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 const p = (payload ?? {}) as { profile?: string; region?: string };
                 const profile = (p.profile ?? '').trim();
                 const region = (p.region ?? '').trim();
+                //: 3.0.2 — IAM 역할·정책을 만들거나 고치므로 확인 창에서 승인한 뒤에만 보낸다.
+                const roleAction = '역할 만들기';
+                const roleChoice = await vscode.window.showWarningMessage(
+                    `${profile ? `프로필 ${profile}` : '지금 연결된 자격증명'}으로 AWS 계정에 배포 전용 IAM 역할(recoder-deploy-role)을 만들거나 권한을 맞춥니다. `
+                    + '이후 ReCoder 는 그 역할의 임시 자격증명만 씁니다. 계속하시겠습니까?',
+                    { modal: true }, roleAction,
+                );
+                if (roleChoice !== roleAction) {
+                    this.postMessage('aws.role.result', { ok: false, mode: 'cancelled', message: '역할 설정을 취소했습니다. AWS 는 바뀌지 않았습니다.' });
+                    break;
+                }
                 try {
-                    const result = await this._apiClient.setupAwsRole({ profile, region });
+                    const result = await this._apiClient.setupAwsRole({ profile, region, approved: true });
                     if (result.ok && result.status) {
                         //: 기반 프로필을 보관한다. 화면이 프로필을 안 넘긴 경우("배포 전용
                         //: 역할로 전환" — 지금 연결된 자격증명 기반)에도 코어는 status.profile
@@ -2154,9 +2238,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     //: 다른 창이 띄운 코어) restart 는 그 코어를 죽이지 않으므로 env 의
                     //: 키가 그대로 남아 "연결 해제" 를 눌러도 다시 연결됨으로 뜬다
                     //: (2026-09-21 실기기). 코어 API 로 지우면 소유와 무관하게 해제된다.
-                    try { await this._apiClient.clearAws(); } catch { /* 코어가 죽어 있으면 재시작이 처리 */ }
-                    await this._coreManager.restart();
-                    this.postMessage('aws.clear.result', { ok: true });
+                    //: 3.0.2 — 코어에서 해제가 확인되면 재시작하지 않는다. 같은 코어를 쓰는 다른 창의 작업
+                    //: (배포·코드 생성)까지 끊지 않게. 코어가 응답하지 않을 때만 재시작으로 처리한다.
+                    let coreCleared = false;
+                    try { await this._apiClient.clearAws(); coreCleared = true; } catch { /* 아래에서 재시작 */ }
+                    if (!coreCleared) { await this._coreManager.restart(); }
+                    this.postMessage('aws.clear.result', {
+                        ok: true, restarted: !coreCleared,
+                        message: coreCleared
+                            ? 'AWS 연결을 해제했습니다.'
+                            : '보안 금고의 AWS 자격증명은 지웠지만 Core 가 응답하지 않아 Core 를 다시 시작했습니다. 터미널이나 다른 창에서 띄운 Core 를 쓰는 중이면 그 Core 를 직접 종료하세요.',
+                    });
                     // status / diagnostics 동시 갱신
                     try {
                         const status = await this._apiClient.getAwsStatus();
@@ -2342,7 +2434,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
             case 'code.apply': {
                 const { file, content, targetFolder, ackKey, projectRoot } = (payload ?? {}) as { file?: string; content?: string; targetFolder?: string; ackKey?: string; projectRoot?: string };
-                await this.handleCodeApply(file ?? '', content ?? '', targetFolder ?? '', ackKey ?? '', projectRoot ?? '');
+                await this.handleCodeApply(file ?? '', content ?? '', targetFolder ?? '', ackKey ?? '', projectRoot || this._generatedRootFor(ackKey));
                 break;
             }
             case 'code.applyAll': {
@@ -2351,7 +2443,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 for (const op of ops ?? []) {
                     // 파일마다 ackKey 를 되돌려 준다 — 웹뷰가 파일 단위로
                     // 성공/실패를 구분해야 실패한 파일만 재시도할 수 있다.
-                    const ok = await this.handleCodeApply(op.file, op.content, targetFolder ?? '', op.ackKey ?? '', projectRoot ?? '');
+                    //: 3.0.2 — 웹뷰가 루트를 빠뜨려도(옛 채팅 카드) 이 생성 요청이 만들어진 프로젝트에 쓴다.
+                    const ok = await this.handleCodeApply(op.file, op.content, targetFolder ?? '', op.ackKey ?? '', projectRoot || this._generatedRootFor(op.ackKey));
                     if (ok) { okCount++; }
                 }
                 this.postMessage('code.applied', { file: `전체 ${okCount}개`, ok: okCount > 0 });
@@ -2772,6 +2865,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             });
             // 다음 턴 컨텍스트로 보관
             this._lastCodeOps = (result.ops ?? []).map((op) => ({ path: op.file, content: op.content }));
+            if (opts.requestId !== undefined && generatedRoot) {
+                this._generatedRoots.set(String(opts.requestId), generatedRoot);
+                while (this._generatedRoots.size > 50) { this._generatedRoots.delete(this._generatedRoots.keys().next().value as string); }
+            }
             this.postMessageToWebview(opts.requestWebview, 'code.result', {
                 ...result,
                 requestId: opts.requestId,
@@ -2905,6 +3002,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         //: 재시작 없이 여기까지 왔으면 인계 메모는 필요 없다 — 지워서
         //: 다음 webview.ready 가 같은 요청을 중복 발송하지 않게 한다.
         await this._globalState?.update(SidebarProvider.PENDING_CHAT_ACTION_KEY, undefined);
+    }
+
+    /** 3.0.2 — 생성 요청 번호(ackKey 의 앞부분)별로 그 결과를 만든 프로젝트 루트. */
+    private readonly _generatedRoots = new Map<string, string>();
+
+    private _generatedRootFor(ackKey: string | undefined): string {
+        const requestId = String(ackKey ?? '').split(':')[0];
+        return requestId ? this._generatedRoots.get(requestId) ?? '' : '';
     }
 
     /** targetFolder 가 절대경로(워크스페이스 밖)면 그 폴더를, 아니면 첫 워크스페이스 폴더를 루트로 쓴다. */

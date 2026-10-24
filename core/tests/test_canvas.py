@@ -114,8 +114,8 @@ def test_github_canvas_opt_out_keeps_legacy_auto_commit_default(monkeypatch):
             calls.append((args,kwargs))
             return {"status":"ok"}
     monkeypatch.setitem(sys.modules,"github_agent",SimpleNamespace(get_github_agent=lambda:Agent()))
-    asyncio.run(github.git_push_route({"workspace_path":"/project","branch":"main"}))
-    asyncio.run(github.git_push_route({"workspace_path":"/project","branch":"main","auto_commit":False}))
+    asyncio.run(github.git_push_route({"workspace_path":"/project","branch":"main","approved":True}))
+    asyncio.run(github.git_push_route({"workspace_path":"/project","branch":"main","auto_commit":False,"approved":True}))
     assert calls[0][1]["auto_commit"] is True
     assert calls[1][1]["auto_commit"] is False
 

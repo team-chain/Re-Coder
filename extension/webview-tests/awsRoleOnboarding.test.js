@@ -55,7 +55,10 @@ test('화면은 콘솔 폴백 결과를 받으면 원클릭 IAM 셋업으로 이
 
 test('호스트는 성공하면 역할 ARN 만 보관하고, 폴백이면 프로필 연결 뒤 폴백을 알린다', () => {
   const setup = block(HOST, "case 'aws.role.setup'");
-  assert.match(setup, /setupAwsRole\(\{ profile, region \}\)/);
+  assert.match(setup, /setupAwsRole\(\{ profile, region, approved: true \}\)/);
+  //: 3.0.2 — IAM 을 쓰기 전에 확인 창을 띄우고, 취소하면 코어로 보내지 않는다.
+  assert.ok(setup.indexOf('showWarningMessage') < setup.indexOf('setupAwsRole('), '확인 창보다 IAM 요청이 먼저 나간다');
+  assert.match(setup, /mode: 'cancelled'/);
   assert.match(setup, /storeAwsRole\(/, '역할 ARN 을 보관하지 않는다');
   assert.doesNotMatch(setup, /storeAwsCredentials/, '역할 경로에서 키를 저장하면 안 된다');
   //: 폴백 — 프로필로는 연결해 둔다(배포는 되되 권한만 안 좁혀진 상태).

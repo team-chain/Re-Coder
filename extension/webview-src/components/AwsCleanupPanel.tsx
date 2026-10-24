@@ -45,9 +45,11 @@ export function selectedIds(plan: CleanupPlanView | null, picked: Record<string,
   return plan.groups.flatMap(g => g.items).filter(i => i.deletable && picked[i.id]).map(i => i.id);
 }
 
-export function CleanupGroup({ group, picked, onPick, onStop, disabled }: {
+export function CleanupGroup({ group, picked, onPick, onStop, disabled, stopping = "" }: {
   group: { service: string; items: CleanupItemView[] }; picked: Record<string, boolean>;
   onPick: (id: string, v: boolean) => void; onStop: (item: CleanupItemView) => void; disabled: boolean;
+  /** 3.0.2 — 지금 중지 요청이 진행 중인 항목 id. 진행 중에는 다른 「중지」도 누를 수 없다. */
+  stopping?: string;
 }) {
   return (
     <div style={box} data-testid="cleanup-group">
@@ -59,7 +61,8 @@ export function CleanupGroup({ group, picked, onPick, onStop, disabled }: {
             label={<span>{item.label} <code>{item.name}</code></span>}
             description={[item.detail, item.cost].filter(Boolean).join(" · ")} />
           {item.kind === "ecs_service" && (
-            <button style={{ ...btn, marginLeft: "auto", whiteSpace: "nowrap", flexShrink: 0 }} disabled={disabled} onClick={() => onStop(item)}>중지</button>
+            <button style={{ ...btn, marginLeft: "auto", whiteSpace: "nowrap", flexShrink: 0 }} disabled={disabled || Boolean(stopping)}
+              aria-busy={stopping === item.id} data-testid="cleanup-stop" onClick={() => onStop(item)}>{stopping === item.id ? "중지 중…" : "중지"}</button>
           )}
         </div>
       ))}
@@ -103,6 +106,8 @@ export const AwsCleanupPanel: React.FC<{ defaultRegion?: string }> = ({ defaultR
   const [results, setResults] = useState<ResultView[]>([]);
   const [deployed, setDeployed] = useState<string[]>([]);
   const [customRegion, setCustomRegion] = useState("");
+  //: 3.0.2 — 중지 요청이 도는 동안 버튼을 막는다(확인 창 대기 포함). 두 번 눌러 두 번 묻지 않게.
+  const [stopping, setStopping] = useState("");
 
   useMessage(useCallback((event) => {
     const p = (event.payload ?? {}) as Record<string, unknown>;
@@ -119,7 +124,7 @@ export const AwsCleanupPanel: React.FC<{ defaultRegion?: string }> = ({ defaultR
       }
     }
     if (event.type === "aws.cleanup.planResult") { setPlan(p as unknown as CleanupPlanView); setBusy(false); setPicked({}); }
-    if (event.type === "aws.cleanup.stopResult") { setNote(String(p.message ?? "")); }
+    if (event.type === "aws.cleanup.stopResult") { setStopping(""); setNote(String(p.message ?? "")); }
     if (event.type === "aws.cleanup.deleteResult") {
       setResults((p.results as ResultView[]) ?? []); setConfirming(false);
       setNote(`${p.deleted ?? 0}개를 지웠습니다${p.failed ? ` · ${p.failed}개는 실패(아래 이유)` : ""}.`);
@@ -129,7 +134,7 @@ export const AwsCleanupPanel: React.FC<{ defaultRegion?: string }> = ({ defaultR
       setBusy(false); setConfirming(false);
       setNote(prev => `${prev ? prev + " " : ""}목록은 새로 고치지 못했습니다(${String(p.message ?? "")}) — [목록 불러오기]를 눌러 주세요.`);
     }
-    if (event.type === "aws.cleanup.error") { setBusy(false); setConfirming(false); setNote(String(p.message ?? "실패했습니다")); }
+    if (event.type === "aws.cleanup.error") { setBusy(false); setConfirming(false); setStopping(""); setNote(String(p.message ?? "실패했습니다")); }
   }, [postMessage]));
 
   const load = () => { setBusy(true); setNote(""); setResults([]); postMessage("aws.cleanup.plan", { region }); };
@@ -164,9 +169,14 @@ export const AwsCleanupPanel: React.FC<{ defaultRegion?: string }> = ({ defaultR
           {plan.gaps.map(g => <div key={g} style={{ ...muted, color: "var(--vscode-editorWarning-foreground, #cca700)" }}>{g}</div>)}
           {plan.groups.length === 0 && <div style={muted}>이 리전에 ReCoder 가 만든 리소스가 없습니다.</div>}
           {plan.groups.map(g => (
-            <CleanupGroup key={g.service} group={g} picked={picked} disabled={busy}
+            <CleanupGroup key={g.service} group={g} picked={picked} disabled={busy} stopping={stopping}
               onPick={(id, v) => setPicked(prev => ({ ...prev, [id]: v }))}
-              onStop={item => { setNote(""); postMessage("aws.cleanup.stop", { region, cluster: item.cluster, service: item.name }); }} />
+              onStop={item => {
+                if (stopping) return;
+                //: 확인 창은 호스트가 띄운다(되돌릴 수 있어도 운영 중인 서비스가 멈춘다).
+                setStopping(item.id); setNote("중지할지 확인 창에서 고르세요.");
+                postMessage("aws.cleanup.stop", { region, cluster: item.cluster, service: item.name });
+              }} />
           ))}
           {plan.untagged.length > 0 && (
             <div style={box} data-testid="cleanup-untagged">

@@ -221,7 +221,7 @@ def test_empty_existing_repo_gets_head_pushed_without_renaming_branches(gh, monk
     subprocess.run(["git", "init", "-q", "-b", "work"], cwd=ws, check=True)
     result = agent.repo_create_and_push(str(ws), "shop", private=True)
     assert result["status"] == "ok"
-    assert pushes == [["push", "-u", "origin", "HEAD:refs/heads/main"]]
+    assert pushes == [["push", "-u", "--", "origin", "HEAD:refs/heads/main"]]
     branch = subprocess.run(["git", "branch", "--show-current"], cwd=ws, capture_output=True, text=True, encoding="utf-8").stdout.strip()
     assert branch == "work"
     origin = subprocess.run(["git", "remote", "get-url", "origin"], cwd=ws, capture_output=True, text=True, encoding="utf-8").stdout.strip()

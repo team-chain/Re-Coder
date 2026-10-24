@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
@@ -165,7 +165,36 @@ def _active_deployment(cluster: str, service: str) -> Optional[ECSDeployRecord]:
 # POST /ecs/deploy
 # ---------------------------------------------------------------------------
 
+#: 승인 없는 배포 거절 — 403 이 아니라 400 이다(확장 ApiClient 는 403 을 토큰 갱신 뒤 재시도한다).
+ECS_DEPLOY_APPROVAL_REQUIRED = (
+    "ECS 배포는 AWS 요금이 발생하는 작업이라 사용자 승인이 필요합니다. 배포 내용을 확인하고 승인한 뒤 다시 시도하세요."
+)
+
+
+class ApprovedECSDeployRequest(ECSDeployRequest):
+    """`POST /api/ecs/deploy` 본문 — 사용자 승인(`approved: true`)이 함께 와야 한다.
+
+    `ECSDeployRequest` 는 에이전트 입력이라 승인 여부를 싣지 않는다. 라우트에서만 받는다.
+    """
+
+    approved: Any = None
+
+
 @router.post("/deploy", response_model=ECSDeployRecord, status_code=202)
+async def start_deployment_route(
+    request: ApprovedECSDeployRequest,
+    background_tasks: BackgroundTasks,
+    req: Request,
+) -> ECSDeployRecord:
+    """직접 호출(디스코드 봇 등) 경로. 승인 없이 과금되는 배포를 시작하지 않는다(400)."""
+    if request.approved is not True:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "approval_required", "message": ECS_DEPLOY_APPROVAL_REQUIRED},
+        )
+    return await start_deployment(request, background_tasks, req)
+
+
 async def start_deployment(
     request: ECSDeployRequest,
     background_tasks: BackgroundTasks,

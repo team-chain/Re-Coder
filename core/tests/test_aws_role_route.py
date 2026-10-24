@@ -132,7 +132,7 @@ def _wire(monkeypatch: pytest.MonkeyPatch, *, denied: str = "", created: bool = 
 
 
 def _setup(profile: str = "dev", region: str = "") -> aws.AwsRoleSetupResponse:
-    return asyncio.run(aws.setup_aws_role(aws.AwsRoleSetupRequest(profile=profile, region=region)))
+    return asyncio.run(aws.setup_aws_role(aws.AwsRoleSetupRequest(profile=profile, region=region, approved=True)))
 
 
 def test_routes_are_registered() -> None:

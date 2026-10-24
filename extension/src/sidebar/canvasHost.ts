@@ -247,7 +247,7 @@ export class CanvasHost {
                 const action = '서비스 중지';
                 const choice = await vscode.window.showWarningMessage(`${cluster}/${service} 의 실행 태스크를 0개로 줄입니다. 공개 주소가 멈추고 과금이 멈춥니다. 서비스 설정은 남아 다음 배포 때 다시 뜹니다.`, { modal: true }, action);
                 if (choice !== action) { send('canvas.ecs.stopResult', { requestId, cancelled: true }); return; }
-                const result = await this.api.stopEcsService({ ecs_cluster: cluster, ecs_service: service, aws_region: region });
+                const result = await this.api.stopEcsService({ ecs_cluster: cluster, ecs_service: service, aws_region: region, approved: true });
                 send('canvas.ecs.stopResult', { requestId, ...result });
                 return;
             }
@@ -362,17 +362,18 @@ export class CanvasHost {
                         const status=await this.api.checkAwsPermissions({ecrRepo:ecrRepoName(c.image_name),ecsCluster:c.ecs_cluster,ecsService:c.ecs_service,taskFamily:c.task_family,awsRegion:c.aws_region});
                         const permission=status.permission_check as (typeof status.permission_check & { advisory_only?: boolean });
                         if(!status.ready || permission?.missing_actions?.length || !(permission?.inspected || permission?.advisory_only)) throw new Error('ECS 배포 권한을 확인하지 못했습니다. AWS 연결에서 권한을 확인하세요.');
-                        await execute('workspace.deploy.ecs', {...c, repo_name:ecrRepoName(c.image_name), workspace_path:workspace});
+                        //: 승인 카드(canvas.execute approved:true)를 거친 요청만 여기까지 온다 — 그 승인을 실어 보낸다.
+                        await execute('workspace.deploy.ecs', {...c, repo_name:ecrRepoName(c.image_name), workspace_path:workspace, approved:true});
                     } else if(c.target==='s3') {
                         if(staticPreview(workspace,c.dir).digest !== plan.staticDigest) throw new Error('승인 후 정적 파일이 변경되었습니다. 배포 내용을 다시 확인하세요.');
                         // Existing handler owns path confinement, sensitive-file filtering and stream.
                         // 승인한 프로젝트를 함께 넘긴다 — 그 사이 활성 프로젝트가 바뀌어도 승인하지 않은 파일을 올리지 않는다.
-                        await execute('workspace.deploy.s3',{dir:c.dir,region:c.aws_region,workspace_path:workspace});
+                        await execute('workspace.deploy.s3',{dir:c.dir,region:c.aws_region,workspace_path:workspace,approved:true});
                     } else {
                         send('canvas.executing',{requestId,message:'gitleaks 검사 중'});
                         const scan=await this.api.runScan('gitleaks',workspace) as {status?:string;critical_count?:number;findings?:unknown;message?:string};
                         if(scan.status!=='ok' || !Array.isArray(scan.findings) || scan.findings.length>0 || (scan.critical_count ?? 0)>0) throw new Error('시크릿 검사를 통과하지 못해 푸시를 중단했습니다. 보안 검사 화면에서 확인하세요.');
-                        const result=await this.api.gitPush({workspace_path:workspace,branch:plan.git.branch,force:false,auto_commit:false});
+                        const result=await this.api.gitPush({workspace_path:workspace,branch:plan.git.branch,force:false,auto_commit:false,approved:true});
                         if(result.status!=='success' && result.status!=='ok') throw new Error(result.message || '푸시 실패');
                         send('canvas.completed',{requestId,message:result.message || 'GitHub 푸시 완료'});
                     }

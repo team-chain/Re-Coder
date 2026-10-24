@@ -320,6 +320,13 @@ class AwsRoleSetupRequest(BaseModel):
     profile: str = ""
     region: str = ""
     deployment_context: Optional[AwsDeploymentPermissionContext] = None
+    #: 3.0.2 — IAM 역할·정책을 만들거나 고치므로 사용자 확인이 필요하다. `True` 가 아니면 400.
+    approved: Any = None
+
+
+ROLE_SETUP_APPROVAL_REQUIRED = (
+    "배포 전용 IAM 역할을 만들거나 고치는 작업은 사용자 확인이 필요합니다. 확인 창에서 승인한 뒤 다시 시도하세요."
+)
 
 
 class AwsRoleSetupResponse(BaseModel):
@@ -1629,6 +1636,9 @@ def setup_aws_role(req: AwsRoleSetupRequest) -> AwsRoleSetupResponse:
     호출자는 그때 /api/aws/onboarding-link 로 콘솔 경로를 연다.
     """
     global _role_state
+
+    if req.approved is not True:
+        raise HTTPException(status_code=400, detail=ROLE_SETUP_APPROVAL_REQUIRED)
 
     profile = req.profile.strip()
     if profile:

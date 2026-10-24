@@ -143,6 +143,33 @@ def _parse_owner_repo(repo: str, fallback_owner: str | None = None) -> tuple[str
     return fallback_owner, repo
 
 
+_BAD_REF_CHARS = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]")
+
+
+def validate_branch_name(branch: str) -> str:
+    """`git check-ref-format --branch` 기준으로 브랜치 이름을 검사한다. 문제가 없으면 빈 문자열.
+
+    push 의 refspec 으로 그대로 들어가므로 git 이 받는 것보다 좁힌다:
+    `+`(강제 push 표시)·`-`(옵션으로 읽힘)로 시작하는 이름, `:`(원격 이름 바꾸기), `@`·`HEAD` 도 거절한다.
+    """
+    name = branch or ""
+    bad = f"브랜치 이름 '{name[:80]}' 은 사용할 수 없습니다"
+    if not name or len(name) > 255:
+        return f"{bad} — 1~255자여야 합니다."
+    if name[0] in "+-":
+        return f"{bad} — '+' 나 '-' 로 시작할 수 없습니다."
+    if _BAD_REF_CHARS.search(name):
+        return f"{bad} — 공백, 제어 문자, ~ ^ : ? * [ \\ 는 쓸 수 없습니다."
+    if name in ("@", "HEAD") or "@{" in name or ".." in name or "//" in name:
+        return f"{bad} — '@', 'HEAD', '@{{', '..', '//' 는 쓸 수 없습니다."
+    if name.startswith("/") or name.endswith("/") or name.endswith("."):
+        return f"{bad} — '/' 로 시작하거나 끝날 수 없고 '.' 으로 끝날 수 없습니다."
+    for part in name.split("/"):
+        if part.startswith(".") or part.endswith(".lock"):
+            return f"{bad} — 각 부분은 '.' 으로 시작하거나 '.lock' 으로 끝날 수 없습니다."
+    return ""
+
+
 # ── 메인 클래스 ──────────────────────────────────────────────────────
 
 class GitHubAgent:
@@ -668,7 +695,10 @@ class GitHubAgent:
         auth = base64.b64encode(f"x-access-token:{self._token}".encode()).decode()
         env.update({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
                     "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {auth}", "GIT_TERMINAL_PROMPT": "0"})
-        rc, _, err = self._git(ws, ["push", "-u", "origin", f"HEAD:refs/heads/{default_branch}"], timeout=180, env=env)
+        if validate_branch_name(str(default_branch or "")):
+            return {"status": "error", "message": f"원격 기본 브랜치 이름이 올바르지 않습니다: {str(default_branch)[:80]}",
+                    "repo_url": html_url, "repo_name": full}
+        rc, _, err = self._git(ws, ["push", "-u", "--", "origin", f"HEAD:refs/heads/{default_branch}"], timeout=180, env=env)
         err = (err or "").replace(self._token, "[redacted]").replace(auth, "[redacted]")
 
         if rc != 0:
@@ -718,6 +748,9 @@ class GitHubAgent:
         if not branch:
             rc, cur, _ = self._git(ws, ["branch", "--show-current"])
             branch = cur.strip() or "main"
+        problem = validate_branch_name(branch)
+        if problem:
+            return {"status": "error", "message": problem}
 
         # 미커밋 변경(워크플로 파일 포함)을 stage + commit — 안 하면 push 해도 안 올라감.
         committed = False
@@ -766,9 +799,12 @@ class GitHubAgent:
         auth = base64.b64encode(f"x-access-token:{self._token}".encode()).decode()
         env.update({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
                     "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {auth}", "GIT_TERMINAL_PROMPT": "0"})
-        args = ["-c", f"remote.origin.url={clean_url}", "-c", f"remote.origin.pushurl={clean_url}", "push", "-u", "origin", branch]
-        if force:
-            args.insert(5, "--force-with-lease")
+        args = ["-c", f"remote.origin.url={clean_url}", "-c", f"remote.origin.pushurl={clean_url}", "push", "-u"]
+        #: 강제 push 는 호출자가 force=True 를 정확히 줄 때만, 그것도 남의 새 커밋을 덮지 않는 --force-with-lease 로.
+        if force is True:
+            args.append("--force-with-lease")
+        #: `--` 뒤에 원격·refspec 을 둬서 어떤 값도 옵션으로 읽히지 않게 한다.
+        args += ["--", "origin", branch]
         rc, out, err = self._git(ws, args, timeout=180, env=env)
 
         if rc != 0:
@@ -941,4 +977,4 @@ def get_github_agent() -> GitHubAgent:
     return _instance
 
 
-__all__ = ["GitHubAgent", "get_github_agent"]
+__all__ = ["GitHubAgent", "get_github_agent", "validate_branch_name"]

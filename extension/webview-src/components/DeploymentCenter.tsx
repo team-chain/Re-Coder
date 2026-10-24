@@ -282,6 +282,97 @@ const EcsCostNotice: React.FC = () => (
   </div>
 );
 
+const confirmBox: React.CSSProperties = {
+  marginTop: 12, padding: "11px 13px", borderRadius: 7, fontSize: 12, lineHeight: 1.55,
+  border: "1px solid var(--vscode-editorWarning-foreground, #cca700)", background: "rgba(245,180,0,.08)",
+};
+const secondaryButton: React.CSSProperties = {
+  ...button, background: "var(--vscode-button-secondaryBackground, #3a3d41)", color: "var(--vscode-button-secondaryForeground, #fff)",
+};
+
+/**
+ * 3.0.2 — ECS 배포 직전 확인 단계. 권한 확인을 통과해도 곧바로 배포하지 않는다.
+ * 무엇이 어디로 가는지와 요금을 보여 주고, [승인하고 배포] 를 눌러야 approved:true 로 보낸다.
+ */
+export const EcsDeployConfirm: React.FC<{
+  request: Record<string, unknown>; onApprove: () => void; onCancel: () => void;
+}> = ({ request, onApprove, onCancel }) => {
+  const text = (key: string, fallback: string) => String(request[key] ?? "").trim() || fallback;
+  return (
+    <div style={confirmBox} data-testid="ecs-deploy-confirm" role="group" aria-label="ECS 배포 확인">
+      <div style={{ fontWeight: 700, color: "var(--vscode-editorWarning-foreground, #cca700)" }}>배포 내용을 확인하세요</div>
+      <div style={{ marginTop: 6 }}>
+        리전 <b>{text("aws_region", "미정")}</b> · 클러스터/서비스 <b>{text("ecs_cluster", DEFAULT_ECS_CLUSTER)}/{text("ecs_service", DEFAULT_ECS_SERVICE)}</b><br />
+        이미지 <code>{text("image_name", "recoder-app")}:{text("tag", "latest")}</code> · CPU {text("cpu", "256")} · 메모리 {text("memory", "512")} · 환경 {text("environment", "staging")}
+      </div>
+      <div style={{ marginTop: 6, color: "var(--vscode-descriptionForeground, #999)" }}>
+        승인하면 이미지를 빌드해 ECR 에 올리고 ECS 서비스를 만들거나 갱신합니다. Fargate 태스크가 떠 있는 동안 AWS 요금이 발생합니다.
+      </div>
+      <div style={{ display: "flex", gap: 8, marginTop: 9 }}>
+        <button data-testid="ecs-deploy-approve" onClick={onApprove} style={button}>승인하고 배포</button>
+        <button onClick={onCancel} style={secondaryButton}>취소</button>
+      </div>
+    </div>
+  );
+};
+
+/** 3.0.2 — S3 배포 확인 단계. 버킷을 만들고 **누구나 볼 수 있게 공개**한다는 것을 먼저 알린다. */
+export const S3DeployConfirm: React.FC<{
+  dir: string; region: string; onApprove: () => void; onCancel: () => void;
+}> = ({ dir, region, onApprove, onCancel }) => (
+  <div style={confirmBox} data-testid="s3-deploy-confirm" role="group" aria-label="S3 배포 확인">
+    <div style={{ fontWeight: 700, color: "var(--vscode-editorWarning-foreground, #cca700)" }}>공개 배포를 확인하세요</div>
+    <div style={{ marginTop: 6 }}>
+      폴더 <code>{dir || "워크스페이스 루트"}</code> 의 정적 파일을 리전 <b>{region || "미정"}</b> 의 내 계정 S3 버킷에 올립니다.
+    </div>
+    <div style={{ marginTop: 6, color: "var(--vscode-descriptionForeground, #999)" }}>
+      버킷이 없으면 새로 만들고, 공개 접근 차단을 풀어 정적 웹사이트로 엽니다. 올린 파일은 주소를 아는 누구나 볼 수 있습니다. 비밀 값이 들어 있는 파일은 자동으로 뺍니다.
+    </div>
+    <div style={{ display: "flex", gap: 8, marginTop: 9 }}>
+      <button data-testid="s3-deploy-approve" onClick={onApprove} style={button}>승인하고 배포</button>
+      <button onClick={onCancel} style={secondaryButton}>취소</button>
+    </div>
+  </div>
+);
+
+export type ActionsSaveResult = { status: string; path?: string; diff?: string; backup_path?: string; overwritten?: boolean; message?: string };
+
+/** 3.0.2 — GitHub Actions 저장 결과. 예전에는 「승인하고 저장」 뒤 아무 표시도 없었다. */
+export const ActionsSaveNotice: React.FC<{
+  result: ActionsSaveResult; busy?: boolean; onOverwrite: () => void; onKeep: () => void;
+}> = ({ result, busy = false, onOverwrite, onKeep }) => {
+  if (result.status === "saved") {
+    return (
+      <div data-testid="actions-saved" style={{ ...confirmBox, borderColor: "rgba(78, 201, 176, .45)", background: "rgba(78, 201, 176, .10)" }}>
+        <b style={{ color: "var(--vscode-charts-green, #4ec9b0)" }}>{result.overwritten ? "기존 파일을 바꿔 저장했습니다" : "저장했습니다"}</b>
+        <div style={{ marginTop: 4 }}><code>{result.path || ".github/workflows/deploy.yml"}</code></div>
+        {result.backup_path && <div style={{ marginTop: 4, color: "var(--vscode-descriptionForeground, #999)" }}>이전 파일은 <code>{result.backup_path}</code> 에 보관했습니다.</div>}
+        <div style={{ marginTop: 4, color: "var(--vscode-descriptionForeground, #999)" }}>커밋하고 push 하면 GitHub Actions 가 이 워크플로를 실행합니다.</div>
+      </div>
+    );
+  }
+  if (result.status === "exists") {
+    return (
+      <div data-testid="actions-exists" style={confirmBox}>
+        <b style={{ color: "var(--vscode-editorWarning-foreground, #cca700)" }}>같은 위치에 내용이 다른 워크플로 파일이 이미 있어 저장하지 않았습니다</b>
+        <div style={{ marginTop: 4 }}><code>{result.path || ".github/workflows/deploy.yml"}</code></div>
+        {result.diff && <pre style={{ marginTop: 6, maxHeight: 160, overflow: "auto", fontSize: 10.5, background: "var(--vscode-textCodeBlock-background, #1e1e1e)", padding: 8, borderRadius: 5 }}>{result.diff}</pre>}
+        <div style={{ marginTop: 4, color: "var(--vscode-descriptionForeground, #999)" }}>덮어쓰면 기존 파일은 <code>.recoder-prev</code> 로 보관합니다.</div>
+        <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+          <button data-testid="actions-overwrite" disabled={busy} onClick={onOverwrite} style={button}>{busy ? "저장 중…" : "기존 파일 덮어쓰기"}</button>
+          <button disabled={busy} onClick={onKeep} style={secondaryButton}>기존 파일 유지</button>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div data-testid="actions-failed" style={{ ...confirmBox, borderColor: "var(--vscode-inputValidation-errorBorder, #be1100)", background: "rgba(190,17,0,.08)" }}>
+      <b>{result.status === "rejected" ? "저장하지 않았습니다." : "워크플로를 저장하지 못했습니다."}</b>
+      <div style={{ marginTop: 4 }}>{result.message || "초안이 만료됐을 수 있습니다(Core 재시작 등). 워크플로를 다시 생성하세요."}</div>
+    </div>
+  );
+};
+
 const issueNames: Record<string, string> = {
   MISSING_REQUIRED_ENV: "필수 설정값이 빠져 있어요",
   ENV_FILE_NOT_GITIGNORED: "비밀 설정 파일이 Git에 올라갈 수 있어요",
@@ -457,6 +548,13 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
   //: 2.0.25 보호·운영(기본 방패·감지 알림)
   const [protection, setProtection] = useState<Protection>(DEFAULT_PROTECTION);
   const [policyDenial, setPolicyDenial] = useState<PolicyDenial | null>(null);
+  //: 3.0.2 — 권한 확인을 통과한 ECS 요청. [승인하고 배포] 를 누르기 전에는 보내지 않는다.
+  const [ecsConfirm, setEcsConfirm] = useState<Record<string, unknown> | null>(null);
+  //: 3.0.2 — S3 공개 배포 확인 단계를 보이는가.
+  const [s3Confirm, setS3Confirm] = useState(false);
+  //: 3.0.2 — GitHub Actions 저장 결과(저장됨 · 이미 있음 · 실패).
+  const [actionsSave, setActionsSave] = useState<ActionsSaveResult | null>(null);
+  const [actionsSaving, setActionsSaving] = useState(false);
 
   const runPreflight = useCallback(() => {
     setChecking(true);
@@ -468,7 +566,13 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
     const { type, payload } = event;
     if (type === "proposalReady") {
       const p = payload as Proposal & { file_type?: string };
-      if (p.file_type === "github-actions") { setProposal(p); setMessage("GitHub Actions 워크플로우가 생성되었습니다. 내용을 확인하고 저장하세요."); }
+      if (p.file_type === "github-actions") { setProposal(p); setActionsSave(null); setActionsSaving(false); setMessage("GitHub Actions 워크플로우가 생성되었습니다. 내용을 확인하고 저장하세요."); }
+    }
+    if (type === "githubActions.saveResult") {
+      const result = payload as ActionsSaveResult;
+      setActionsSaving(false);
+      setActionsSave(result);
+      setMessage("");
     }
     if (type === "workspace.deploy.preflightResult") { setPreflight(payload as Preflight); setChecking(false); }
     if (type === "workspace.deploy.preflightError") { setChecking(false); setMessage((payload as { message?: string })?.message ?? "프로젝트 감지에 실패했습니다."); }
@@ -488,11 +592,10 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
       const canProceed = result.ok && (permission?.missing_actions?.length ?? 0) === 0 && (permission?.inspected || permission?.advisory_only);
       if (canProceed) {
         setMessage(permission?.advisory_only
-          ? "IAM 역할 경로 때문에 권한 시뮬레이션을 완료하지 못했습니다. 명시적인 부족 권한은 없어 배포를 시작합니다…"
-          : "ECS 배포 대상 리전의 권한을 확인했습니다. 배포를 시작합니다…");
-        trackedEcsId.current = undefined;
-        dispatchEcsProgress({ type: "start" });
-        postMessage("workspace.deploy.ecs", deploymentRequest);
+          ? "IAM 역할 경로 때문에 권한 시뮬레이션을 완료하지 못했습니다. 명시적인 부족 권한은 없습니다. 아래 배포 내용을 확인하고 승인하세요."
+          : "ECS 배포 대상 리전의 권한을 확인했습니다. 아래 배포 내용을 확인하고 승인하세요.");
+        //: 3.0.2 — 권한 확인만으로 배포하지 않는다. 확인 단계에서 승인해야 approved:true 로 보낸다.
+        setEcsConfirm(deploymentRequest);
       } else {
         const detail = permission?.missing_actions?.length
           ? `부족 권한: ${permission.missing_actions.join(", ")}`
@@ -666,6 +769,28 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
       },
     });
   };
+  const approveEcsDeploy = () => {
+    if (!ecsConfirm || ecsBusy) return;
+    const request = ecsConfirm;
+    setEcsConfirm(null);
+    setMessage("승인한 내용으로 배포를 시작합니다…");
+    trackedEcsId.current = undefined;
+    dispatchEcsProgress({ type: "start" });
+    postMessage("workspace.deploy.ecs", { ...request, approved: true });
+  };
+  const cancelEcsDeploy = () => { setEcsConfirm(null); setMessage("ECS 배포를 취소했습니다. AWS 는 바뀌지 않았습니다."); };
+  const approveS3Deploy = () => {
+    if (s3Busy) return;
+    setS3Confirm(false);
+    setS3Busy(true); setS3Result(null); setS3Progress(null); setMessage("S3에 올리는 중…");
+    postMessage("workspace.deploy.s3", { dir: s3Dir.trim(), region: coreRegion.trim(), approved: true });
+  };
+  const saveActions = (overwrite: boolean) => {
+    if (!proposal || actionsSaving) return;
+    setActionsSaving(true);
+    setMessage(overwrite ? "기존 워크플로를 바꿔 저장하는 중…" : "워크플로를 저장하는 중…");
+    postMessage("approveGithubActions", { proposalId: proposal.proposal_id, approved: true, overwrite });
+  };
   const resolveRollback = (approved: boolean) => {
     if (!rollbackProposal || resolvingRollback) return;
     setResolvingRollback(true);
@@ -703,6 +828,8 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
   };
 
   const update = <T extends Record<string, string>>(set: React.Dispatch<React.SetStateAction<T>>, key: keyof T, value: string) => {
+    //: 확인 단계에 보여 준 내용과 달라지면 그 확인은 무효다 — 다시 권한 확인부터.
+    setEcsConfirm(null);
     if (key === "aws_region") {
       regionTouchedRef.current = true;
       //: 값을 바꾸면 이전 확인은 무효다 — 새 조합을 다시 보여 줘야 한다.
@@ -777,10 +904,14 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
           {s3DirTouched ? "" : " (감지된 폴더를 자동으로 채웠습니다)"}
         </div>
         <button
-          disabled={s3Busy || !awsReady || !coreRegion.trim()}
-          onClick={() => { setS3Busy(true); setS3Result(null); setS3Progress(null); setMessage("S3에 올리는 중…"); postMessage("workspace.deploy.s3", { dir: s3Dir.trim(), region: coreRegion.trim() }); }}
+          disabled={s3Busy || s3Confirm || !awsReady || !coreRegion.trim()}
+          onClick={() => { setS3Result(null); setMessage(""); setS3Confirm(true); }}
           style={{ ...button, marginTop: 13, opacity: s3Busy ? .7 : 1 }}
         >{s3Busy ? "배포 중…" : "S3에 배포"}</button>
+        {s3Confirm && !s3Busy && (
+          <S3DeployConfirm dir={s3Dir.trim()} region={coreRegion.trim()} onApprove={approveS3Deploy}
+            onCancel={() => { setS3Confirm(false); setMessage("S3 배포를 취소했습니다. AWS 는 바뀌지 않았습니다."); }} />
+        )}
         {/*
           진행 표시. 예전에는 버튼 라벨이 "배포 중…" 으로 바뀌는 게 전부여서,
           파일 수십 개를 올리는 동안 진행 중인지 멈춘 건지 알 수 없었다.
@@ -843,14 +974,15 @@ export const DeploymentCenter: React.FC<{ onOpenDocker: () => void }> = ({ onOpe
           <button onClick={generateActions} style={{ ...button, marginTop: 8, background: "var(--vscode-button-secondaryBackground, #3a3d41)", color: "var(--vscode-button-secondaryForeground, #fff)" }}>배포 워크플로우 생성</button>
         </div>
       </div>}
-      {target === "actions" && <div style={{ border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 7, padding: 16 }}><b>GitHub Actions</b><p style={{ color: "var(--vscode-descriptionForeground, #999)", lineHeight: 1.55 }}>프로젝트에 맞는 CI/CD 워크플로우를 생성하고, 승인 후 <code>.github/workflows/deploy.yml</code>에 저장합니다.</p><button onClick={generateActions} style={button}>워크플로우 생성</button>{proposal && <><pre style={{ marginTop: 12, maxHeight: 280, overflow: "auto", background: "var(--vscode-textCodeBlock-background, #1e1e1e)", borderRadius: 5, padding: 10, fontSize: 11 }}>{proposal.content}</pre><button onClick={() => postMessage("approveGithubActions", { proposalId: proposal.proposal_id, approved: true })} style={{ ...button, marginTop: 10 }}>승인하고 저장</button></>}</div>}
+      {target === "actions" && <div style={{ border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 7, padding: 16 }}><b>GitHub Actions</b><p style={{ color: "var(--vscode-descriptionForeground, #999)", lineHeight: 1.55 }}>프로젝트에 맞는 CI/CD 워크플로우를 생성하고, 승인 후 <code>.github/workflows/deploy.yml</code>에 저장합니다.</p><button onClick={generateActions} style={button}>워크플로우 생성</button>{proposal && <><pre style={{ marginTop: 12, maxHeight: 280, overflow: "auto", background: "var(--vscode-textCodeBlock-background, #1e1e1e)", borderRadius: 5, padding: 10, fontSize: 11 }}>{proposal.content}</pre><button data-testid="actions-approve" disabled={actionsSaving || actionsSave?.status === "saved"} onClick={() => saveActions(false)} style={{ ...button, marginTop: 10, opacity: actionsSaving ? .7 : 1 }}>{actionsSaving ? "저장 중…" : actionsSave?.status === "saved" ? "저장됨" : "승인하고 저장"}</button>{actionsSave && <ActionsSaveNotice result={actionsSave} busy={actionsSaving} onOverwrite={() => saveActions(true)} onKeep={() => { setActionsSave({ status: "rejected", message: "기존 워크플로 파일을 그대로 두었습니다." }); }} />}</>}</div>}
       {target === "ecs" && <div style={{ border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 7, padding: 16 }}><b>ECS Fargate 배포</b><p style={{ color: "var(--vscode-descriptionForeground, #999)", fontSize: 11, lineHeight: 1.45 }}>선택 근거가 ADR에 기록되었습니다. 입력한 리전과 ECS 대상의 권한을 확인한 뒤 배포를 시작합니다.</p><EcsCostNotice /><div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 12 }}>{([ ["image_name", "이미지"], ["tag", "태그"], ["aws_region", "AWS 리전"], ["ecr_registry", "ECR Registry"], ["ecs_cluster", "ECS Cluster"], ["ecs_service", "ECS Service"], ["task_family", "Task Family"], ["container_port", "컨테이너 포트"], ["cpu", "CPU"], ["memory", "Memory"] ] as [keyof typeof ecs, string][]).map(([key, label]) => <label key={key} style={{ fontSize: 11, color: "var(--vscode-descriptionForeground, #999)" }}>{label}<input value={ecs[key]} onChange={e => update(setEcs, key, e.target.value)} style={{ ...input, marginTop: 4 }} /></label>)}
           <label style={{ fontSize: 11, color: "var(--vscode-descriptionForeground, #999)", gridColumn: "1 / -1" }}>배포 환경
             <select data-testid="ecs-environment" value={ecs.environment} onChange={e => update(setEcs, "environment", e.target.value)} style={{ ...input, marginTop: 4 }}>
               {ECS_ENVIRONMENTS.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
             </select>
             <div style={{ marginTop: 4, fontSize: 10.5, lineHeight: 1.45, color: "var(--vscode-descriptionForeground, #888)" }}>정책 게이트가 환경·브랜치 규칙을 검사합니다. 브랜치는 열려 있는 작업 폴더의 git 에서 자동 감지합니다.</div>
-          </label></div><EcsRuntimeEnvironment value={runtimeDraft} onChange={setRuntimeDraft} disabled={checkingEcsPermissions || ecsBusy} /><EcsProtection value={protection} onChange={setProtection} disabled={checkingEcsPermissions || ecsBusy} /><button disabled={checkingEcsPermissions || ecsBusy} onClick={deployEcs} style={{ ...button, marginTop: 14, opacity: checkingEcsPermissions || ecsBusy ? .7 : 1 }}>{checkingEcsPermissions ? "배포 권한 확인 중…" : ecsBusy ? "배포 진행 중…" : "ECS 배포 실행"}</button>
+          </label></div><EcsRuntimeEnvironment value={runtimeDraft} onChange={setRuntimeDraft} disabled={checkingEcsPermissions || ecsBusy} /><EcsProtection value={protection} onChange={setProtection} disabled={checkingEcsPermissions || ecsBusy} /><button disabled={checkingEcsPermissions || ecsBusy || Boolean(ecsConfirm)} onClick={deployEcs} style={{ ...button, marginTop: 14, opacity: checkingEcsPermissions || ecsBusy ? .7 : 1 }}>{checkingEcsPermissions ? "배포 권한 확인 중…" : ecsBusy ? "배포 진행 중…" : "ECS 배포 실행"}</button>
+        {ecsConfirm && !ecsBusy && <EcsDeployConfirm request={ecsConfirm} onApprove={approveEcsDeploy} onCancel={cancelEcsDeploy} />}
         <EcsExecutionRole key={ecs.aws_region} region={ecs.aws_region} disabled={!awsReady || checkingEcsPermissions || ecsBusy} />
         <EcsDeploymentProgress state={ecsProgress} />
         {policyDenial && <PolicyDenialCard denial={policyDenial} environment={ecs.environment} onDismiss={() => setPolicyDenial(null)} />}

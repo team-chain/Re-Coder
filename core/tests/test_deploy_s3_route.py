@@ -50,6 +50,7 @@ def client(aws_env):
 
 def _deploy(client, **overrides):
     body = {
+        "approved": True,
         "project": "demo-site",
         "region": REGION,
         "files": [
