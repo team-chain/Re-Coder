@@ -14,7 +14,7 @@
 - GitHub 브랜치 이름 검사, force push 는 --force-with-lease 로만.
 
 **보안 · 정확성**
-- 세션 토큰은 Core 를 켤 때마다 새로. GitHub Actions 는 Preflight 하나만 부를 수 있는 CI 토큰(RECODER_CI_TOKEN), Discord 봇은 연동 토큰(~/.recoder/integration_token)을 씁니다.
+- 세션 토큰은 Core 를 켤 때마다 새로. GitHub Actions 는 Preflight 하나만 부를 수 있는 CI 토큰(RECODER_CI_TOKEN), Discord 봇은 연동 토큰(~/.recoder/integration_token)을 씁니다 — 봇이 쓰는 경로만 열리고(자격증명 · GitHub · git push 불가), POST /api/session/integration-token/rotate 로 새로 만들 수 있습니다.
 - SSH 대상 검사(옵션 주입 차단), 심볼릭 링크로 프로젝트 밖에 쓰는 것 차단, ArgoCD TLS 검증, 5xx 응답에 원문 오류를 싣지 않음.
 - 롤백 대상은 "마지막으로 성공한 배포"만. GitOps 되돌리기 PR 이 실제로 되돌리게, 로컬 롤백이 .env 를 유지하고 헬스 실패 시 원래 컨테이너 복구.
 - 공유 ECR 저장소 · 남의 보안 그룹을 덮어쓰지 않음, 배포 취소 시 남은 과금 리소스 경고, 감시 승인 링크가 실패해도 다시 쓸 수 있게.

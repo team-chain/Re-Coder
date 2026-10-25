@@ -158,7 +158,11 @@ def test_restart_rotates_session_token_but_keeps_ci_token(monkeypatch, tmp_path)
                 # 3.0.2 연동 토큰: 재시작해도 그대로, 일반 API 는 열지만 토큰 조회(/api/session/*)는 못 연다.
                 integ = app.state.integration_token
                 integration_tokens.append(integ)
-                assert client.get("/api/status", headers={"X-Session-Token": integ}).status_code == 200
+                # 봇이 쓰는 경로만 열린다 — 일반 API · 자격증명 · git push 는 401.
+                assert client.get("/workbench/state", headers={"X-Session-Token": integ}).status_code == 200
+                for path in ("/api/status", "/api/aws/status", "/api/github/status"):
+                    assert client.get(path, headers={"X-Session-Token": integ}).status_code == 401, path
+                assert client.post("/api/git/push", json={"approved": True}, headers={"X-Session-Token": integ}).status_code == 401
                 assert client.get("/api/session/ci-token", headers={"X-Session-Token": integ}).status_code == 401
                 assert client.get("/api/session/integration-token", headers={"X-Session-Token": integ}).status_code == 401
                 assert client.get("/api/session/integration-token", headers={"X-Session-Token": app.state.session_token}).json()["token"] == integ
@@ -213,3 +217,28 @@ def test_generated_workflow_uses_ci_token_secret(monkeypatch, tmp_path):
     assert "/workbench/preflight/run" in proposal.content
     assert "RECODER_CI_TOKEN" in proposal.required_secrets
     assert "RECODER_SESSION_TOKEN" not in proposal.required_secrets
+
+
+def test_integration_token_route_allowlist_and_rotation(monkeypatch, tmp_path):
+    from api.middleware.auth import integration_allowed
+    import api.routes.session as session_routes
+    assert integration_allowed("/api/ecs/deploy") and integration_allowed("/workbench/deployment/abc/rollback")
+    assert integration_allowed("/gitops/sync/123")
+    for path in ("/api/aws/connect", "/api/github/secret", "/api/git/push", "/api/session/ci-token",
+                 "/api/session/integration-token", "/workbench/deployment/../../api/aws/clear", "/api/ecs/deploy/x"):
+        assert not integration_allowed(path), path
+    monkeypatch.setattr(session_routes, "_RECODER_DIR", tmp_path / ".recoder")
+    app = FastAPI()
+    app.state.session_token = TOKEN
+    app.state.integration_token = "old-integration-" + "y" * 32
+    app.add_middleware(SessionTokenMiddleware)
+    app.include_router(session_routes.router)
+    client = TestClient(app)
+    # 연동 토큰으로는 새로 만들 수 없다.
+    assert client.post("/api/session/integration-token/rotate", headers={"X-Session-Token": app.state.integration_token}).status_code == 401
+    r = client.post("/api/session/integration-token/rotate", headers={"X-Session-Token": TOKEN})
+    assert r.status_code == 200 and r.json()["token"] != "old-integration-" + "y" * 32
+    assert app.state.integration_token == r.json()["token"]
+    assert (tmp_path / ".recoder" / "integration_token").read_text(encoding="utf-8") == r.json()["token"]
+    if os.name == "posix":
+        assert stat.S_IMODE((tmp_path / ".recoder" / "integration_token").stat().st_mode) == 0o600

@@ -292,6 +292,29 @@ test('3.0.2 명령 결과: ReCoder 창이 준비되기 전 결과는 쌓아 두�
   assert.match(auto, /choice === '열기'[\s\S]*openPanelResult\('build'/);
 });
 
+test('3.0.2 명령 결과: 시작 알림만 받고 창을 닫았다 다시 열어도 최종 결과는 사라지지 않는다', async () => {
+  const provider = new SidebarProvider(vscode.Uri.file(os.tmpdir()), { getAwsStatus: async () => ({ ready: false }) }, {}, { getLastHealth: () => null, start() {}, stop() {} });
+  provider.connectAndDiagnose = () => {};
+  provider._view = { webview: { postMessage: async () => true } };
+  const first = [], second = [];
+  const p1 = { postMessage: async (m) => { first.push(m); return true; }, onDidReceiveMessage() {} };
+  const p2 = { postMessage: async (m) => { second.push(m); return true; }, onDidReceiveMessage() {} };
+  const delay = SidebarProvider.PANEL_FLUSH_DELAY_MS; SidebarProvider.PANEL_FLUSH_DELAY_MS = 0;
+  try {
+    provider.attachWorkspacePanel(p1);
+    await provider.handleMessage({ type: 'webview.ready', payload: {} }, p1);
+    provider.expectPanelResults(['core.analyzeStarted', 'build.analysis.result', 'build.analysis.error', 'errorMessage']);
+    provider.postMessage('core.analyzeStarted', {});                    // 준비된 창으로 바로 — 대기는 계속
+    assert.equal(first.filter((m) => m.type === 'core.analyzeStarted').length, 1);
+    provider.detachWorkspacePanel(p1);                                   // 분석 중 창을 닫았다
+    provider.postMessage('build.analysis.result', { id: 9 });            // 쌓인다
+    provider.attachWorkspacePanel(p2);
+    await provider.handleMessage({ type: 'webview.ready', payload: {} }, p2);
+    await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(second.filter((m) => m.type === 'build.analysis.result').map((m) => m.payload.id), [9]);
+  } finally { SidebarProvider.PANEL_FLUSH_DELAY_MS = delay; }
+});
+
 // ── 8. Workbench ──────────────────────────────────────────────────────
 
 class TestHost extends WorkbenchHost {

@@ -133,6 +133,29 @@ async def get_integration_token(request: Request) -> dict:
             "usage": "Discord: /recoder setup api <ReCoder 주소> <이 토큰>"}
 
 
+@router.post("/api/session/integration-token/rotate")
+async def rotate_integration_token(request: Request) -> dict:
+    """연동 토큰을 새로 만든다(유출이 의심될 때). 예전 값은 바로 막힌다. 세션 토큰으로만 부를 수 있다."""
+    import os as _os
+    import secrets as _secrets
+
+    token = _secrets.token_urlsafe(32)
+    path = _RECODER_DIR / "integration_token"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        #: main._persist_session_token 과 같은 방식(0600 · 심볼릭 링크 거부). 번들(frozen)에서 main 을 다시 import 할 수 없어 여기 둔다.
+        fd = _os.open(path, _os.O_WRONLY | _os.O_CREAT | getattr(_os, "O_NOFOLLOW", 0), 0o600)
+        with _os.fdopen(fd, "w", encoding="utf-8") as stream:
+            if _os.name == "posix":
+                _os.fchmod(stream.fileno(), 0o600)
+            stream.truncate(0)
+            stream.write(token)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="연동 토큰 파일을 쓰지 못했습니다.") from exc
+    request.app.state.integration_token = token
+    return {"token": token, "message": "연동 토큰을 새로 만들었습니다. Discord 에서 /recoder setup api 로 다시 넣어 주십시오."}
+
+
 @router.get("/api/cost")
 async def get_cost() -> CostSummary:
     """Primary cost endpoint specified in the v6.4 design doc (§19.5)."""

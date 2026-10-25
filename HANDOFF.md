@@ -1,7 +1,7 @@
 # 3.0.2 — 화면 개편 · 승인 게이트 · 보안 수정 (2026-10-24)
 
 - 검토: 독립 검토 3건(확장 흐름 8 · 코어 보안 11 · 배포 8) → 두 브랜치(fix/3.0.2-a 코어, fix/3.0.2-b 승인 · 확장)로 고친 뒤 병합. 재검토 7건(운영 조회 자격증명, 봇 토큰, e2e 스크립트, 하위 폴더 git, 모니터 요청 섞임, 창 전달 대기, 패키지 목록)도 반영.
-- 토큰: 세션 토큰은 시작마다 새로(runtime.json). CI 토큰 ~/.recoder/ci_token(POST /workbench/preflight/run 만). 연동 토큰 ~/.recoder/integration_token(/api/session/* 제외 전부, 재시작해도 유지) — Discord /recoder setup api 에 넣는다. GET /api/session/{ci,integration}-token 은 세션 토큰으로만.
+- 토큰: 세션 토큰은 시작마다 새로(runtime.json). CI 토큰 ~/.recoder/ci_token(POST /workbench/preflight/run 만). 연동 토큰 ~/.recoder/integration_token(재시작해도 유지, 봇이 쓰는 경로만 — auth.py INTEGRATION_ROUTES/_INTEGRATION_PATTERNS, 새로 만들기 POST /api/session/integration-token/rotate) — Discord /recoder setup api 에 넣는다. GET /api/session/{ci,integration}-token 은 세션 토큰으로만.
 - UI: webview-src/components/shell/(theme · parts · HomeBento · FeatureHero), Hubs.tsx HubTabs/HUB_TABS/HUB_ENTRY(위 탭 → 첫 화면, hub:develop → code), App.tsx 위 막대 · Dock(setPendingPrompt → CodeAgent). 테마는 body 에서 --vscode-* 를 다시 정의(고대비 제외). 글꼴 media/fonts/PretendardVariable.woff2(+OFL), CSP font-src · frame-src(미리보기 iframe: sandbox=allow-scripts, https · localhost 만). 캐릭터 이미지는 로고로(recoderCharacter.ts), ✓ ✕ 는 ui/marks.tsx.
 - 홈 데이터: canvas.snapshot · replay.history · monitor.load(requestId 로 구분) · home.changes(homeChanges.ts, git --relative, blockedFile 제외, 읽기만).
 - 시험: core 3389+ · extension 710 · watchdog 65 · discord 112 · golden path · promptfoo 19/19 · e2e · frozen self-check · npm/pip audit 0.

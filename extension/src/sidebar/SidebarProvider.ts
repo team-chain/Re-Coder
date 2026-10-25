@@ -304,8 +304,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
         if (this._workspacePanelWebview) {
             void this._workspacePanelWebview.postMessage({ type, payload });
-            //: 기다리던 결과가 준비된 창으로 바로 갔다 — 대기를 끝낸다(나중에 창을 다시 열 때 엉뚱한 결과가 쌓이지 않게).
-            if (delivery && delivery.types.has(type) && this._workspaceReady) { this._panelDelivery = null; }
+            //: 기다리던 **최종** 결과가 준비된 창으로 바로 갔다 — 대기를 끝낸다(시작 알림 · 일반 오류로는 끝내지 않는다:
+            //: 그 뒤 창을 닫았다 다시 열어도 최종 결과가 사라지지 않게).
+            if (delivery && delivery.types.has(type) && this._workspaceReady && SidebarProvider.PANEL_FINAL_TYPES.has(type)) { this._panelDelivery = null; }
         }
     }
 
@@ -314,6 +315,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private _panelQueue: Array<{ type: string; payload: unknown }> = [];
     /** 창이 준비된 직후 복원한 화면이 그려질 틈을 두고 쌓인 결과를 보낸다(ms). */
     static PANEL_FLUSH_DELAY_MS = 300;
+    /** 이 종류가 도착하면 그 작업은 끝난 것 — 그때만 대기를 푼다. */
+    static PANEL_FINAL_TYPES = new Set(['build.analysis.result', 'build.analysis.error', 'proposalReady']);
 
     expectPanelResults(types: string[]): void {
         this._panelDelivery = { types: new Set(types), until: Date.now() + 10 * 60 * 1000 };
@@ -323,7 +326,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     private _flushPanelQueue(webview: vscode.Webview): void {
         if (!this._panelQueue.length) { return; }
         const queued = this._panelQueue.splice(0);
-        this._panelDelivery = null;
+        if (queued.some(m => SidebarProvider.PANEL_FINAL_TYPES.has(m.type))) { this._panelDelivery = null; }
         setTimeout(() => {
             for (const message of queued) { void webview.postMessage(message); }
         }, SidebarProvider.PANEL_FLUSH_DELAY_MS);

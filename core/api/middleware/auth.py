@@ -7,6 +7,7 @@ Validates the X-Session-Token header on every request except /api/health.
 from __future__ import annotations
 
 import hmac
+import re
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -16,8 +17,26 @@ from starlette.responses import JSONResponse
 #: CI 토큰(GitHub Actions Secret RECODER_CI_TOKEN)이 부를 수 있는 유일한 경로.
 CI_TOKEN_ROUTES = frozenset({("POST", "/workbench/preflight/run")})
 
-#: 연동 토큰(Discord 봇 등 사용자가 직접 연결한 도구)이 **부를 수 없는** 경로 — 토큰을 꺼내 보는 곳.
-INTEGRATION_BLOCKED_PREFIXES = ("/api/session/",)
+#: 연동 토큰(Discord 봇)이 부를 수 있는 경로 — 봇이 실제로 쓰는 것만(discord-bot/recoder_client.py).
+#: 자격증명 저장 · GitHub 토큰/Secret · git push · AWS 연결 · 토큰 조회 같은 경로는 열지 않는다.
+INTEGRATION_ROUTES = frozenset({
+    "/api/analyze", "/api/ecs/deploy", "/api/ecs/rollback", "/api/forecast/deploy", "/api/incident/timeline",
+    "/api/preflight/run", "/gitops/rollback-pr", "/gitops/sync", "/gitops/syncs",
+    "/workbench/deployment/start", "/workbench/deployments", "/workbench/events", "/workbench/mode",
+    "/workbench/preflight/run", "/workbench/state",
+})
+#: 뒤에 ID 가 붙는 봇 경로 — 모양을 정확히 맞춘다(같은 접두어에 나중에 생기는 경로가 열리지 않게).
+_INTEGRATION_PATTERNS = (
+    re.compile(r"/gitops/rollback-pr/[A-Za-z0-9_.-]{1,128}"),
+    re.compile(r"/gitops/sync/[A-Za-z0-9_.-]{1,128}"),
+    re.compile(r"/workbench/deployment/[A-Za-z0-9_.-]{1,128}/rollback"),
+)
+
+
+def integration_allowed(path: str) -> bool:
+    if ".." in path:
+        return False
+    return path in INTEGRATION_ROUTES or any(p.fullmatch(path) for p in _INTEGRATION_PATTERNS)
 
 
 class SessionTokenMiddleware(BaseHTTPMiddleware):
@@ -67,12 +86,12 @@ class SessionTokenMiddleware(BaseHTTPMiddleware):
         ):
             return await call_next(request)
 
-        # 연동 토큰(3.0.2): 세션 토큰은 Core 를 켤 때마다 바뀌므로, 사용자가 Discord 봇 등에 직접 넣어 두는 값은
-        # 따로 영속한다. 토큰을 꺼내 보는 /api/session/* 은 부를 수 없다. AWS 를 바꾸는 요청은 어차피 approved 가 필요하다.
+        # 연동 토큰(3.0.2): 세션 토큰은 Core 를 켤 때마다 바뀌므로, Discord 봇에 넣어 두는 값은 따로 영속한다.
+        # 봇이 쓰는 경로만 연다(INTEGRATION_ROUTES). 새로 만들기: POST /api/session/integration-token/rotate(세션 토큰).
         integration: str = getattr(request.app.state, "integration_token", "") or ""
         if (
             integration
-            and not request.url.path.startswith(INTEGRATION_BLOCKED_PREFIXES)
+            and integration_allowed(request.url.path)
             and hmac.compare_digest(provided_token.encode("utf-8"), integration.encode("utf-8"))
         ):
             return await call_next(request)
