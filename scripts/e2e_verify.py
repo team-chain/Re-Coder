@@ -341,8 +341,6 @@ def step1_boot():
         ) from exc
 
     app = main.create_app()
-    token = "e" * 32
-    app.state.session_token = token
     # with 범위 전체에서 FastAPI lifespan과 async portal을 유지한다. 그래야
     # /api/deploy/execute가 시작한 지속 감시 task가 다음 요청까지 살아 있다.
     with TestClient(app, raise_server_exceptions=False, client=("127.0.0.1", 5555)) as client:
@@ -352,6 +350,11 @@ def step1_boot():
                 1, "코어가 응답하지 않음", f"GET /api/health → {resp.status_code}",
                 "core/api/routes/health.py 와 create_app 의 미들웨어",
             )
+        #: 3.0.2 — 세션 토큰은 lifespan 이 시작할 때마다 새로 만든다. 그 값을 읽어 쓴다.
+        token = str(getattr(app.state, "session_token", "") or "")
+        if not token:
+            raise StepFailure(1, "코어 세션 토큰이 초기화되지 않음", "lifespan 뒤 app.state.session_token 이 비어 있음",
+                              "core/main.py 의 lifespan")
         _ok("Docker 연결됨, 코어 /api/health 200")
         yield client, token
 
