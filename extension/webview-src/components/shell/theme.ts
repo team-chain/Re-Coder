@@ -6,6 +6,33 @@
  *  · 글꼴은 확장에 들어 있는 Pretendard(OFL). 외부 요청 없음.
  *  · 레이아웃 규칙(위 막대 · 타일 · 아래 요청창)은 여기 한 곳에만 있다.
  */
+/** "#16a34a" → "rgb(22, 163, 74)" — 브라우저가 style 속성에 적는 모양 그대로. */
+const rgb = (hex: string): string => {
+  const h = hex.replace("#", "");
+  const f = h.length === 3 ? h.split("").map(c => c + c).join("") : h;
+  return `rgb(${parseInt(f.slice(0, 2), 16)}, ${parseInt(f.slice(2, 4), 16)}, ${parseInt(f.slice(4, 6), 16)})`;
+};
+//: 고대비 테마는 VS Code 색을 그대로 둔다.
+const APP = "body:not(.vscode-high-contrast):not(.vscode-high-contrast-light) .rc-app";
+const bg = (tags: string, hexes: string[]) => hexes.flatMap(h => [`background: ${rgb(h)}`, `background-color: ${rgb(h)}`])
+  .map(v => `${APP} :is(${tags})[style*="${v}"]`).join(",");
+const fg = (hexes: string[]) => hexes.flatMap(h => [`[style^="color: ${rgb(h)}"]`, `[style*="; color: ${rgb(h)}"]`]).map(v => `${APP} ${v}`).join(",");
+
+/** 예전 화면의 하드코딩 색 → 테마 토큰. 화면 코드를 하나하나 고치지 않아도 같은 톤이 된다. */
+export const LEGACY_PRIMARY = ["#2563eb", "#3794ff", "#0e639c", "#0078d4", "#3b82f6", "#16a34a", "#22c55e", "#2ea043"];
+export const LEGACY_SURFACE = ["#252526", "#1e1e1e", "#1c1c1c", "#1a1a1a", "#1f1f1f", "#2a2a2a", "#2d2d2d", "#202020"];
+export const LEGACY_SECONDARY = ["#252526", "#1e1e1e", "#1c1c1c", "#2a2a2a", "#2d2d2d", "#333333", "#3a3a3a", "#3c3c3c"];
+export const LEGACY_LINE = ["#333333", "#3f3f3f", "#2a2a2a", "#3c3c3c", "#444444", "#404040", "#2f2f2f"];
+export const LEGACY_CSS = [
+  `${bg("button", LEGACY_PRIMARY).replace(/\]/g, "]:not(:disabled)")}{background:var(--rc-grad)!important;color:#04121A!important;border-color:transparent!important;font-weight:600}`,
+  `${bg("button", LEGACY_SECONDARY)}{background:var(--rc-tile2)!important;color:var(--rc-fg)!important;border-color:var(--rc-line2)!important}`,
+  `${bg("div,section,pre,span,details,textarea", LEGACY_SURFACE)}{background:var(--rc-solid)!important}`,
+  `${LEGACY_LINE.map(h => `${APP} [style*="solid ${rgb(h)}"]`).join(",")}{border-color:var(--rc-line2)!important}`,
+  `${fg(["#cccccc", "#dddddd", "#bbbbbb", "#e0e0e0"])}{color:var(--rc-fg)!important}`,
+  `${fg(["#aaaaaa", "#999999", "#888888"])}{color:var(--rc-fg2)!important}`,
+  `${fg(["#777777", "#666666", "#555555"])}{color:var(--rc-fg3)!important}`,
+].join("\n");
+
 export const THEME_CSS = `
 body{
   --rc-teal:#35A9D1;--rc-steel:#7891B4;--rc-ok:#3DD68C;--rc-warn:#F2B544;--rc-bad:#F27272;
@@ -44,6 +71,7 @@ body.vscode-light{
   --vscode-panel-border:var(--rc-line2);--vscode-editorWidget-background:#FFFFFF;
   --vscode-input-background:#FFFFFF;--vscode-input-border:var(--rc-line2);
   --vscode-button-background:#1A7FA8;--vscode-button-hoverBackground:#1F8EB8;--vscode-button-foreground:#FFFFFF;
+  --vscode-button-secondaryBackground:#E9EFF5;--vscode-button-secondaryHoverBackground:#DEE6EE;--vscode-button-secondaryForeground:var(--rc-fg);
   --vscode-textLink-foreground:#1A7FA8;--vscode-focusBorder:#1F8EB8;
   --vscode-list-activeSelectionBackground:rgba(31,142,184,.12);--vscode-list-activeSelectionForeground:var(--rc-fg);
 }
@@ -110,11 +138,27 @@ body.vscode-light .rc-tile{box-shadow:0 1px 2px rgba(20,45,75,.05)}
 .rc-chip.warn{color:var(--rc-warn)}.rc-chip.warn i{background:var(--rc-warn)}.rc-chip.bad{color:var(--rc-bad)}.rc-chip.bad i{background:var(--rc-bad)}.rc-chip.off i{background:var(--rc-fg3)}
 .rc-btn{all:unset;box-sizing:border-box;cursor:pointer;height:34px;display:inline-flex;align-items:center;justify-content:center;gap:7px;padding:0 14px;border-radius:10px;font-weight:600;font-size:13px;border:1px solid var(--rc-line2);background:var(--rc-tile2);color:var(--rc-fg);white-space:nowrap}
 .rc-btn:hover{border-color:rgba(53,169,209,.45)}
-.rc-btn.p{background:var(--rc-grad);border-color:transparent;color:#04121A;box-shadow:0 8px 22px -10px rgba(53,169,209,.7)}
+.rc-btn.p{background:var(--rc-grad);border-color:transparent;color:#04121A;box-shadow:inset 0 1px 0 rgba(255,255,255,.22),0 6px 16px -10px rgba(53,169,209,.6)}
+.rc-btn.p:hover{filter:brightness(1.06)}
+.rc-btn:disabled{opacity:.5;cursor:default}
 .rc-btn.sm{height:28px;padding:0 10px;font-size:12px;border-radius:8px}
 .rc-btn:focus-visible{outline:2px solid var(--rc-teal);outline-offset:2px}
 .rc-btn[aria-disabled=true]{opacity:.5;cursor:default}
 .rc-empty{color:var(--rc-fg3);font-size:12.5px}
+
+/* ── 구역 제목 · 고르기 버튼(3.0.3) ── */
+.rc-sec{font-size:13.5px;font-weight:650;color:var(--rc-fg);margin:6px 0 10px;letter-spacing:-.01em}
+.rc-seg{display:inline-flex;gap:2px;padding:3px;border-radius:11px;background:var(--rc-tile2);border:1px solid var(--rc-line)}
+.rc-seg button{all:unset;box-sizing:border-box;cursor:pointer;padding:5px 12px;border-radius:8px;font-size:12.5px;color:var(--rc-fg2);white-space:nowrap}
+.rc-seg button:hover{color:var(--rc-fg)}
+.rc-seg button[aria-pressed=true]{background:var(--rc-solid);color:var(--rc-fg);font-weight:600;box-shadow:inset 0 0 0 1px var(--rc-line2)}
+.rc-seg button:disabled{opacity:.5;cursor:not-allowed}
+.rc-seg button:focus-visible{outline:2px solid var(--rc-teal);outline-offset:1px}
+
+/* ── 운영 화면 구역 타일(3.0.3) ── */
+.rc-op{padding:16px 18px;margin-bottom:14px}
+.rc-op>.rc-sec{margin:0 0 4px}
+.rc-op :is(input:not([type=checkbox]):not([type=radio]),select){height:32px;padding:0 10px;box-sizing:border-box;font-size:12.5px}
 
 /* ── 허브 안 탭 ── */
 .rc-subtabs{display:flex;gap:2px;margin:2px 0 18px;border-bottom:1px solid var(--rc-line);overflow-x:auto}
@@ -124,11 +168,12 @@ body.vscode-light .rc-tile{box-shadow:0 1px 2px rgba(20,45,75,.05)}
 .rc-subtabs button:focus-visible{outline:2px solid var(--rc-teal);outline-offset:-2px;border-radius:6px}
 .rc-subtabs button[aria-disabled=true]{opacity:.45}
 
-/* ── 예전 화면들의 인라인 스타일을 같은 톤으로(버튼 · 입력칸 · 모서리) ── */
-.rc-app button[style*="vscode-button-background"]:not(:disabled){background:var(--rc-grad)!important;color:#04121A!important;border-color:transparent!important;box-shadow:0 8px 20px -12px rgba(53,169,209,.8)}
+/* ── 예전 화면들의 인라인 스타일을 같은 톤으로(버튼 · 패널 · 테두리 · 회색 글자) ──
+   3.0.3: 브라우저는 style 속성의 #hex 를 rgb(r, g, b) 로 바꿔 적는다. 그래서 #hex 로 찾던 3.0.2 규칙은
+   실제 화면에서 하나도 걸리지 않았다 — 아래 선택자는 rgb 표기로 만든다(LEGACY_CSS). */
+.rc-app button[style*="vscode-button-background"]:not(:disabled){background:var(--rc-grad)!important;color:#04121A!important;border-color:transparent!important;box-shadow:inset 0 1px 0 rgba(255,255,255,.22)}
 .rc-app button[style*="vscode-button-background"]{font-weight:600}
-.rc-app button:is([style*="#2563eb"],[style*="#3794ff"],[style*="#0e639c"],[style*="#16a34a"],[style*="#22c55e"],[style*="#2ea043"]):not(:disabled){background:var(--rc-grad)!important;color:#04121A!important;border-color:transparent!important}
-.rc-app :is(div,section,pre)[style*="#252526"],.rc-app :is(div,section,pre)[style*="#1e1e1e"],.rc-app :is(div,section,pre)[style*="#1c1c1c"],.rc-app :is(div,section,pre)[style*="#1a1a1a"]{background:var(--rc-solid)!important}
+${LEGACY_CSS}
 :where(.rc-app) :where(input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea){background-color:var(--vscode-input-background);color:var(--rc-fg);border:1px solid var(--rc-line2)}
 .rc-dock input{border:0;background:transparent}
 .rc-app button[style*="border-radius: 4px"],.rc-app button[style*="border-radius: 5px"],.rc-app button[style*="border-radius: 6px"],.rc-app button[style*="border-radius: 7px"]{border-radius:9px!important}

@@ -2,6 +2,7 @@
 import React, { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import { serviceLink } from "./EcsDeploymentProgress";
+import { friendlyError } from "./ui/friendlyError";
 
 export interface HistoryEntry {
   key: string; source: "local" | "ecs"; deployment_id: string; project_id: string;
@@ -64,13 +65,15 @@ export function ReplayView({ state, source, search, onSource, onSearch, onRefres
   const busy = Boolean(state.busyKey);
   const result = selected && state.result?.key === selected.key ? state.result : null;
   return <section style={{ fontSize: 13, lineHeight: 1.6 }} aria-label="배포 이력 및 롤백">
-    <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}><span /><button onClick={onRefresh} disabled={state.loading || busy} style={button}>{state.loading ? "불러오는 중…" : "새로고침"}</button></div>
-    <p style={{ color: muted }}>이 컴퓨터에 저장된 배포 기록입니다. 현재 실행 상태와 과금 여부는 별도로 확인하세요.</p>
-    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-      <select aria-label="배포 유형" value={source} onChange={e => onSource(e.target.value)} style={{ padding: 7 }}><option value="all">전체</option><option value="ecs">ECS</option><option value="local">로컬</option></select>
-      <input aria-label="배포 이력 검색" value={search} placeholder="서비스·컨테이너·이미지 검색" onChange={e => onSearch(e.target.value)} style={{ flex: 1, minWidth: 150, padding: 7 }} />
+    <div className="rc-replay-bar" style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+      <div className="rc-seg" role="group" aria-label="배포 유형">
+        {([["all", "전체"], ["ecs", "ECS"], ["local", "로컬"]] as const).map(([value, label]) => <button key={value} type="button" aria-pressed={source === value} onClick={() => onSource(value)}>{label}</button>)}
+      </div>
+      <input aria-label="배포 이력 검색" value={search} placeholder="서비스·컨테이너·이미지 검색" onChange={e => onSearch(e.target.value)} style={{ flex: 1, minWidth: 150, height: 34, padding: "0 12px", boxSizing: "border-box" }} />
+      <button type="button" className="rc-btn sm" onClick={onRefresh} disabled={state.loading || busy} aria-disabled={state.loading || busy}>{state.loading ? "불러오는 중…" : "새로고침"}</button>
     </div>
-    {state.error && <p role="alert" style={{ color: "var(--vscode-errorForeground, #f48771)", whiteSpace: "pre-wrap" }}>이력 조회 실패: {state.error}{state.data && " · 마지막 조회 결과를 유지합니다."}</p>}
+    <p style={{ color: muted, fontSize: 12, margin: "8px 0 0" }}>이 컴퓨터에 저장된 배포 기록입니다. 현재 실행 상태와 과금 여부는 별도로 확인하세요.</p>
+    {state.error && <p role="alert" style={{ color: "var(--vscode-errorForeground, #f48771)", whiteSpace: "pre-wrap" }}>이력 조회 실패: {friendlyError(state.error)}{state.data && " · 마지막 조회 결과를 유지합니다."}</p>}
     {!!state.data?.warnings.length && <div role="alert" style={{ color: "var(--vscode-editorWarning-foreground, #cca700)" }}>{state.data.warnings.map((warning, i) => <p key={i}>{warning}</p>)}</div>}
     {!state.data && !state.error && <p role="status">배포 이력을 불러오는 중…</p>}
     {state.data && <p style={{ color: muted }}>{rows.length}건 표시 · 저장된 기록 {state.data.total}건{state.data.total > state.data.entries.length && ` 중 최근 ${state.data.entries.length}건을 조회했습니다.`}</p>}
@@ -91,7 +94,7 @@ export function ReplayView({ state, source, search, onSource, onSearch, onRefres
         {selected.rollback.target && <div style={{ margin: "6px 0", fontFamily: "var(--vscode-editor-font-family, monospace)" }}>{selected.rollback.target}</div>}
         {!selected.rollback.available && <p style={{ color: muted }}>{selected.rollback.reason}</p>}
         {selected.rollback.available && state.review !== selected.key && <button onClick={() => onReview(selected.key)} disabled={busy || state.loading} style={button}>{state.busyKey === selected.key ? "롤백 처리 중…" : "롤백 대상 확인"}</button>}
-        {state.review === selected.key && <div role="group" aria-label="롤백 실행 확인" style={card}><b>{selected.source === "ecs" ? "ECS 롤백 승인 · Level 3" : "로컬 롤백 승인"}</b><p><b>{selected.target}</b>를 위의 이전 버전으로 되돌립니다. 실행 중인 서비스에 영향을 줍니다.</p>{selected.source === "ecs" && <p>요청 후 ECS 서비스 안정화 상태를 확인해야 합니다.</p>}<div style={{ display: "flex", gap: 8 }}><button style={button} disabled={busy || state.loading} onClick={() => onConfirm(selected)}>승인하고 롤백</button><button style={button} disabled={busy} onClick={() => onReview("")}>취소</button></div></div>}
+        {state.review === selected.key && <div role="group" aria-label="롤백 실행 확인" style={card}><b>{selected.source === "ecs" ? "ECS 롤백 승인 · Level 3" : "로컬 롤백 승인"}</b><p><b>{selected.target}</b>를 위의 이전 버전으로 되돌립니다. 실행 중인 서비스에 영향을 줍니다.</p>{selected.source === "ecs" && <p>요청 후 ECS 서비스 안정화 상태를 확인해야 합니다.</p>}<div style={{ display: "flex", gap: 8 }}><button style={button} disabled={busy || state.loading} onClick={() => onConfirm(selected)}>승인하고 롤백</button><button type="button" className="rc-btn" disabled={busy} onClick={() => onReview("")}>취소</button></div></div>}
         {result && <p role="status" style={{ whiteSpace: "pre-wrap", color: result.ok ? "var(--vscode-charts-green, #4ec9b0)" : "var(--vscode-errorForeground, #f48771)" }}>{result.message}</p>}
       </div>
     </article>}

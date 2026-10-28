@@ -17,6 +17,7 @@ import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import ApprovalModal from "./ApprovalModal";
 import { OpsAlertsPanel } from "./OpsAlertsPanel";
 import { AwsCleanupPanel } from "./AwsCleanupPanel";
+import { friendlyError } from "./ui/friendlyError";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -141,13 +142,10 @@ export const OperateMode: React.FC<OperateModeProps> = ({ isActive }) => {
   const inputStyle: React.CSSProperties = {
     width: "100%",
     boxSizing: "border-box",
-    background: "var(--vscode-input-background, #1e1e1e)",
-    color: "var(--vscode-input-foreground, #ccc)",
-    border: "1px solid var(--vscode-input-border, #555)",
-    borderRadius: 3,
-    padding: "5px 8px",
-    fontSize: 11,
-    fontFamily: "var(--vscode-editor-font-family, monospace)",
+    height: 34,
+    borderRadius: 10,
+    padding: "0 12px",
+    fontSize: 12.5,
     marginBottom: 6,
     outline: "none",
   };
@@ -193,7 +191,7 @@ export const OperateMode: React.FC<OperateModeProps> = ({ isActive }) => {
       <div>
       <OpsAlertsPanel />
       <AwsCleanupPanel />
-      <div style={{ padding: 16, color: "var(--vscode-descriptionForeground)", textAlign: "center", fontSize: 12, lineHeight: 1.7 }}>
+      <div className="rc-tile rc-op" style={{ color: "var(--vscode-descriptionForeground)", textAlign: "center", fontSize: 12, lineHeight: 1.7 }}>
         Operate Mode는 다음이 필요합니다:<br />
         AI Ready · AWS Deploy Ready · Ops Ready<br />
         <span style={{ color: "var(--vscode-textLink-foreground, #4af)" }}>진단 탭에서 확인하세요</span>
@@ -207,34 +205,42 @@ export const OperateMode: React.FC<OperateModeProps> = ({ isActive }) => {
       <OpsAlertsPanel />
       <AwsCleanupPanel />
 
-      {/* EC2 연결 정보 */}
-      <div style={sectionHeader}>EC2 연결 정보</div>
-      <input
-        style={inputStyle}
-        placeholder="EC2 호스트 (예: 52.1.2.3)"
-        value={host}
-        onChange={(e) => setHost(e.target.value)}
-      />
-      <input
-        style={inputStyle}
-        placeholder="SSH 키 경로 (예: ~/.ssh/id_rsa)"
-        value={sshKeyPath}
-        onChange={(e) => setSshKeyPath(e.target.value)}
-      />
-      <button
-        style={{ ...btnPrimary, opacity: (!host.trim() || isFetching) ? 0.6 : 1 }}
-        onClick={handleFetchIncidents}
-        disabled={!host.trim() || isFetching}
-      >
-        {isFetching ? "조회 중…" : "운영 상태 조회"}
-      </button>
-
-      {/* 에러 표시 */}
-      {error && (
-        <div style={{ marginTop: 8, background: "rgba(244,67,54,0.1)", border: "1px solid var(--vscode-editorError-foreground, #f44)", borderRadius: 4, padding: "6px 8px", color: "var(--vscode-editorError-foreground, #f44)" }}>
-          {error}
+      {/* EC2 연결 정보 — 한 타일(3.0.3) */}
+      <section className="rc-tile rc-op" data-testid="ec2-ops">
+        <h3 className="rc-sec">EC2 운영 상태</h3>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+          <input
+            style={{ ...inputStyle, marginBottom: 0, flex: "1 1 220px", width: "auto" }}
+            aria-label="EC2 호스트"
+            placeholder="EC2 호스트 (예: 52.1.2.3)"
+            value={host}
+            onChange={(e) => setHost(e.target.value)}
+          />
+          <input
+            style={{ ...inputStyle, marginBottom: 0, flex: "1 1 220px", width: "auto" }}
+            aria-label="SSH 키 경로"
+            placeholder="SSH 키 경로 (예: ~/.ssh/id_rsa)"
+            value={sshKeyPath}
+            onChange={(e) => setSshKeyPath(e.target.value)}
+          />
+          <button
+            type="button"
+            className="rc-btn p sm"
+            onClick={handleFetchIncidents}
+            disabled={!host.trim() || isFetching}
+            aria-disabled={!host.trim() || isFetching}
+          >
+            {isFetching ? "조회 중…" : "운영 상태 조회"}
+          </button>
         </div>
-      )}
+
+        {/* 에러 표시 */}
+        {error && (
+          <div role="alert" style={{ marginTop: 10, background: "rgba(242,114,114,0.08)", border: "1px solid rgba(242,114,114,.35)", borderRadius: 10, padding: "8px 10px", color: "var(--vscode-editorError-foreground, #f44)" }}>
+            {friendlyError(error)}
+          </div>
+        )}
+      </section>
 
       {/* 인시던트 목록 */}
       {incidents.length > 0 && (

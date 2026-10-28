@@ -820,40 +820,17 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
         </div>
       )}
 
-      {/* ── Section header ── */}
-      <div style={{ fontSize: 11, fontWeight: 600, color: "var(--vscode-descriptionForeground, #888)", marginBottom: 10 }}>
-        인프라 파일 생성
-      </div>
-
-      {/* ── File type tabs ── */}
-      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
-        {fileTabs.map((tab) => {
-          const isActive = activeFileTab === tab.id;
-          return (
-            <button
-              key={tab.id}
-              onClick={() => handleSwitchFileTab(tab.id)}
-              disabled={!canSwitchFileTab}
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 5,
-                padding: "5px 11px",
-                borderRadius: 5,
-                border: `1.5px solid ${isActive ? "#3b82f6" : "#3f3f3f"}`,
-                background: isActive ? "rgba(59,130,246,0.15)" : "#252526",
-                color: isActive ? "#93c5fd" : "#888",
-                fontSize: 11,
-                fontWeight: isActive ? 600 : 400,
-                cursor: canSwitchFileTab ? "pointer" : "not-allowed",
-                opacity: canSwitchFileTab ? 1 : 0.55,
-                transition: "all 0.15s",
-              }}
-            >
+      {/* ── 인프라 파일 — 제목 · 파일 종류(3.0.3) ── */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
+        <div className="rc-sec" style={{ margin: 0 }}>인프라 파일</div>
+        <div className="rc-seg" role="group" aria-label="파일 종류">
+          {fileTabs.map((tab) => (
+            <button key={tab.id} type="button" aria-pressed={activeFileTab === tab.id}
+              onClick={() => handleSwitchFileTab(tab.id)} disabled={!canSwitchFileTab}>
               {tab.label}
             </button>
-          );
-        })}
+          ))}
+        </div>
       </div>
 
       {/* ── Code preview card ── */}

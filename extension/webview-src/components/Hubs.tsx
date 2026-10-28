@@ -237,6 +237,24 @@ export const FeatureFrame: React.FC<{ feature: FeatureId; ctx?: ReadyCtx; onGo?:
 };
 
 // ── ADR 목록/본문 ─────────────────────────────────────────────────────────
+/** 3.0.3 — ADR 마크다운의 제목 · 목록 · 문단만 읽기 좋게(HTML 주입 없이 React 요소로). */
+export const AdrBody: React.FC<{ text: string }> = ({ text }) => {
+  const out: React.ReactNode[] = [];
+  let list: string[] = [];
+  const flush = () => { if (list.length) { const items = list; out.push(<ul key={`u${out.length}`} style={{ margin: "0 0 10px", paddingLeft: 18 }}>{items.map((t, i) => <li key={i}>{t}</li>)}</ul>); list = []; } };
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trimEnd();
+    const h = /^(#{1,4})\s+(.*)$/.exec(line);
+    const li = /^\s*[-*]\s+(.*)$/.exec(line);
+    if (li) { list.push(li[1]); continue; }
+    flush();
+    if (h) out.push(<div key={`h${out.length}`} style={{ fontSize: h[1].length === 1 ? 15 : 13, fontWeight: 650, margin: out.length ? "14px 0 6px" : "0 0 6px", color: C.fg }}>{h[2]}</div>);
+    else if (line.trim()) out.push(<p key={`p${out.length}`} style={{ margin: "0 0 8px" }}>{line}</p>);
+  }
+  flush();
+  return <div className="rc-adr-body" style={{ fontSize: 12.5, lineHeight: 1.65, color: C.fg, overflowWrap: "anywhere" }}>{out}</div>;
+};
+
 interface AdrItem { file: string; title: string; id: string; }
 
 export const AdrPanel: React.FC = () => {
@@ -271,8 +289,8 @@ export const AdrPanel: React.FC = () => {
       <div style={{ border: `1px solid ${C.line}`, borderRadius: 10, background: C.card, overflow: "hidden", alignSelf: "start" }}>
         {items.length === 0 && <div style={{ padding: 12, color: C.muted, fontSize: 12 }}>{error || "docs/adr 에 기록이 없어요. 코드 생성에서 설계 결정을 확정하면 여기에 쌓입니다."}</div>}
         {items.map((it, i) => (
-          <button key={it.file} onClick={() => open(it.file)} style={{ display: "block", width: "100%", textAlign: "left", padding: "10px 12px", borderTop: i === 0 ? "none" : `1px solid ${C.line}`, borderLeft: "none", borderRight: "none", borderBottom: "none", background: it.file === selected ? "#1c2b3d" : "transparent", color: C.fg, cursor: "pointer", fontFamily: "inherit", fontSize: 12 }}>
-            <div style={{ color: "#8fa4b5", fontFamily: "var(--vscode-editor-font-family, Menlo, monospace)", fontSize: 10.5 }}>{it.id}</div>
+          <button key={it.file} onClick={() => open(it.file)} style={{ display: "block", width: "100%", textAlign: "left", padding: "10px 12px", borderTop: i === 0 ? "none" : `1px solid ${C.line}`, borderLeft: "none", borderRight: "none", borderBottom: "none", background: it.file === selected ? "var(--vscode-list-activeSelectionBackground, #1c2b3d)" : "transparent", color: C.fg, cursor: "pointer", fontFamily: "inherit", fontSize: 12 }}>
+            <div style={{ color: C.muted, fontFamily: "var(--vscode-editor-font-family, Menlo, monospace)", fontSize: 10.5 }}>{it.id}</div>
             <div>{it.title}</div>
           </button>
         ))}
@@ -281,11 +299,11 @@ export const AdrPanel: React.FC = () => {
         {selected ? <>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
             <strong style={{ fontSize: 14 }}>{items.find((i) => i.file === selected)?.title ?? selected}</strong>
-            <span style={{ fontSize: 10.5, padding: "2px 7px", borderRadius: 999, border: `1px solid ${reviewed ? "#2f6b4a" : "#6b4a17"}`, color: reviewed ? "#7ed3a2" : "#f0b35b" }}>{decisionStatus.label}</span>
+            <span style={{ fontSize: 10.5, padding: "2px 7px", borderRadius: 999, border: `1px solid ${reviewed ? "rgba(61,214,140,.45)" : "rgba(242,181,68,.5)"}`, color: reviewed ? "var(--rc-ok, #7ed3a2)" : "var(--rc-warn, #f0b35b)" }}>{decisionStatus.label}</span>
             {meta && <span style={{ color: C.muted, fontSize: 11 }}>{meta}</span>}
             <button onClick={() => postMessage("adr.open", { file: selected })} style={{ ...btnStyle(false), marginLeft: "auto" }}>에디터에서 열기</button>
           </div>
-          <pre style={{ margin: 0, whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontFamily: "inherit", fontSize: 12, lineHeight: 1.6, color: C.fg }}>{content || (error ? error : "불러오는 중…")}</pre>
+          {content ? <AdrBody text={content} /> : <div style={{ fontSize: 12, color: C.muted }}>{error ? error : "불러오는 중…"}</div>}
         </> : <div style={{ color: C.muted, fontSize: 12 }}>왼쪽에서 기록을 선택하세요.</div>}
       </div>
     </div>
@@ -369,7 +387,7 @@ export const SecurityScanPanel: React.FC<{ kinds: ScanKind[]; title: string; not
         .rc-scan-row summary span:before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
         .rc-scan-row[open]{grid-column:1/-1}
         .rc-scan-detail{font-size:12.5px;line-height:1.7;color:${C.muted};padding:0 16px 16px}.rc-scan-detail p{margin:0 0 12px;overflow-wrap:anywhere}
-        .rc-security-page{max-width:1080px;margin:0 auto}.rc-security-policy{margin-top:22px}.rc-security-policy>summary{cursor:pointer;color:${C.muted};font-size:12.5px;padding:12px 0}
+        .rc-security-page{width:100%}.rc-security-policy{margin-top:22px}.rc-security-policy>summary{cursor:pointer;color:${C.muted};font-size:12.5px;padding:12px 0}
       `}</style>
       {(() => {
         const done = kinds.filter(k => results[k]);

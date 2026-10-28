@@ -6,6 +6,7 @@
  * - 같은 요청을 두 공급자로 돌려 비용·교정 횟수·남은 오류·보안 점수를 나란히 보여 준다. 종합 승자는 정하지 않는다.
  */
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { friendlyError } from "./ui/friendlyError";
 import { MarkGlyph } from "./ui/marks";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import {
@@ -96,7 +97,7 @@ export const ModelRouting: React.FC = () => {
   }, [job, postMessage]);
 
   if (error) {
-    return <div style={card}><div style={h}>AI 공급자 · 비용</div><div style={{ color: C.err, fontSize: 12 }}>{error}</div>
+    return <div style={card}><div style={h}>AI 공급자 · 비용</div><div style={{ color: C.err, fontSize: 12 }}>{friendlyError(error)}</div>
       <button style={{ ...btn(false), marginTop: 10 }} onClick={load}>다시 읽기</button></div>;
   }
   if (!state) { return <div style={{ ...card, color: C.muted, fontSize: 12 }}>AI 공급자 정보를 읽는 중…</div>; }

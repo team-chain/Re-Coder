@@ -1,3 +1,9 @@
+# 3.0.3 — 화면 마무리 다듬기 (2026-10-28)
+
+- 핵심 수정: 브라우저는 style 속성의 #hex 를 rgb(r, g, b) 로 적는다. 3.0.2 의 `[style*="#16a34a"]` 같은 규칙은 실제 화면에서 걸리지 않았다 → `theme.ts` 의 `LEGACY_CSS`(rgb 표기, 고대비 제외)로 교체. 회귀 테스트 `webview-tests/polish303.test.js`.
+- 정리한 화면: BuildMode(상태 타일), ShipMode(인프라 파일 고르기 버튼), Replay(도구 막대), OperateMode · OpsAlertsPanel · AwsCleanupPanel(`.rc-op` 타일), ADR 본문(`AdrBody`), 코드 생성 · 보안 화면 폭.
+- `ui/friendlyError.ts` — 네트워크 오류만 사람이 읽는 문장으로 바꾸고 나머지 메시지는 그대로 둔다.
+
 # 3.0.2 — 화면 개편 · 승인 게이트 · 보안 수정 (2026-10-24)
 
 - 검토: 독립 검토 3건(확장 흐름 8 · 코어 보안 11 · 배포 8) → 두 브랜치(fix/3.0.2-a 코어, fix/3.0.2-b 승인 · 확장)로 고친 뒤 병합. 재검토 7건(운영 조회 자격증명, 봇 토큰, e2e 스크립트, 하위 폴더 git, 모니터 요청 섞임, 창 전달 대기, 패키지 목록)도 반영.

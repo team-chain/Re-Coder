@@ -405,7 +405,7 @@ export const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
         .rc-workspace{height:100vh;display:flex;flex-direction:column;overflow:hidden;position:relative;color:var(--rc-fg)}
         .rc-workspace .rc-local-hub-nav,.rc-workspace .rc-mode-nav{display:none!important}.rc-workspace [hidden]{display:none!important}
         .rc-workspace button:focus-visible{outline:2px solid var(--rc-teal);outline-offset:2px}
-        .rc-code-page{width:100%;max-width:1180px;margin:0 auto}
+        .rc-code-page{width:100%}.rc-code-page .rc-feature-body{max-width:1180px;margin:0 auto}
         .rc-workspace-connection{display:flex}
       `}</style>
       <header className="rc-top rc-workspace-header">

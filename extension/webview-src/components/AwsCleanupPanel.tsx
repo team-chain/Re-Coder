@@ -146,17 +146,17 @@ export const AwsCleanupPanel: React.FC<{ defaultRegion?: string }> = ({ defaultR
   const chosen = plan ? plan.groups.flatMap(g => g.items).filter(i => ids.includes(i.id)) : [];
 
   return (
-    <section data-testid="aws-cleanup" style={{ marginBottom: 18 }}>
-      <h3 style={{ margin: "0 0 4px" }}>AWS 리소스 정리</h3>
+    <section data-testid="aws-cleanup" className="rc-tile rc-op">
+      <h3 className="rc-sec">AWS 리소스 정리</h3>
       <p style={muted}>ReCoder 가 만든 리소스(태그 recoder:managed)만 고를 수 있습니다. 「중지」는 실행 요금만 멈추고 다시 배포하면 살아납니다. 「완전 삭제」는 승인한 항목만 지웁니다.</p>
-      <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 8 }}>
-        <label style={{ fontSize: 12 }}>리전{" "}
+      <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
+        <label style={{ fontSize: 12, display: "inline-flex", alignItems: "center", gap: 6 }}>리전{" "}
           <select value={region} disabled={busy} onChange={e => { setRegion(e.target.value); setPlan(null); }}>
             {[...new Set([region, ...regionChoices])].map(r => <option key={r} value={r}>{r}{deployed.includes(r) ? " (배포함)" : ""}</option>)}
           </select>
         </label>
         <input value={customRegion} disabled={busy} placeholder="다른 리전 (예: eu-central-1)" aria-label="다른 리전"
-          onChange={e => setCustomRegion(e.target.value.trim())} style={{ width: 150, fontSize: 12 }} />
+          onChange={e => setCustomRegion(e.target.value.trim())} style={{ width: 190, fontSize: 12 }} />
         <button style={btn} disabled={busy || !REGION_RE.test(customRegion)}
           onClick={() => { setRegion(customRegion); setPlan(null); setCustomRegion(""); }}>바꾸기</button>
         <button style={btn} disabled={busy} onClick={load}>{busy && !confirming ? "불러오는 중…" : "목록 불러오기"}</button>

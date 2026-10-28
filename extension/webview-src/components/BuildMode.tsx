@@ -179,27 +179,21 @@ export const BuildMode: React.FC<BuildModeProps> = ({ isActive, externalTurn, on
   return (
     <div style={{ fontFamily: "var(--vscode-font-family, sans-serif)", fontSize: 12, color: "var(--vscode-editor-foreground)" }}>
 
-      {/* ── 에러 분석 ── */}
-      <div style={{ fontSize: 11, fontWeight: 600, color: "var(--vscode-descriptionForeground, #888)", marginBottom: 6 }}>
-        에러 분석
-      </div>
-      <div style={{ background: "var(--vscode-textCodeBlock-background, #1e1e1e)", border: "1px solid var(--vscode-panel-border, #333)", borderRadius: 6, padding: "9px 11px", fontSize: 11, color: "var(--vscode-descriptionForeground, #aaa)", lineHeight: 1.6 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4, color: "#22c55e", fontWeight: 600 }}>
-          <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#22c55e", display: "inline-block" }} />
-          자동 감지 켜짐
+      {/* ── 에러 분석 — 상태 · 방법 · 실행을 한 타일에(3.0.3) ── */}
+      <div className="rc-tile rc-build-auto" style={{ padding: "16px 18px", display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap" }}>
+        <div style={{ flex: "1 1 320px", minWidth: 0 }}>
+          <span className="rc-chip"><i />자동 감지 켜짐</span>
+          <div style={{ marginTop: 8, fontSize: 13, lineHeight: 1.6, color: "var(--rc-fg2)" }}>
+            코드 실행 중 에러가 나면 자동으로 분석합니다. 직접 분석하려면 터미널이나 에디터에서 에러를 선택하고{" "}
+            <strong style={{ color: "var(--rc-fg)" }}>우클릭 → ReCoder: Analyze Error</strong>.
+          </div>
         </div>
-        코드 실행 중 에러가 나면 자동으로 분석합니다. 직접 분석하려면 터미널이나 에디터에서 에러를 선택하고{" "}
-        <strong style={{ color: "var(--vscode-foreground, #ccc)" }}>우클릭 → ReCoder: Analyze Error</strong>.
-      </div>
-
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
-        <button
-          onClick={handleAnalyzeNow}
-          disabled={isAnalyzing}
-          style={{ background: "#2563eb", color: "#fff", border: "none", borderRadius: 5, padding: "6px 14px", fontSize: 12, fontWeight: 600, cursor: isAnalyzing ? "not-allowed" : "pointer", opacity: isAnalyzing ? 0.55 : 1 }}
-        >
-          지금 분석
-        </button>
+        <div style={{ display: "flex", gap: 8, flex: "none" }}>
+          {onOpenDevelopment && <button type="button" className="rc-btn" onClick={onOpenDevelopment}>코드 생성·수정에서 이어가기</button>}
+          <button type="button" className="rc-btn p" onClick={handleAnalyzeNow} disabled={isAnalyzing} aria-disabled={isAnalyzing}>
+            {isAnalyzing ? "분석 중…" : "지금 분석"}
+          </button>
+        </div>
         {/* "스캔" 버튼 제거 — `build.scan` 을 받는 핸들러가 확장 호스트에
             없어 눌러도 아무 일도 일어나지 않았다(보드 이슈 「죽은 버튼 3종」).
             반응 없는 버튼은 없는 버튼보다 나쁘다: 사용자는 고장으로 기억한다.
@@ -341,7 +335,7 @@ export const BuildMode: React.FC<BuildModeProps> = ({ isActive, externalTurn, on
         </div>
       )}
 
-      {onOpenDevelopment ? <button onClick={onOpenDevelopment} style={{ marginTop: 16, padding: "8px 14px", cursor: "pointer", color: "var(--vscode-button-foreground, #fff)", background: "var(--vscode-button-background, #0e639c)", border: 0, borderRadius: 6 }}>코드 생성·수정에서 이어가기</button> : <CodeAgent isActive={isActive} externalTurn={externalTurn} />}
+      {!onOpenDevelopment && <CodeAgent isActive={isActive} externalTurn={externalTurn} />}
 
 
     </div>

@@ -2,6 +2,7 @@
  * 2.0.25 공격·장애 감지 알림 — 코어가 실제 지표로 판정한 알림과 대응 제안. 대응은 승인 카드에서 고른 것만 적용한다.
  */
 import React, { useCallback, useEffect, useState } from "react";
+import { friendlyError } from "./ui/friendlyError";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 
 export interface OpsAlertView {
@@ -73,14 +74,14 @@ export const OpsAlertsPanel: React.FC = () => {
   };
 
   return (
-    <section data-testid="ops-alerts" style={{ marginBottom: 18 }}>
-      <h3 style={{ margin: "0 0 4px" }}>운영 알림 — 공격·장애·새 취약점</h3>
+    <section data-testid="ops-alerts" className="rc-tile rc-op">
+      <h3 className="rc-sec">운영 알림 — 공격·장애·새 취약점</h3>
       <p style={muted}>
         {monitors ? `ECS 서비스 ${monitors}개를 1분마다 봅니다 — 요청 급증 · 차단 급증 · 오류 증가 · 태스크 부족.`
           : "감시 중인 서비스가 없습니다. ECS 배포에서 「공격·장애 감지 알림」을 켜면 여기에 나타납니다."}
         {" "}대응은 승인한 것만 적용합니다.
       </p>
-      {note && <div style={{ ...box, fontSize: 12 }}>{note}</div>}
+      {note && <div style={{ ...box, fontSize: 12 }}>{friendlyError(note)}</div>}
       {pending && (
         <div style={{ ...box, borderColor: "var(--vscode-focusBorder, #3794ff)" }} data-testid="ops-approval">
           <b>승인 필요 — {pending.s.label}</b>
