@@ -783,7 +783,7 @@
         "recoder.ai.openaiModel": {
           "type": "string",
           "default": "",
-          "description": "OpenAI API 키로 연결했을 때 쓸 모델 ID. 비우면 gpt-5-mini."
+          "description": "OpenAI API 키로 연결했을 때 쓸 모델 ID. 비우면 gpt-6-sol. 모델 확인으로 도구 호출 지원을 확인하세요."
         },
         "recoder.ai.compatibleBaseUrl": {
           "type": "string",
@@ -794,6 +794,36 @@
           "type": "string",
           "default": "",
           "description": "OpenAI 호환 API 에서 쓸 모델 ID. 비우면 deepseek-chat."
+        },
+        "recoder.ai.openaiFastModel": {
+          "type": "string",
+          "default": "",
+          "description": "OpenAI API의 간단한 작업 모델. 비우면 복잡한 작업 모델과 같습니다."
+        },
+        "recoder.ai.anthropicFastModel": {
+          "type": "string",
+          "default": "",
+          "description": "Claude API의 간단한 작업 모델. 비우면 복잡한 작업 모델과 같습니다."
+        },
+        "recoder.ai.compatibleFastModel": {
+          "type": "string",
+          "default": "",
+          "description": "OpenAI 호환 API의 간단한 작업 모델. 비우면 복잡한 작업 모델과 같습니다."
+        },
+        "recoder.ai.autoRecommend": {
+          "type": "boolean",
+          "default": true,
+          "description": "요청마다 추천 적용: 작음 → 비용 절약 · 중간 → 균형 · 큼 → 품질 우선."
+        },
+        "recoder.ai.lockSensitive": {
+          "type": "boolean",
+          "default": true,
+          "description": "인증·결제·개인정보 요청의 설계·개발을 복잡한 작업 모델로 고정합니다."
+        },
+        "recoder.ai.retryWithComplex": {
+          "type": "boolean",
+          "default": true,
+          "description": "실패하면 복잡한 모델로 다시 만들기. 현재는 설정만 저장하며 자동 재시도는 다음 단계에서 지원합니다."
         },
         "recoder.ai.economyProvider": {
           "type": "string",

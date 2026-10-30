@@ -7,7 +7,7 @@
 정하지 않은 작업 이름은 언제나 품질 등급이다(새 호출이 몰래 싼 모델로 가지 않게).
 절약 공급자를 따로 고르지 않으면 두 등급은 같은 공급자를 쓴다 — 기존 동작과 같다.
 
-비교 도구는 `forced_provider` 로 한 실행의 **모든** 호출을 한 공급자로 고정하고, `run_tag` 로
+비교 도구는 `forced_provider` 로 안전장치에 고정되지 않은 호출을 한 공급자로 고정하고, `run_tag` 로
 그 실행의 원장 기록만 골라낸다. 두 값은 contextvars 라서 다른 요청에 새지 않는다.
 작업 스레드로 넘길 때는 `bind` 로 감싸야 같은 값을 본다(ThreadPoolExecutor 는 문맥을 복사하지 않는다).
 """
@@ -61,7 +61,7 @@ def run_tag() -> Optional[str]:
 
 @contextlib.contextmanager
 def pinned(spec: str, tag: str) -> Iterator[None]:
-    """이 문맥 안의 모든 AI 호출을 spec 공급자로 고정하고 원장 기록에 tag 를 붙인다."""
+    """이 문맥의 안전장치 외 AI 호출을 spec 공급자로 고정하고 원장에 tag 를 붙인다."""
     a = _FORCED.set(spec)
     b = _RUN_TAG.set(tag)
     try:
@@ -92,16 +92,50 @@ _ROLE: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("recoder_r
 
 
 def normalize_role_models(raw: Any) -> dict[str, str]:
-    """비신뢰 입력 → {역할: 공급자}. 모르는 역할·공급자는 버린다. quality 는 기본과 같아 적지 않는다."""
+    """비신뢰 입력 → {역할: 공급자}. 명시한 quality 도 절약 작업보다 우선한다."""
     out: dict[str, str] = {}
     if not isinstance(raw, dict):
         return out
     for role, spec in raw.items():
         r = str(role or "").strip().lower()
         v = str(spec or "").strip().lower()
-        if r in ROLES and v in ROLE_SPECS and v != "quality":
+        if r in ROLES and v in ROLE_SPECS:
             out[r] = v
     return out
+
+
+# 화면과 같은 규칙. 클라이언트의 역할별 모델 값을 그대로 신뢰하지 않는다.
+SENSITIVE_PATTERNS = (
+    r"결제|환불|카드|청구|송금|계좌",
+    r"로그인|회원\s*가입|인증|비밀번호|토큰|권한|세션|oauth",
+    r"개인\s*정보|주민\s*번호|전화\s*번호|주소록|위치\s*정보",
+)
+
+def sensitive_role_models(instruction: str, models: Any, lock_sensitive: bool = True) -> dict[str, str]:
+    import re
+    normalized = normalize_role_models(models)
+    if lock_sensitive is not False and any(re.search(p, instruction or "", re.I) for p in SENSITIVE_PATTERNS):
+        normalized["planner"] = "quality"
+        normalized["dev"] = "quality"
+    return normalized
+
+
+_SENSITIVE_LOCK: contextvars.ContextVar[bool] = contextvars.ContextVar("recoder_sensitive_lock", default=False)
+
+@contextlib.contextmanager
+def sensitive_request(instruction: str, enabled: bool = True) -> Iterator[None]:
+    import re
+    token = _SENSITIVE_LOCK.set(enabled is not False and any(re.search(p, instruction or "", re.I) for p in SENSITIVE_PATTERNS))
+    try:
+        yield
+    finally:
+        _SENSITIVE_LOCK.reset(token)
+
+
+def quality_required(operation: str) -> bool:
+    # 설계 검토는 파일 목록만 보강하므로 검토 역할의 모델을 따른다.
+    return operation in (REPAIR_OPERATIONS - {"review_code_manifest"}) or operation == "generate_patch" or (
+        _SENSITIVE_LOCK.get() and current_role() in ("planner", "dev"))
 
 
 def role_of(agent: str) -> Optional[str]:

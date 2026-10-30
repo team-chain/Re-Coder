@@ -39,7 +39,7 @@ ROUTES = [("POST", "/api/auth/register", "server/src/routes/auth.js"),
 
 def test_role_models_are_normalized_and_scoped():
     assert task_tier.normalize_role_models({"dev": "FAST", "review": "openai", "boss": "fast", "test": "evil", "planner": "quality"}) \
-        == {"dev": "fast", "review": "openai"}, "모르는 역할·공급자·기본값(quality)은 적지 않는다"
+        == {"dev": "fast", "review": "openai", "planner": "quality"}, "모르는 역할·공급자만 버리고 명시한 quality 는 보존한다"
     assert task_tier.normalize_role_models("fast") == {}
     assert [task_tier.role_of(a) for a in ("planner", "agent-3", "review", "test", "code_agent", "x")] == \
         ["planner", "dev", "review", "test", "dev", None]

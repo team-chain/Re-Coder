@@ -1,5 +1,6 @@
+import { saveRoutingSettings } from '../ai/aiKeys';
 import { SEEN_KEY, pendingCount } from '../ops/monitorDigest';
-import { currentAiProvider, isEconomyProvider, storedAiKeys } from '../ai/aiKeyEnv';
+import { currentAiProvider, isAiKeyProvider, isEconomyProvider, pricesEnv, storedAiKeys } from '../ai/aiKeyEnv';
 import { withTimeout } from '../core/timeouts';
 import { detectFrontendProject } from '../deploy/frontendBuild';
 import * as vscode from 'vscode';
@@ -2351,6 +2352,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     spec: p.spec && typeof p.spec === 'object' ? p.spec : null,
                     models: cleanTeamModels(p.models),
                     test: p.test !== false,
+                    lockSensitive: vscode.workspace.getConfiguration("recoder.ai").get<boolean>("lockSensitive", true) !== false,
                 });
                 break;
             }
@@ -2544,11 +2546,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 break;
             }
+            case 'models.check':
             case 'models.load': {
                 //: 2.0.36 작업별 AI 공급자 화면 — 등급별 공급자·30일 비용·마지막 비교. 키 값은 보내지 않는다(있는지만).
                 try {
                     const [routing, costs, compare, keys] = await Promise.all([
-                        this._apiClient.getModelRouting(),
+                        type === 'models.check' ? this._apiClient.checkModels() : this._apiClient.getModelRouting(),
                         this._apiClient.getModelCosts(30),
                         this._apiClient.getModelCompare('').catch(() => null),
                         this._secrets && this._globalState ? storedAiKeys({ secrets: this._secrets, globalState: this._globalState }) : Promise.resolve(null),
@@ -2556,10 +2559,45 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     const cfg = vscode.workspace.getConfiguration('recoder.ai');
                     this.postMessageToWebview(requestWebview, 'models.state', {
                         routing, costs, compare, keys,
-                        settings: { economyProvider: cfg.get<string>('economyProvider', '') || '', compatibleBaseUrl: cfg.get<string>('compatibleBaseUrl', '') || '' },
+                        settings: { economyProvider: cfg.get<string>('economyProvider', '') || '', compatibleBaseUrl: cfg.get<string>('compatibleBaseUrl', '') || '',
+                            qualityModel: routing.choices.find(c => c.spec === 'quality')?.model || routing.quality.model,
+                            fastModel: routing.choices.find(c => c.spec === 'fast')?.model || routing.quality.model,
+                            autoRecommend: cfg.get<boolean>('autoRecommend', true), lockSensitive: cfg.get<boolean>('lockSensitive', true),
+                            retryWithComplex: cfg.get<boolean>('retryWithComplex', true), prices: JSON.parse(pricesEnv(cfg.get('prices', {})) || '{}') },
                     });
                 } catch (err) {
                     this.postMessageToWebview(requestWebview, 'models.error', { message: err instanceof Error ? err.message : String(err) });
+                }
+                break;
+            }
+            case 'models.setModels': {
+                try {
+                    const p = (payload ?? {}) as { tier?: unknown; model?: unknown };
+                    if ((p.tier !== 'quality' && p.tier !== 'fast') || typeof p.model !== 'string') { throw new Error('모델 설정 값이 올바르지 않습니다.'); }
+                    const routing = await this._apiClient.getModelRouting();
+                    const provider = routing.quality.provider;
+                    if (!isAiKeyProvider(provider) || !routing.configurable || !routing.catalog?.some(m => m.model === p.model && m.ready && m.checked && !m.retirement)) {
+                        throw new Error('모델 확인을 통과한 모델만 고를 수 있습니다.');
+                    }
+                    await saveRoutingSettings({ [`${provider}${p.tier === 'fast' ? 'FastModel' : 'Model'}`]: p.model });
+                    await vscode.commands.executeCommand('recoder.restartCore');
+                    this.postMessageToWebview(requestWebview, 'models.saved', {});
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'models.error', { message: err instanceof Error ? err.message : '모델 설정을 저장하지 못했습니다.' });
+                }
+                break;
+            }
+            case 'models.setToggle': {
+                try {
+                    const p = (payload ?? {}) as { key?: unknown; value?: unknown };
+                    if (typeof p.key !== 'string' || !['autoRecommend', 'lockSensitive', 'retryWithComplex'].includes(p.key) || typeof p.value !== 'boolean') {
+                        throw new Error('추천 설정 값이 올바르지 않습니다.');
+                    }
+                    await saveRoutingSettings({ [p.key]: p.value });
+                    await vscode.commands.executeCommand('recoder.restartCore');
+                    this.postMessageToWebview(requestWebview, 'models.saved', {});
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'models.error', { message: err instanceof Error ? err.message : '추천 설정을 저장하지 못했습니다.' });
                 }
                 break;
             }
@@ -2838,6 +2876,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             /** 2.0.45 역할별 AI 공급자 · 테스트 리코더. */
             models?: TeamModels | null;
             test?: boolean;
+            lockSensitive?: boolean;
         } = {},
     ): Promise<void> {
         if (!instruction.trim()) { return; }
@@ -2868,10 +2907,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const result = !streaming ? await this._apiClient.generateCode(instruction, {
                 workspacePath, openFile: attach, priorFiles: this._lastCodeOps, contextFiles: opts.contextFiles ?? [],
                 targetFolder: scope.targetFolder, decisions: opts.decisions ?? [], spec: opts.spec ?? null,
-                models: opts.models ?? null, test: opts.test !== false,
+                models: opts.models ?? null, test: opts.test !== false, lockSensitive: opts.lockSensitive !== false,
             }) : await this._apiClient.generateCodeStream(instruction, {
                 models: opts.models ?? null,
-                test: opts.test !== false,
+                test: opts.test !== false, lockSensitive: opts.lockSensitive !== false,
                 workspacePath,
                 openFile: attach,
                 priorFiles: this._lastCodeOps,
@@ -2884,8 +2923,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 skipFailed: opts.skipFailed === true,
                 spec: opts.spec ?? null,
             }, (event) => {
-                if (event.message) status('generating', event.message, 300);
-                this.postMessageToWebview(opts.requestWebview, 'code.team', { requestId: opts.requestId, event: compactCodeEvent(event) });
+                status('generating', event.message ?? '', 300);
+                if (event.step !== 'heartbeat') {
+                    this.postMessageToWebview(opts.requestWebview, 'code.team', { requestId: opts.requestId, event: compactCodeEvent(event) });
+                }
             });
             // 다음 턴 컨텍스트로 보관
             this._lastCodeOps = (result.ops ?? []).map((op) => ({ path: op.file, content: op.content }));

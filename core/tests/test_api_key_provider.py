@@ -117,8 +117,8 @@ def test_openai_structured_output_and_reasoning_parameters(env):
         req = server.requests[0]
         assert req["headers"]["authorization"] == f"Bearer {KEY}"
         body = req["body"]
-        assert body["model"] == "gpt-5-mini" and body["max_completion_tokens"] == 800
-        assert body["reasoning_effort"] == "low" and "temperature" not in body and "max_tokens" not in body
+        assert body["model"] == "gpt-6-sol" and body["max_completion_tokens"] == 800
+        assert body["reasoning_effort"] == "none" and "temperature" not in body and "max_tokens" not in body
         assert body["messages"][0] == {"role": "system", "content": "s"}
         assert body["tool_choice"] == {"type": "function", "function": {"name": "output"}}
     finally:
@@ -201,12 +201,12 @@ def test_router_uses_selected_key_provider_and_keeps_bedrock_otherwise(env):
 
 def test_ai_ready_diagnostics_ping_the_selected_provider(env):
     import first_run
-    server = _Server(lambda body, n: (200, {"content": [{"type": "text", "text": "pong"}], "stop_reason": "end_turn"}))
+    server = _Server(lambda body, n: (200, {"content": [{"type": "tool_use", "name": "output", "input": {"ok": True}}], "stop_reason": "tool_use"}))
     try:
         _use(env, "anthropic", server)
         status, model, region, provider, cross = first_run._check_ai_ready_sync()
         assert (status, model, provider) == (first_run.ReadyStatus.OK, "claude-sonnet-5", "anthropic")
-        assert server.requests[0]["body"]["max_tokens"] == 16
+        assert server.requests[0]["body"]["max_tokens"] == 1024
     finally:
         server.close()
     bad = _Server(lambda body, n: (401, {"error": {"message": "bad key"}}))

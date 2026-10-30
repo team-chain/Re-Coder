@@ -692,6 +692,7 @@ class CodeGenerateRequest(BaseModel):
     #: 2.0.45 — 테스트 리코더(합격 조건을 띄운 앱에 시험). 끄면 예전과 같다.
     #: 2.0.45 테스트 리코더 — 확장이 팀 구성 창의 값을 늘 보낸다. 값을 모르는 예전 클라이언트는 예전처럼 끈다.
     test: bool = False
+    lockSensitive: bool = True
 
 
 @router.post("/api/code/generate")
@@ -746,6 +747,7 @@ async def generate_code_route(body: CodeGenerateRequest) -> dict:
             spec=body.spec,
             models=body.models,
             test=body.test,
+            lock_sensitive=body.lockSensitive,
         )
     except GenerationPaused as e:
         #: 다 만든 파일은 저장됐다 — 같은 요청을 resume_job 과 함께 다시 보내면 이어 만든다.
@@ -804,6 +806,7 @@ async def generate_code_stream_route(body: CodeGenerateRequest):
             spec=body.spec,
             models=body.models,
             test=body.test,
+            lock_sensitive=body.lockSensitive,
             #: 확장은 진행 이벤트를 받으며 기다리므로 자동 교정 시간을 넉넉히 준다.
             budget_seconds=3600,
         )

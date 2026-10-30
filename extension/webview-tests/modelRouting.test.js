@@ -97,12 +97,12 @@ test('the view shows tiers, the masked note, the ledger and the comparison', () 
   }));
   assert.match(html, /data-tier="quality"/);
   assert.match(html, /OpenAI 호환/);
-  assert.match(html, /data-testid="economy-scrubbed"/);
-  assert.match(html, /설계 질문 주제 · 테스트 초안/);
+  assert.match(html, /추천 · 안전장치/);
+  assert.match(html, /요약 · 오류 분류 · 테스트 초안/);
   assert.match(html, /단가 미설정 2회/);
-  assert.match(html, /아낀 비용 \$0\.300/);
+  assert.match(html, /간단한 모델로 \$0\.300 아낌/);
   assert.match(html, /가림 3곳/);
-  assert.match(html, /OpenAI API — 키 입력 필요/);
+  assert.match(html, /실패하면 복잡한 모델로 다시 만들기/);
   assert.match(html, /data-testid="compare-result"/);
   assert.equal((html.match(/data-better="true"/g) || []).length, 3);
   assert.match(html, /종합 판단은 결과 코드를 직접 보고/);
@@ -195,4 +195,25 @@ test('the economy command asks for a key without changing the default connection
   } finally {
     vscode.workspace.getConfiguration = orig.cfg; vscode.window.showInputBox = orig.input; vscode.window.showInformationMessage = orig.info;
   }
+});
+
+test('모델 설정 단가·경고는 설정값만 사용, 알 수 없는 비용은 0으로 표시하지 않음',()=>{
+ assert.equal(model.modelPrice({},'x'),'단가 미설정');
+ assert.equal(model.modelPrice({x:{input:1,output:5}},'x'),'$1 / $5');
+ const state={routing,costs,settings:{qualityModel:'q',fastModel:'f',prices:{q:{input:1,output:5},f:{input:2,output:5}}}};
+ assert.match(model.modelWarning(state),/간단한 작업 모델이 더 비쌉니다/);
+ assert.match(model.modelWarning({...state,settings:{qualityModel:'q',fastModel:'q'}}),/두 작업에 같은 모델/);
+ assert.deepEqual(model.tierCost(costs,'economy'),{calls:2,text:'단가 미설정'});
+});
+test('모델 확인을 통과한 항목만 활성화, 종료 날짜 표시, 기본 화면은 카드 세 개',()=>{
+ const html=renderToStaticMarkup(React.createElement(ModelRoutingView,{
+  state:{routing:{...routing,configurable:true,checked_at:Date.now(),catalog:[{model:'good',ready:true,checked:true},{model:'bad',ready:false,checked:true},{model:'old',ready:true,checked:true,retirement:'2026-12-11'}]},costs,
+   settings:{qualityModel:'good',fastModel:'bad',lockSensitive:false}},job:null,pair:['quality','fast'],instruction:'',post(){},onReload(){},onInstruction(){},onPair(){},onStart(){},
+ }));
+ assert.equal((html.match(/<section/g)||[]).length,3);
+ assert.match(html,/<option value="bad" disabled=""[^>]*>bad — 쓸 수 없음/);
+ assert.match(html,/<option value="old" disabled=""[^>]*>old — 2026-12-11 종료/);
+ assert.match(html,/<option value="good" selected="">good/);
+ assert.match(html,/꺼 두면 이런 요청도 간단한 모델을 고를 수 있습니다/);
+ assert.equal((html.match(/role="switch"/g)||[]).length,3);
 });

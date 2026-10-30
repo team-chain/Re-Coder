@@ -6,7 +6,25 @@ function response(text,{close=true}={}){const bytes=new TextEncoder().encode(tex
 test('대규모 생성 스트림: 진행 이벤트(한글 바이트 쪼개짐·심장박동) 뒤 결과로 끝난다',async()=>{
  const events=[];
  const result=await readCodeStream(response(': heartbeat\n\ndata: {"step":"planned","job_id":"abcdef123456","total":3,"files":[{"file":"a.js","layer":1}]}\n\ndata: {"step":"file_done","agent":"agent-2","file":"a.js","done_count":1,"total":3}\r\n\r\ndata: {"step":"done","result":{"summary":"완료","ops":[]}}\n\n'),e=>events.push(e),()=>{});
- assert.equal(result.summary,'완료');assert.deepEqual(events.map(e=>e.step),['planned','file_done','done']);assert.equal(events[1].agent,'agent-2');
+ assert.equal(result.summary,'완료');assert.deepEqual(events.map(e=>e.step),['heartbeat','planned','file_done','done']);assert.equal(events[2].agent,'agent-2');
+});
+
+test('long checks forward heartbeats with the known job ID and keep the stream alive', async () => {
+ let controller, aborted = false;
+ const events = [], encode = text => new TextEncoder().encode(text);
+ const stream = new ReadableStream({start(c) {controller = c;}});
+ const result = readCodeStream(new Response(stream), e => events.push(e), () => {
+  aborted = true; controller.error(new Error('aborted'));
+ }, 150);
+ controller.enqueue(encode('data: {"step":"generated","job_id":"job123","message":"전체 점검 중"}\n\n'));
+ for (let i = 0; i < 5; i++) {
+  await new Promise(resolve => setTimeout(resolve, 50));
+  controller.enqueue(encode(': heartbeat\r\n\r\n'));
+ }
+ controller.enqueue(encode('data: {"step":"done","result":{"summary":"checked"}}\n\n'));
+ assert.equal((await result).summary, 'checked');
+ assert.equal(aborted, false);
+ assert.equal(events.filter(e => e.step === 'heartbeat' && e.job_id === 'job123').length, 5);
 });
 
 test('멈춘 생성은 작업 ID 와 진행 정도를 담은 일시 정지 오류가 된다',async()=>{

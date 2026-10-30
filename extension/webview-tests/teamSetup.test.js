@@ -10,34 +10,25 @@ const CHOICES=[
  {spec:'openai',label:'OpenAI API',ready:true,provider:'openai',model:'gpt-5-mini'},
 ];
 
-test('프리셋: 균형은 쓰는 역할(설계·개발)은 품질, 읽는 역할(검토·테스트)은 빠른 모델 · 하나만 바꾸면 직접 설정',()=>{
+test('프리셋과 직접 설정: 직접 설정은 추천과 같아져도 유지',()=>{
  let c=C.defaultConfig();
- assert.equal(c.preset,'balanced');assert.deepEqual(c.models,{planner:'quality',dev:'quality',review:'fast',test:'fast'});
- assert.equal(C.applyPreset(c,'economy').models.dev,'fast');
- c=C.setModel(c,'review','openai');assert.equal(c.preset,'custom');
- c=C.setModel(c,'review','fast');assert.equal(c.preset,'balanced','프리셋과 같아지면 다시 그 이름');
- assert.equal(C.setDevs(c,99).devs,C.MAX_DEVS);assert.equal(C.setDevs(c,0).devs,C.MIN_DEVS);
- //: 저장값은 믿지 않는다
- assert.deepEqual(C.cleanConfig({devs:'x',models:{dev:'evil',test:'openai'},test:false}),
-  {preset:'custom',devs:3,test:false,models:{planner:'quality',dev:'quality',review:'fast',test:'openai'}});
+ assert.equal(c.auto,true); assert.deepEqual(c.models,C.PRESETS.balanced);
+ c=C.setModel(c,'review','quality'); assert.equal(c.preset,'custom');
+ c=C.setModel(c,'review','fast'); assert.equal(c.preset,'custom');
+ assert.equal(C.setDevs(c,99).devs,C.MAX_DEVS); assert.equal(C.setDevs(c,0).devs,C.MIN_DEVS);
 });
-
-test('요청에 싣는 역할별 모델: 기본(품질)은 빼고, 키 없는 공급자는 기본으로, 팀 모드가 꺼지면 개발·테스트만',()=>{
- const ready=new Set(['quality','fast','openai']);
- let c=C.setModel(C.setModel(C.defaultConfig(),'planner','anthropic'),'dev','openai');
- assert.deepEqual(C.modelsForRequest(c,true,ready),{dev:'openai',review:'fast',test:'fast'},'키 없는 anthropic 은 싣지 않는다');
- assert.deepEqual(C.modelsForRequest(c,false,ready),{dev:'openai',test:'fast'});
- assert.deepEqual(C.modelsForRequest({...c,test:false},false,ready),{dev:'openai'},'테스트를 끄면 테스트 모델도 싣지 않는다');
- assert.equal(C.modelsForRequest(C.applyPreset(c,'quality'),true,ready),null);
+test('전송: 준비 안 된 간단 모델은 품질, 혼자 만들기는 개발·테스트만',()=>{
+ const cfg={...C.defaultConfig(),auto:false,preset:'economy',models:{...C.PRESETS.economy}};
+ assert.deepEqual(C.modelsForRequest(cfg,false,new Set(['quality','fast'])),{dev:'fast',test:'fast'});
+ assert.deepEqual(C.modelsForRequest({...cfg,test:false},false,null),{dev:'fast'});
+ assert.deepEqual(C.modelsForRequest(cfg,true,new Set(['quality'])),C.PRESETS.quality);
 });
-
-test('모델 목록: 사람이 읽는 이름, 키 없는 공급자는 고를 수 없게',()=>{
- const o=C.modelOptions(CHOICES);
- assert.deepEqual(o.map(x=>[x.spec,x.label,x.ready]),[['quality','Claude Sonnet 4.5',true],['fast','Claude Haiku 4.5',true],
-  ['anthropic','Claude Sonnet 4.5 (Claude API)',false],['openai','GPT-5 mini',true]]);
- assert.match(o[2].detail,/AI 연결에서 추가/);
- assert.equal(C.modelOptions(null).length,2,'받기 전에는 기본 두 개만');
+test('두 모델 이름은 라우팅 정보에서, 공급자 중복 옵션은 없음',()=>{
+ const options=C.modelOptions(CHOICES);
+ assert.deepEqual(options.map(x=>[x.spec,x.label]),[['quality','Claude Sonnet 4.5'],['fast','Claude Haiku 4.5']]);
+ assert.equal(C.modelOptions(null).length,2);
  assert.equal(C.prettyModel('claude-3-5-haiku-20241022'),'Claude Haiku 3.5');
+ assert.equal(C.prettyModel('gpt-6.1-terra'),'GPT-6.1 Terra');
 });
 
 test('추천 인원·예상 시간/비용: 기록이 없으면 지어내지 않고, 같은 방식의 지난 실행 범위만',()=>{
@@ -56,20 +47,26 @@ test('추천 인원·예상 시간/비용: 기록이 없으면 지어내지 않�
  assert.equal(C.cleanHistory(Array.from({length:30},()=>({seconds:5,files:1}))).length,C.MAX_HISTORY);
 });
 
-test('팀 버튼과 창: "팀 6명 · 균형", 역할 네 줄·모델 고르기·인원·테스트, 키 없는 모델은 비활성',()=>{
- const cfg=C.defaultConfig();
- assert.equal(teamButtonText(cfg,true),'팀 6명 · 균형');assert.equal(teamButtonText({...cfg,test:false},false),'혼자 · 균형 · 테스트 끔');
- const props={teamMode:true,config:cfg,options:C.modelOptions(CHOICES),history:[],instruction:'게시판에 댓글과 좋아요 기능을 추가해줘',onTeamMode(){},onChange(){}};
- const closed=renderToStaticMarkup(React.createElement(TeamSetup,props));
- assert.match(closed,/data-testid="team-setup-button"/);assert.match(closed,/팀 6명 · 균형/);assert.doesNotMatch(closed,/role="dialog"/);
- const html=renderToStaticMarkup(React.createElement(TeamSetup,{...props,defaultOpen:true}));
- assert.match(html,/role="dialog" aria-label="팀 구성"/);
- assert.equal((html.match(/data-role="/g)||[]).length,4);
- for(const w of ['품질 우선','균형','비용 절약','직접 설정','설계','개발','검토','테스트','요청 크기 중간 · 추천 개발 3명','예상 시간·비용은 첫 실행 뒤 표시','기본값으로'])assert.ok(html.includes(w),w);
- assert.match(html,/<option value="anthropic" disabled=""[^>]*>Claude Sonnet 4\.5 \(Claude API\) — 키 없음<\/option>/);
- assert.match(html,/aria-checked="true" data-preset="balanced"/);
- assert.match(html,/data-testid="team-devs">3</);
- //: 혼자 만들기 — 설계·검토 줄은 흐리게, 개발은 "만들기"
- const solo=renderToStaticMarkup(React.createElement(TeamSetup,{...props,teamMode:false,defaultOpen:true}));
- assert.match(solo,/class="rc-ts-row off" data-role="planner"/);assert.match(solo,/<b>만들기<\/b>/);assert.doesNotMatch(solo,/data-testid="team-devs"/);
+const props={teamMode:true,config:C.defaultConfig(),options:C.modelOptions(CHOICES),history:[],instruction:'게시판에 댓글과 좋아요 기능을 추가해줘',onTeamMode(){},onChange(){}};
+const render=(extra={})=>renderToStaticMarkup(React.createElement(TeamSetup,{...props,defaultOpen:true,...extra}));
+test('팀 창: 순서·네 역할·프리셋 읽기 전용·실제 기록 없는 예상',()=>{
+ assert.equal(teamButtonText({...C.defaultConfig(),test:false},false),'혼자 · 균형');
+ const html=render(); assert.match(html,/팀 6명 · 균형/);
+ assert.equal((html.match(/data-role="/g)||[]).length,4); assert.doesNotMatch(html,/<select/);
+ assert.match(html,/설계·개발은 복잡한 작업 모델\(Claude Sonnet 4.5\)/);
+ assert.match(html,/예상 시간·비용은 첫 실행 뒤 표시/); assert.match(html,/모델 설정/);
+ assert.ok(html.indexOf('data-preset="quality"')<html.indexOf('data-testid="team-recommend"'));
+ const solo=render({teamMode:false}); assert.match(solo,/class="rc-ts-row off" data-role="planner"/); assert.match(solo,/<b>만들기<\/b>/);
+});
+test('작은 요청·직접 설정·민감 요청 화면',()=>{
+ const small=render({instruction:'버튼 색 바꿔줘'}); assert.match(small,/팀 6명 · 비용 절약/); assert.match(small,/작은 요청이라 모든 역할에 간단한 작업 모델/);
+ assert.match(small,/class="rc-ts-badge">추천/); assert.doesNotMatch(small,/>되돌리기</);
+ const custom=C.setModel(C.applyPreset(C.defaultConfig(),'custom',props.instruction),'review','quality');
+ const html=render({config:custom}); assert.equal((html.match(/<select/g)||[]).length,4);
+ assert.match(html,/추천\(균형\)과 다르게 골랐습니다\./); assert.match(html,/>되돌리기</); assert.doesNotMatch(html,/추천대로면/);
+ assert.match(html,/rc-ts-dot on/); assert.doesNotMatch(html,/class="rc-ts-badge"/);
+ const locked=render({instruction:'카드 결제 추가',config:{...custom,models:C.PRESETS.economy}});
+ assert.match(locked,/aria-label="설계에 쓸 모델" disabled/); assert.match(locked,/aria-label="개발에 쓸 모델" disabled/);
+ const payment=render({instruction:'카드 결제 추가'}); assert.match(payment,/결제가 들어간 요청이라 설계·개발은 복잡한 작업 모델/);
+ const same=render({config:C.applyPreset(C.defaultConfig(),'custom',props.instruction)}); assert.match(same,/역할마다 모델을 고르세요. 지금은 추천과 같습니다\./);
 });

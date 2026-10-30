@@ -30,6 +30,14 @@ async def routing() -> dict:
     return get_provider_router().routing_status()
 
 
+@router.post("/check")
+async def check_models() -> dict:
+    from llm.model_checks import check
+    provider_router = get_provider_router()
+    await asyncio.to_thread(check, provider_router)
+    return provider_router.routing_status()
+
+
 @router.get("/costs")
 async def costs(days: int = Query(30, ge=1, le=365)) -> dict:
     #: 원장 파일 읽기는 디스크 I/O — 이벤트 루프를 막지 않게.

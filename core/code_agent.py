@@ -1912,6 +1912,26 @@ def _relative_to_target(ops: list[dict], target_folder: str) -> list[dict]:
     return ops
 
 
+def _affected_projects(base: Path, paths, manifests: tuple[str, ...]) -> set[str]:
+    """Find the nearest manifest for each changed file, including new manifests.
+
+    A new app inside an existing workspace must not repeatedly analyze unrelated
+    parent projects. Files changed in that parent still include it in the checks.
+    """
+    paths = set(paths)
+    projects = {posixpath.dirname(p) for p in paths if posixpath.basename(p) in manifests}
+    for path in paths:
+        folder = posixpath.dirname(path)
+        while True:
+            if any(posixpath.join(folder, m) in paths or (base / folder / m).is_file() for m in manifests):
+                projects.add(folder)
+                break
+            if not folder:
+                break
+            folder = posixpath.dirname(folder)
+    return projects
+
+
 def _autofix_ops(root: Path, target_folder: str, ops: list[dict], _again: bool = True,
                  new_app: bool = False) -> tuple[list[dict], list[str]]:
     """AI 를 다시 부르지 않고 확실히 고칠 수 있는 것만 ops 에서 고친다.
@@ -1948,9 +1968,7 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict], _again: bool =
     except Exception as exc:  # noqa: BLE001
         print(f"[code_agent] 중괄호 점검 생략: {exc}", flush=True)
     manifests = ("package.json",)
-    projects = sorted({posixpath.dirname(p) for p in by_path if posixpath.basename(p) in manifests})
-    if (base / "package.json").is_file() or "package.json" in by_path:
-        projects = [""]
+    projects = sorted(_affected_projects(base, by_path, manifests))
     #: 한 번 고치면 다음 것이 보인다(내보내기를 붙여야 /api 중복 호출이 보인다) — 두 번 돈다.
     for project in [p for _ in range(2) for p in projects[:5]]:
         prefix = f"{project}/" if project else ""
@@ -2096,9 +2114,9 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict], _again: bool =
     for _pass in range(8):
         overlay = {p: op.get("content") or "" for p, op in by_path.items()}
         #: 루트와 하위 package.json 폴더를 각각 본다(루트 build 에 안 들어가는 하위 서버의 tsconfig 등).
-        subs = sorted({posixpath.dirname(p) for p in by_path if posixpath.basename(p) == "package.json" and "/" in p})
+        projects = sorted(_affected_projects(base, by_path, manifests)) or [""]
         found_writes: list[tuple[str, str, str]] = []
-        for project in [""] + subs[:6]:
+        for project in projects[:7]:
             prefix = f"{project}/" if project else ""
             sub_overlay = {p[len(prefix):]: c for p, c in overlay.items() if p.startswith(prefix)}
             try:
@@ -2111,7 +2129,7 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict], _again: bool =
                 print(f"[code_agent] 빌드 설정 자동 교정 생략({project or '루트'}): {exc}", flush=True)
                 continue
             for code in FILE_WRITE_FIXES:
-                if project and code in _ROOT_SCOPED:
+                if project and "" in projects and code in _ROOT_SCOPED:
                     continue
                 for rel, content in (fixes.get(code) or {}).items():
                     found_writes.append((code, prefix + rel.replace("\\", "/").lstrip("/"), content))
@@ -2268,13 +2286,7 @@ def _consistency_issues(root: Path, target_folder: str, ops: list[dict]) -> list
         if parts:
             written["/".join(parts)] = str(op.get("content") or "")
     manifests = ("package.json", "requirements.txt", "pyproject.toml")
-    projects: set[str] = set()
-    for rel in written:
-        path = posixpath.split(rel)
-        if path[1] in manifests:
-            projects.add(path[0])
-    if any((base / m).is_file() for m in manifests):
-        projects.add("")
+    projects = _affected_projects(base, written, manifests)
     found: list[dict] = []
     root_seen: set[tuple[str, str]] = set()
     name_seen: set[tuple[str, str]] = set()
@@ -2595,6 +2607,7 @@ def generate_code(
     spec: dict | None = None,
     models: dict | None = None,
     test: bool = True,
+    lock_sensitive: bool = True,
 ) -> dict:
     """코드 생성(아래 _generate_code 설명). 2.0.45:
 
@@ -2605,7 +2618,8 @@ def generate_code(
         from llm import task_tier as _tiers
     except ImportError:  # pragma: no cover
         from core.llm import task_tier as _tiers  # type: ignore
-    with _tiers.role_models(models), _tiers.acting_as("dev"):
+    models = _tiers.sensitive_role_models(instruction, models, lock_sensitive)
+    with _tiers.sensitive_request(instruction, lock_sensitive), _tiers.role_models(models), _tiers.acting_as("dev"):
         return _generate_code(
             instruction, session_id, open_file, prior_files, context_files, target_folder, decisions, project_root,
             mode, job_id, budget_seconds, agents, skip_failed, spec, test=test)

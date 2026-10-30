@@ -76,7 +76,7 @@ def main() -> None:
     if not node:
         raise SystemExit('Node.js is required to package the extension.')
     run([sys.executable, '-m', 'pip', 'check'])
-    run([sys.executable, '-m', 'PyInstaller', str(CORE / 'recoder-core.spec'), '--noconfirm',
+    run([sys.executable, '-m', 'PyInstaller', str(CORE / 'recoder-core.spec'), '--noconfirm', '--clean',
          '--distpath', str(CORE / 'dist'), '--workpath', str(CORE / 'build')], cwd=CORE)
     binary = CORE / 'dist' / binary_name
     with tempfile.TemporaryDirectory(prefix='recoder-release-check-') as isolated:

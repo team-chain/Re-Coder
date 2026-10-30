@@ -10,7 +10,7 @@ const React = require('react');
 const STARTUP = new Set(['code.project', 'models.load']);
 function mount(props = {}) {
   const states = [], effects = [], timers = new Map(), messages = [], startup = [];
-  let cursor = 0, tree, receive, timerId = 0, reviews = 0;
+  let cursor = 0, tree, receive, timerId = 0, reviews = 0, now = 0;
   const exports = {};
   const hooks = {
     ...React,
@@ -30,7 +30,7 @@ function mount(props = {}) {
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../out/webview-test/components/CodeAgent.js'), 'utf8'), {
     exports,
-    setTimeout(fn) { const id = ++timerId; timers.set(id, fn); return id; },
+    setTimeout(fn, ms) { const id = ++timerId; timers.set(id, {fn, at:now + ms}); return id; },
     clearTimeout(id) { timers.delete(id); },
     require(id) {
       if (id === 'react') return hooks;
@@ -61,7 +61,12 @@ function mount(props = {}) {
     button(label) { const node = nodes().find(n => n.type === 'button' && text(n) === label); assert.ok(node, label); return node; },
     input(value) { nodes().find(n => n.type === 'textarea').props.onChange({target: {value}}); render(); },
     emit(type, payload) { receive({type, payload}); render(); },
-    expire() { const callbacks = [...timers.values()]; timers.clear(); callbacks.forEach(fn => fn()); render(); },
+    expire() { const callbacks = [...timers.values()]; timers.clear(); callbacks.forEach(({fn}) => fn()); render(); },
+    advance(ms) {
+      now += ms;
+      for (const [id, timer] of [...timers]) if (timer.at <= now) {timers.delete(id); timer.fn();}
+      render();
+    },
   };
 }
 const plan = {decisions: [{id:'storage', question:'저장 방식은?', impact:'데이터 보존', options:[
@@ -77,6 +82,50 @@ function generateThrough(ui, requestId) {
   ui.emit('code.specResult', {requestId, spec});
   ui.button('명세대로 생성 →').props.onClick(); ui.render();
 }
+
+test('30 generated files can stay in full checks for 20 minutes while heartbeat status arrives', () => {
+  const ui = mount();
+  ui.input('쇼핑몰'); ui.button('보내기').props.onClick();
+  const id = ui.messages[0].payload.requestId;
+  ui.emit('code.planResult', {...plan, requestId:id});
+  generateThrough(ui, id);
+  const message = '파일 30개 작성 완료 — 전체 점검 중';
+  ui.emit('code.status', {requestId:id, message, waitSeconds:300});
+  for (let elapsed = 0; elapsed < 1_200_000; elapsed += 10_000) {
+    ui.advance(10_000);
+    ui.emit('code.status', {requestId:id, message:'', waitSeconds:300});
+  }
+  assert.ok(ui.button('보내기').props.disabled, 'the active generation must not expire');
+  assert.ok(ui.find(n => React.Children.toArray(n.props.children).includes(message)), 'heartbeat must preserve the actual progress label');
+  ui.emit('code.result', {requestId:id, summary:'전체 점검 완료', model:'fixture', ops:[{file:'app.js',content:'ok',action:'create'}]});
+  assert.ok(ui.find(n => n.props['data-testid'] === 'code-result-summary'));
+  assert.equal(ui.find(n => n.props.className === 'rc-cg-error'), undefined);
+});
+
+test('a late generation result is recovered on its original turn without disturbing a newer plan', () => {
+  const ui = mount();
+  ui.input('쇼핑몰'); ui.button('보내기').props.onClick();
+  const id = ui.messages[0].payload.requestId;
+  ui.emit('code.planResult', {...plan, requestId:id}); generateThrough(ui, id);
+  ui.emit('code.status', {requestId:id, message:'전체 점검 중', waitSeconds:300});
+  ui.advance(300_001);
+  ui.input('새 요청'); ui.button('보내기').props.onClick(); ui.render();
+  ui.emit('code.result', {requestId:id, summary:'늦게 도착한 결과', model:'fixture', ops:[{file:'app.js',content:'ok',action:'create'}]});
+  assert.ok(ui.find(n => n.props['data-testid'] === 'code-result-summary'));
+  assert.ok(ui.button('보내기').props.disabled, 'new request remains active');
+  assert.equal(ui.find(n => n.props.role === 'dialog'), undefined);
+});
+
+test('a late disconnection still exposes the saved job for resuming after a UI timeout', () => {
+  const ui = mount();
+  ui.input('쇼핑몰'); ui.button('보내기').props.onClick();
+  const id = ui.messages[0].payload.requestId;
+  ui.emit('code.planResult', {...plan, requestId:id}); generateThrough(ui, id);
+  ui.expire();
+  ui.emit('code.error', {requestId:id, message:'연결 끊김', resumable:true, resumeJob:'job123', done:30, total:30});
+  const panel = ui.find(n => typeof n.type === 'function' && n.type.name === 'PausePanel');
+  assert.ok(panel, 'checkpoint controls must not be discarded');
+});
 
 test('central request opens design directly, then generates and applies only after user actions', () => {
   const ui = mount();
@@ -367,8 +416,9 @@ test('결과에는 완성 기준 테스트 결과(조건·기록 파일)가 보�
   assert.equal(gen.type, 'code.generate');
   assert.equal(gen.payload.test, true, '테스트는 기본으로 켠다');
   assert.equal(gen.payload.agents, 3);
-  //: 기본(균형) — 팀 모드가 꺼져 있으면 개발(품질 = 기본이라 싣지 않음)과 테스트(빠른 모델)만.
-  assert.deepEqual(gen.payload.models, {test: 'fast'});
+  //: 작은 요청은 비용 절약 추천 — 혼자 만들기의 개발·테스트에 간단 모델.
+  assert.deepEqual(gen.payload.models, {dev: 'fast', test: 'fast'});
+  assert.equal(gen.payload.lockSensitive, true);
   const acceptance = {status:'passed', passed:1, failed:0, unverifiable:1, total:2, checks:2, rounds:2, first:{passed:0, failed:1},
     criteria:[{id:'AC-1', verdict:'passed', retries:1, history:['failed','passed']}, {id:'AC-2', verdict:'unverifiable', reason:'화면'}]};
   ui.emit('code.result', {requestId:id, summary:'s', model:'m', ops:[{file:'a.js',content:'x',action:'create',language:'js',rationale:''}],

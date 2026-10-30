@@ -46,6 +46,7 @@ export function aiRoutingSettings(): AiRoutingSettings {
     const cfg = vscode.workspace.getConfiguration('recoder.ai');
     return {
         modelFor: (p) => cfg.get<string>(`${p}Model`, '') || '',
+        fastModelFor: (p) => cfg.get<string>(`${p}FastModel`, '') || '',
         economyProvider: cfg.get<string>('economyProvider', '') || '',
         economyModel: cfg.get<string>('economyModel', '') || '',
         compatibleBaseUrl: cfg.get<string>('compatibleBaseUrl', '') || '',
@@ -70,6 +71,14 @@ export async function clearAiKeys(context: Ctx): Promise<void> {
 }
 
 let routingWriteAt = 0;
+/** 설정 변경 감시와 중복 재시작을 막는다. */
+export async function saveRoutingSettings(values: Record<string, string | boolean>): Promise<void> {
+    const cfg = vscode.workspace.getConfiguration('recoder.ai');
+    for (const [key, value] of Object.entries(values)) {
+        routingWriteAt = Date.now();
+        await cfg.update(key, value, vscode.ConfigurationTarget.Global);
+    }
+}
 /** 이 확장이 방금 설정을 바꿨는가 — 설정 변경 감시가 Core 재시작을 한 번 더 묻지 않게. */
 export function recentRoutingWrite(now = Date.now()): boolean { return now - routingWriteAt < 5000; }
 

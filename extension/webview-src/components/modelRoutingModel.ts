@@ -2,7 +2,11 @@
  * 작업별 AI 공급자(2.0.36) — 화면이 쓰는 형태와 순수 계산(포맷·비교 표). React 없이 테스트한다.
  */
 export interface RoutingChoice { spec: string; label: string; ready: boolean; provider: string; model: string }
+export interface CheckedModel { model: string; ready: boolean; retirement?: string; checked?: boolean }
 export interface ModelRouting {
+  checked_at?: number;
+  catalog?: CheckedModel[];
+  configurable?: boolean;
   quality: { provider: string; model: string };
   economy: { spec: string; provider: string; model: string; separate: boolean; scrubbed: boolean; note: string };
   economy_operations: string[];
@@ -17,7 +21,8 @@ export interface CompareMetrics {
 }
 export interface CompareSide { spec: string; provider: string; model: string; status: "waiting" | "running" | "succeeded" | "failed"; metrics: CompareMetrics | null; error: string; seconds: number | null }
 export interface CompareJob { id: string; status: "running" | "finished"; started_at: number; finished_at: number | null; sides: CompareSide[]; verdict: Record<string, string | null> | null }
-export interface ModelsState { routing: ModelRouting; costs: ModelCosts; compare: CompareJob | null; keys: Record<string, boolean> | null; settings: { economyProvider: string; compatibleBaseUrl: string } }
+export interface ModelsState { routing: ModelRouting; costs: ModelCosts; compare: CompareJob | null; keys: Record<string, boolean> | null; settings: { economyProvider: string; compatibleBaseUrl: string; qualityModel?: string; fastModel?: string;
+  autoRecommend?: boolean; lockSensitive?: boolean; retryWithComplex?: boolean; prices?: Record<string, { input: number; output: number }> } }
 
 export const PROVIDER_LABEL: Record<string, string> = {
   bedrock: "AWS Bedrock", gateway: "게이트웨이", anthropic: "Claude API", openai: "OpenAI API", compatible: "OpenAI 호환", gemini: "Gemini(대체)",
@@ -98,4 +103,27 @@ export function compareChoices(routing: ModelRouting): RoutingChoice[] {
     out.push(c);
   }
   return out;
+}
+
+/** 단가는 사용자가 설정한 입력·출력 가격만 표시한다. */
+export function modelPrice(prices: ModelsState["settings"]["prices"], model: string): string {
+  const rate = prices?.[model];
+  if (!rate || !Number.isFinite(rate.input) || !Number.isFinite(rate.output) || rate.input < 0 || rate.output < 0) return "단가 미설정";
+  return `$${rate.input} / $${rate.output}`;
+}
+export function modelWarning(state: ModelsState): string {
+  const quality = state.settings.qualityModel || state.routing.choices.find(c => c.spec === "quality")?.model || state.routing.quality.model;
+  const fast = state.settings.fastModel || state.routing.choices.find(c => c.spec === "fast")?.model || quality;
+  if (quality && quality === fast) return "두 작업에 같은 모델을 씁니다. 간단한 작업에서 아끼는 비용이 없습니다.";
+  const q = state.settings.prices?.[quality], f = state.settings.prices?.[fast];
+  if (q && f && [q.input, q.output, f.input, f.output].every(n => Number.isFinite(n) && n >= 0)
+      && (f.input > q.input || f.output > q.output)) return "간단한 작업 모델이 더 비쌉니다. 두 모델을 바꿔 보세요.";
+  return "";
+}
+export function tierCost(costs: ModelCosts, tier: "quality" | "economy"): { calls: number; text: string } {
+  const groups = costs.groups.filter(g => g.tier === tier);
+  const calls = groups.reduce((n, g) => n + g.calls, 0);
+  const unknown = groups.reduce((n, g) => n + g.unknown_cost_calls, 0);
+  const total = groups.reduce((n, g) => n + g.cost_usd, 0);
+  return { calls, text: costCell(calls && unknown === calls ? null : total, unknown) };
 }
