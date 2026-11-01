@@ -25,6 +25,7 @@ export interface AiKeyContext {
 export interface AiRoutingSettings {
     /** 제공자별 모델 ID(recoder.ai.<제공자>Model). */
     modelFor?: (provider: AiKeyProvider) => string;
+    fastModelFor?: (provider: AiKeyProvider) => string;
     economyProvider?: string;
     economyModel?: string;
     compatibleBaseUrl?: string;
@@ -96,6 +97,7 @@ export async function aiKeyEnv(context: AiKeyContext, settingsArg?: AiRoutingSet
     const settings = settingsOf(settingsArg);
     const env: Record<string, string> = {};
     const modelOf = (p: AiKeyProvider): string => { try { return (settings.modelFor?.(p) || '').trim(); } catch { return ''; } };
+    const fastModelOf = (p: AiKeyProvider): string => { try { return (settings.fastModelFor?.(p) || '').trim(); } catch { return ''; } };
     const baseUrl = (settings.compatibleBaseUrl || '').trim();
     const addKey = async (p: AiKeyProvider): Promise<boolean> => {
         const key = ((await context.secrets.get(AI_KEY_SECRET[p])) || '').trim();
@@ -107,13 +109,18 @@ export async function aiKeyEnv(context: AiKeyContext, settingsArg?: AiRoutingSet
         const upper = p.toUpperCase();
         env[`RECODER_${upper}_API_KEY`] = key;
         const model = modelOf(p);
-        if (model) { env[`RECODER_${upper}_MODEL`] = model; env[`RECODER_${upper}_FAST_MODEL`] = model; }
+        if (model) { env[`RECODER_${upper}_MODEL`] = model; }
+        const fastModel = fastModelOf(p) || model;
+        if (fastModel) { env[`RECODER_${upper}_FAST_MODEL`] = fastModel; }
         return true;
     };
     try {
         const provider = await currentAiProvider(context);
         if (provider && await addKey(provider)) { env.RECODER_AI_PROVIDER = provider; }
         const economy = (settings.economyProvider || '').trim();
+        if (!economy && provider && env.RECODER_AI_PROVIDER && fastModelOf(provider)) {
+            env.RECODER_ECONOMY_PROVIDER = 'fast';
+        }
         if (economy && isEconomyProvider(economy)) {
             const usable = economy === 'fast' || economy === env.RECODER_AI_PROVIDER
                 || (isAiKeyProvider(economy) && await addKey(economy));

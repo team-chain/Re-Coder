@@ -8,12 +8,12 @@
  */
 import type { RoutingChoice } from "./modelRoutingModel";
 
-export type ModelSpec = "quality" | "fast" | "anthropic" | "openai" | "compatible";
+export type ModelSpec = "quality" | "fast";
 export type TeamRoleKey = "planner" | "dev" | "review" | "test";
 export type Preset = "quality" | "balanced" | "economy" | "custom";
 
 export const ROLE_KEYS: TeamRoleKey[] = ["planner", "dev", "review", "test"];
-export const MODEL_SPECS: ModelSpec[] = ["quality", "fast", "anthropic", "openai", "compatible"];
+export const MODEL_SPECS: ModelSpec[] = ["quality", "fast"];
 export const ROLE_TEXT: Record<TeamRoleKey, { name: string; detail: string }> = {
   planner: { name: "설계", detail: "파일과 작업 순서를 정함" },
   dev: { name: "개발", detail: "파일을 나눠 동시에 작성" },
@@ -29,12 +29,12 @@ export const PRESETS: Record<Exclude<Preset, "custom">, Record<TeamRoleKey, Mode
   economy: { planner: "fast", dev: "fast", review: "fast", test: "fast" },
 };
 
-export interface TeamConfig { preset: Preset; devs: number; test: boolean; models: Record<TeamRoleKey, ModelSpec> }
+export interface TeamConfig { auto: boolean; preset: Preset; devs: number; test: boolean; models: Record<TeamRoleKey, ModelSpec> }
 export const MIN_DEVS = 1;
 export const MAX_DEVS = 6;
 
 export function defaultConfig(): TeamConfig {
-  return { preset: "balanced", devs: 3, test: true, models: { ...PRESETS.balanced } };
+  return { auto: true, preset: "balanced", devs: 3, test: true, models: { ...PRESETS.balanced } };
 }
 
 function presetOf(models: Record<TeamRoleKey, ModelSpec>): Preset {
@@ -55,17 +55,60 @@ export function cleanConfig(raw: unknown): TeamConfig {
     if (typeof v === "string" && (MODEL_SPECS as string[]).includes(v)) models[role] = v as ModelSpec;
   }
   const devs = typeof r.devs === "number" && Number.isFinite(r.devs) ? Math.max(MIN_DEVS, Math.min(MAX_DEVS, Math.round(r.devs))) : base.devs;
-  return { preset: presetOf(models), devs, test: r.test !== false, models };
+  const preset = typeof r.preset === "string" && ["quality", "balanced", "economy", "custom"].includes(r.preset)
+    ? r.preset : presetOf(models);
+  return { auto: typeof r.auto === "boolean" ? r.auto : true, preset, devs, test: r.test !== false,
+    models: preset === "custom" ? models : { ...PRESETS[preset] } };
 }
 
-export function applyPreset(cfg: TeamConfig, preset: Preset): TeamConfig {
-  if (preset === "custom") return { ...cfg, preset: "custom" };
-  return { ...cfg, preset, models: { ...PRESETS[preset] } };
+/** 직접 설정은 현재 표시값을 이어받고, 추천 프리셋을 고르면 자동 적용을 켠다. */
+export function applyPreset(cfg: TeamConfig, preset: Preset, instruction = "", lockSensitive = true, autoRecommend = true): TeamConfig {
+  const current = effectiveConfig(cfg, instruction, lockSensitive, autoRecommend);
+  if (preset === "custom") return { ...current, auto: false, preset: "custom", models: { ...current.models } };
+  return { ...cfg, auto: preset === recommendPreset(instruction), preset, models: { ...PRESETS[preset] } };
 }
 
 export function setModel(cfg: TeamConfig, role: TeamRoleKey, spec: ModelSpec): TeamConfig {
-  const models = { ...cfg.models, [role]: spec };
-  return { ...cfg, models, preset: presetOf(models) };
+  return { ...cfg, auto: false, preset: "custom", models: { ...cfg.models, [role]: spec } };
+}
+
+export type SensitiveKind = "결제" | "인증" | "개인정보";
+export function sensitiveOf(instruction: string): SensitiveKind[] {
+  const rules: [SensitiveKind, RegExp][] = [
+    ["결제", /결제|환불|카드|청구|송금|계좌/],
+    ["인증", /로그인|회원\s*가입|인증|비밀번호|토큰|권한|세션|oauth/i],
+    ["개인정보", /개인\s*정보|주민\s*번호|전화\s*번호|주소록|위치\s*정보/],
+  ];
+  return rules.filter(([, pattern]) => pattern.test(instruction || "")).map(([name]) => name);
+}
+
+export function recommendPreset(instruction: string): Exclude<Preset, "custom"> {
+  const { size } = recommend(instruction);
+  return sensitiveOf(instruction).length || size === "large" ? "quality" : size === "small" ? "economy" : "balanced";
+}
+
+export function lockedRoles(instruction: string, lockSensitive = true): TeamRoleKey[] {
+  return lockSensitive && sensitiveOf(instruction).length ? ["planner", "dev"] : [];
+}
+
+/** 표시·전송에 함께 쓰는 모델. 저장한 직접 설정을 고정 규칙으로 덮어쓰지 않는다. */
+export function effectiveConfig(cfg: TeamConfig, instruction: string, lockSensitive = true, autoRecommend = true): TeamConfig {
+  const preset = cfg.auto && autoRecommend && cfg.preset !== "custom" ? recommendPreset(instruction) : cfg.preset;
+  const models = { ...(preset === "custom" ? cfg.models : PRESETS[preset]) };
+  for (const role of lockedRoles(instruction, lockSensitive)) models[role] = "quality";
+  return { ...cfg, preset, models };
+}
+
+export function restoreRecommendation(cfg: TeamConfig, instruction: string): TeamConfig {
+  const preset = recommendPreset(instruction);
+  return { ...cfg, auto: true, preset, models: { ...PRESETS[preset] } };
+}
+
+/** 추천이 달라질 때 직접 설정 화면은 유지하고 모델만 새 추천으로 바꾼다. */
+export function updateRecommendation(cfg: TeamConfig, previous: string, instruction: string, autoRecommend = true): TeamConfig {
+  if (!autoRecommend || recommendPreset(previous) === recommendPreset(instruction)) return cfg;
+  const recommended = restoreRecommendation(cfg, instruction);
+  return cfg.preset === "custom" ? { ...recommended, auto: false, preset: "custom" } : recommended;
 }
 
 export function setDevs(cfg: TeamConfig, devs: number): TeamConfig {
@@ -79,16 +122,17 @@ export function usableModel(spec: ModelSpec, ready: ReadonlySet<string> | null):
 }
 
 /**
- * 생성 요청에 싣는 역할별 공급자 — 기본(quality)과 같은 역할은 싣지 않는다. 팀 모드가 꺼져 있으면
+ * 생성 요청에 싣는 역할별 공급자 — quality 도 명시해 절약 작업의 기본 경로보다 우선한다. 팀 모드가 꺼져 있으면
  * 설계·검토 리코더가 따로 없으므로 개발(혼자 만드는 리코더)과 테스트만.
  */
-export function modelsForRequest(cfg: TeamConfig, teamMode: boolean, ready: ReadonlySet<string> | null): Partial<Record<TeamRoleKey, ModelSpec>> | null {
+export function modelsForRequest(cfg: TeamConfig, teamMode: boolean, ready: ReadonlySet<string> | null, instruction?: string, lockSensitive = true, autoRecommend = true): Partial<Record<TeamRoleKey, ModelSpec>> | null {
+  cfg = instruction === undefined ? cfg : effectiveConfig(cfg, instruction, lockSensitive, autoRecommend);
   const roles: TeamRoleKey[] = teamMode ? ROLE_KEYS : ["dev", "test"];
   const out: Partial<Record<TeamRoleKey, ModelSpec>> = {};
   for (const role of roles) {
     if (role === "test" && !cfg.test) continue;
     const spec = usableModel(cfg.models[role], ready);
-    if (spec !== "quality") out[role] = spec;
+    out[role] = spec;
   }
   return Object.keys(out).length ? out : null;
 }
@@ -105,42 +149,20 @@ export function prettyModel(model: string): string {
     return `Claude ${family}${ver ? ` ${ver}` : ""}`;
   }
   const gpt = /^(gpt-[\w.-]+?)(?:-(\d{4}-\d{2}-\d{2}))?$/.exec(id);
-  if (gpt) return gpt[1].replace(/^gpt/, "GPT").replace(/-mini$/, " mini").replace(/-nano$/, " nano");
+  if (gpt) return gpt[1].replace(/^gpt/, "GPT").replace(/-mini$/, " mini").replace(/-nano$/, " nano").replace(/-(sol|terra|luna|astra)$/, (_, name: string) => ` ${name[0].toUpperCase()}${name.slice(1)}`);
   return model.length > 28 ? `${model.slice(0, 27)}…` : model || "기본 모델";
 }
 
 export interface ModelOption { spec: ModelSpec; label: string; detail: string; ready: boolean }
 
-const SPEC_DETAIL: Record<ModelSpec, string> = {
-  quality: "기본 · 코드 품질 우선",
-  fast: "빠르고 저렴 · 검토·테스트에 알맞음",
-  anthropic: "Claude API 키",
-  openai: "OpenAI API 키",
-  compatible: "OpenAI 호환 API",
-};
+const SPEC_DETAIL: Record<ModelSpec, string> = { quality: "복잡", fast: "간단" };
 
-/** 코어 /api/models/routing 의 choices → 목록. 받기 전에는 기본 두 개(품질·빠른 모델)만 이름 없이. */
+/** 팀 창은 두 등급만 선택한다. 실제 모델명은 routing choices에서 가져온다. */
 export function modelOptions(choices: RoutingChoice[] | null | undefined): ModelOption[] {
-  if (!choices || !choices.length) {
-    return [
-      { spec: "quality", label: "기본 모델", detail: SPEC_DETAIL.quality, ready: true },
-      { spec: "fast", label: "빠른 모델", detail: SPEC_DETAIL.fast, ready: true },
-    ];
-  }
-  const out: ModelOption[] = [];
-  for (const spec of MODEL_SPECS) {
-    const c = choices.find((x) => x.spec === spec);
-    if (!c) continue;
-    const ready = spec === "quality" || !!c.ready;
-    const label = c.model ? prettyModel(c.model) : c.label;
-    out.push({ spec, label, detail: ready ? SPEC_DETAIL[spec] : "키 없음 · AI 연결에서 추가", ready });
-  }
-  //: 같은 모델이 두 이름으로 나오면(API 키 방식에서 품질 = Claude API) 뒤의 것은 공급자 이름을 붙여 구분한다.
-  const seen = new Map<string, number>();
-  return out.map((o) => {
-    const n = seen.get(o.label) ?? 0;
-    seen.set(o.label, n + 1);
-    return n ? { ...o, label: `${o.label} (${o.spec === "anthropic" ? "Claude API" : o.spec === "openai" ? "OpenAI" : o.spec})` } : o;
+  return MODEL_SPECS.map((spec) => {
+    const c = choices?.find((choice) => choice.spec === spec);
+    return { spec, label: c?.model ? prettyModel(c.model) : spec === "quality" ? "복잡한 작업 모델" : "간단한 작업 모델",
+      detail: SPEC_DETAIL[spec], ready: c ? !!c.ready : true };
   });
 }
 

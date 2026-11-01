@@ -284,7 +284,11 @@ export function cleanTeamModels(raw: unknown): TeamModels | null {
 }
 
 /** 2.0.36 작업별 AI 공급자 — 형태는 webview-src/components/modelRoutingModel.ts 와 같다(키 값은 오지 않는다). */
+export interface CheckedModel { model: string; ready: boolean; retirement?: string; checked?: boolean }
 export interface ModelRouting {
+  checked_at?: number;
+  catalog?: CheckedModel[];
+  configurable?: boolean;
     quality: { provider: string; model: string };
     economy: { spec: string; provider: string; model: string; separate: boolean; scrubbed: boolean; note: string };
     economy_operations: string[];
@@ -560,6 +564,7 @@ export class ApiClient {
             /** 2.0.45 역할별 AI 공급자 · 테스트 리코더. */
             models?: TeamModels | null;
             test?: boolean;
+            lockSensitive?: boolean;
         }
     ): Promise<CodeAgentResult> {
         const body = {
@@ -574,6 +579,7 @@ export class ApiClient {
             spec: opts?.spec ?? null,
             models: opts?.models ?? null,
             test: opts?.test !== false,
+            lockSensitive: opts?.lockSensitive !== false,
         };
         // Full-file output and one schema correction can take two model calls.
         //: 분할 생성 + 자동 교정(최대 3회)까지 끝날 시간. Core 는 10분 예산 안에서 교정을 멈춘다.
@@ -604,6 +610,7 @@ export class ApiClient {
             spec?: CodeSpec | null;
             models?: TeamModels | null;
             test?: boolean;
+            lockSensitive?: boolean;
         },
         onEvent: (event: CodeProgressEvent) => void,
         retried = false,
@@ -625,6 +632,7 @@ export class ApiClient {
             spec: opts.spec ?? null,
             models: opts.models ?? null,
             test: opts.test !== false,
+            lockSensitive: opts.lockSensitive !== false,
         };
         const controller = new AbortController();
         const response = await fetch(`http://127.0.0.1:${this.coreManager.getPort()}/api/code/generate/stream`, {
@@ -723,6 +731,12 @@ export class ApiClient {
     async getModelRouting(): Promise<ModelRouting> {
         const resp = await this.request<ModelRouting>('GET', '/api/models/routing');
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'AI 공급자 정보를 받지 못했습니다'); }
+        return resp.data;
+    }
+
+    async checkModels(): Promise<ModelRouting> {
+        const resp = await this.request<ModelRouting>('POST', '/api/models/check', {}, false, 180000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '모델 확인에 실패했습니다'); }
         return resp.data;
     }
 

@@ -1009,6 +1009,7 @@ def _build_code_prompt(
 - 화면(React·Vue 등)과 API 서버를 함께 만들면 서버가 빌드된 화면 폴더를 정적으로 제공하고, 화면은 API 를 상대 경로(/api/…)로 부릅니다. localhost 주소를 코드에 넣지 마세요.
 - Vite 프로젝트에서는 JSX 가 든 파일을 .jsx/.tsx 로 만들고, 브라우저 코드의 환경변수는 import.meta.env.VITE_* 만 씁니다(process.env 금지).
 - PostgreSQL(pg)의 NUMERIC/DECIMAL 값은 문자열로 옵니다 — 서버에서 숫자로 바꾸거나 pg.types.setTypeParser(1700, parseFloat) 를 설정하세요.
+- AWS/Fargate 운영 배포를 요청한 앱의 사용자·주문 등 영구 데이터는 DATABASE_URL로 연결하는 PostgreSQL에 저장합니다. 태스크 내부 SQLite나 Dockerfile VOLUME을 영구 저장소로 제시하지 마세요. 사용자가 SQLite를 명시했다면 로컬 용도로 유지하고 AWS 운영 배포에는 DB 전환이 필요하다고 설명합니다. 재배포·동시 실행 시에도 데이터와 스키마를 보존하고 초기화 때 기존 테이블을 삭제하지 마세요.
 - 파일을 나눠 만들 때 서로 부르는 함수·컴포넌트 이름과 export 방식을 정확히 맞추고, import 하는 파일(CSS 포함)은 반드시 함께 만듭니다.
 - 회원가입/로그인이 있으면 실제 입력 화면·라우트·인증 상태 공급자·로그아웃까지 연결합니다. 권한은 서버에서 확인하고 관리자 기본 계정/비밀번호를 만들지 않습니다. 비밀 환경변수가 없으면 시작을 거절하며 기본 JWT 비밀값을 두지 않습니다. 로그인 시도 횟수 제한, 비밀번호 길이 검증, 일반화된 오류 응답을 구현합니다.
 - 쇼핑몰/결제에서는 가격·합계·사용자 ID·권한을 클라이언트 입력으로 신뢰하지 않습니다. 서버 DB 가격으로 최소 화폐 단위 정수 금액을 계산하고, 수량은 양의 정수로 검증합니다. 주문과 재고 예약은 DB 트랜잭션/행 잠금으로 묶어 동시 주문의 초과 판매를 막고, 주문 재시도에는 사용자별 idempotency key를 사용합니다.
@@ -1912,6 +1913,26 @@ def _relative_to_target(ops: list[dict], target_folder: str) -> list[dict]:
     return ops
 
 
+def _affected_projects(base: Path, paths, manifests: tuple[str, ...]) -> set[str]:
+    """Find the nearest manifest for each changed file, including new manifests.
+
+    A new app inside an existing workspace must not repeatedly analyze unrelated
+    parent projects. Files changed in that parent still include it in the checks.
+    """
+    paths = set(paths)
+    projects = {posixpath.dirname(p) for p in paths if posixpath.basename(p) in manifests}
+    for path in paths:
+        folder = posixpath.dirname(path)
+        while True:
+            if any(posixpath.join(folder, m) in paths or (base / folder / m).is_file() for m in manifests):
+                projects.add(folder)
+                break
+            if not folder:
+                break
+            folder = posixpath.dirname(folder)
+    return projects
+
+
 def _autofix_ops(root: Path, target_folder: str, ops: list[dict], _again: bool = True,
                  new_app: bool = False) -> tuple[list[dict], list[str]]:
     """AI 를 다시 부르지 않고 확실히 고칠 수 있는 것만 ops 에서 고친다.
@@ -1948,9 +1969,7 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict], _again: bool =
     except Exception as exc:  # noqa: BLE001
         print(f"[code_agent] 중괄호 점검 생략: {exc}", flush=True)
     manifests = ("package.json",)
-    projects = sorted({posixpath.dirname(p) for p in by_path if posixpath.basename(p) in manifests})
-    if (base / "package.json").is_file() or "package.json" in by_path:
-        projects = [""]
+    projects = sorted(_affected_projects(base, by_path, manifests))
     #: 한 번 고치면 다음 것이 보인다(내보내기를 붙여야 /api 중복 호출이 보인다) — 두 번 돈다.
     for project in [p for _ in range(2) for p in projects[:5]]:
         prefix = f"{project}/" if project else ""
@@ -2096,9 +2115,9 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict], _again: bool =
     for _pass in range(8):
         overlay = {p: op.get("content") or "" for p, op in by_path.items()}
         #: 루트와 하위 package.json 폴더를 각각 본다(루트 build 에 안 들어가는 하위 서버의 tsconfig 등).
-        subs = sorted({posixpath.dirname(p) for p in by_path if posixpath.basename(p) == "package.json" and "/" in p})
+        projects = sorted(_affected_projects(base, by_path, manifests)) or [""]
         found_writes: list[tuple[str, str, str]] = []
-        for project in [""] + subs[:6]:
+        for project in projects[:7]:
             prefix = f"{project}/" if project else ""
             sub_overlay = {p[len(prefix):]: c for p, c in overlay.items() if p.startswith(prefix)}
             try:
@@ -2111,7 +2130,7 @@ def _autofix_ops(root: Path, target_folder: str, ops: list[dict], _again: bool =
                 print(f"[code_agent] 빌드 설정 자동 교정 생략({project or '루트'}): {exc}", flush=True)
                 continue
             for code in FILE_WRITE_FIXES:
-                if project and code in _ROOT_SCOPED:
+                if project and "" in projects and code in _ROOT_SCOPED:
                     continue
                 for rel, content in (fixes.get(code) or {}).items():
                     found_writes.append((code, prefix + rel.replace("\\", "/").lstrip("/"), content))
@@ -2268,13 +2287,7 @@ def _consistency_issues(root: Path, target_folder: str, ops: list[dict]) -> list
         if parts:
             written["/".join(parts)] = str(op.get("content") or "")
     manifests = ("package.json", "requirements.txt", "pyproject.toml")
-    projects: set[str] = set()
-    for rel in written:
-        path = posixpath.split(rel)
-        if path[1] in manifests:
-            projects.add(path[0])
-    if any((base / m).is_file() for m in manifests):
-        projects.add("")
+    projects = _affected_projects(base, written, manifests)
     found: list[dict] = []
     root_seen: set[tuple[str, str]] = set()
     name_seen: set[tuple[str, str]] = set()
@@ -2282,7 +2295,8 @@ def _consistency_issues(root: Path, target_folder: str, ops: list[dict]) -> list
         prefix = f"{project}/" if project else ""
         overlay = {rel[len(prefix):]: content for rel, content in written.items() if rel.startswith(prefix)}
         try:
-            before = {(i.code, i.message) for i in analyze(base / project, dockerfile=None).issues}
+            before_result = analyze(base / project, dockerfile=None)
+            before = {(i.code, i.message) for i in before_result.issues}
             #: 새로 쓰는 package.json 은 버전이 npm 에 실제로 있는지도 본다 — AI 가 없는 버전
             #: (jsonwebtoken@^9.1.2 등)을 적어 Docker 빌드가 ETARGET 으로 멈췄다(실기기).
             after = analyze(base / project, overlay, dockerfile="Dockerfile" if "Dockerfile" in overlay else None,
@@ -2290,7 +2304,8 @@ def _consistency_issues(root: Path, target_folder: str, ops: list[dict]) -> list
         except Exception as exc:  # noqa: BLE001 - 점검 실패가 생성을 막지 않는다
             print(f"[code_agent] 일관성 점검 생략: {exc}", flush=True)
             continue
-        details = after.fix_data.get("missing_names_detail") or []
+        before_details = {tuple(d) for d in before_result.fix_data.get("missing_names_detail", [])}
+        details = [d for d in after.fix_data.get("missing_names_detail", []) if tuple(d) not in before_details]
         if details and project and "" in projects:
             details_shown = True  # 루트 점검이 같은 파일들을 이미 파일별로 냈다
         else:
@@ -2535,6 +2550,29 @@ def _verify_generated_build(root: Path, target_folder: str, ops: list[dict], run
                             acceptance=None) -> dict:
     from generated_validation import verify_proposal
     base = (root / target_folder).resolve() if target_folder else root.resolve()
+    # A new app may be proposed inside a child folder of an existing workspace.
+    # Build that app, not the parent repository (or silently report no Dockerfile).
+    docker_dirs = sorted({posixpath.dirname(str(op.get("file", ""))) for op in ops
+                          if op.get("action") != "delete"
+                          and posixpath.basename(str(op.get("file", ""))) == "Dockerfile"})
+    if docker_dirs and "" not in docker_dirs:
+        projects = {}
+        for folder in docker_dirs:
+            child = (base / folder).resolve()
+            if not child.is_relative_to(base):
+                return {"kind": "docker-build", "passed": False, "status": "failed",
+                        "output": "Generated build path is outside the workspace."}
+            prefix = folder + "/"
+            child_ops = [dict(op, file=op["file"][len(prefix):]) for op in ops
+                         if str(op.get("file", "")).startswith(prefix)]
+            projects[folder] = _verify_generated_build(child, "", child_ops, run_app, acceptance)
+        if len(projects) == 1:
+            folder, result = next(iter(projects.items()))
+            return {**result, "build_folder": folder}
+        passed = all(v.get("passed") for v in projects.values())
+        return {"kind": "docker-build", "passed": passed,
+                "status": "passed" if passed else "failed", "projects": projects,
+                "output": "\n".join(f"{folder}: {v.get('output', '')}" for folder, v in projects.items())}
     if run_app:
         if acceptance is not None:
             return verify_proposal(base, _verification_ops(base, ops), run_app=True, acceptance=acceptance)
@@ -2595,6 +2633,7 @@ def generate_code(
     spec: dict | None = None,
     models: dict | None = None,
     test: bool = True,
+    lock_sensitive: bool = True,
 ) -> dict:
     """코드 생성(아래 _generate_code 설명). 2.0.45:
 
@@ -2605,7 +2644,8 @@ def generate_code(
         from llm import task_tier as _tiers
     except ImportError:  # pragma: no cover
         from core.llm import task_tier as _tiers  # type: ignore
-    with _tiers.role_models(models), _tiers.acting_as("dev"):
+    models = _tiers.sensitive_role_models(instruction, models, lock_sensitive)
+    with _tiers.sensitive_request(instruction, lock_sensitive), _tiers.role_models(models), _tiers.acting_as("dev"):
         return _generate_code(
             instruction, session_id, open_file, prior_files, context_files, target_folder, decisions, project_root,
             mode, job_id, budget_seconds, agents, skip_failed, spec, test=test)

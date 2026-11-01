@@ -220,3 +220,39 @@ def test_clean_preview_still_requires_scanning_the_image_built_at_execution(monk
 
     assert plan.approval_level == ApprovalLevel.CONFIRM
     assert deploy._plans_pending_image_scan == {plan.plan_id: plan.image}
+
+
+@pytest.mark.parametrize("report", [
+    {"status": "ok", "critical_count": 1},
+    {"status": "error", "critical_count": 0},
+])
+def test_source_secrets_or_failed_scan_block_before_build(monkeypatch, tmp_path, report):
+    plan = _fake_plan()
+    monkeypatch.setattr(deploy, "_deployment_plans", {plan.plan_id: plan})
+    monkeypatch.setattr(deploy, "_plans_pending_image_scan", {plan.plan_id: plan.image})
+    monkeypatch.setattr(deploy, "_plan_workspaces", {plan.plan_id: str(tmp_path)})
+    monkeypatch.setattr(deploy, "_refresh_rollback_target", lambda p: (None, ""))
+    scans = []
+    async def scan(kind, workspace, target):
+        scans.append((kind, workspace))
+        return report
+    async def forbidden(*args):
+        raise AssertionError("source gate must precede building or replacing containers")
+    monkeypatch.setattr(deploy, "_execute_scan", scan)
+    monkeypatch.setattr(deploy, "_build_local_image", forbidden)
+    monkeypatch.setattr(deploy, "_remove_existing_local_container", forbidden)
+    for _ in range(2):  # Failed attempts must retain the gate on retry.
+        result = asyncio.run(deploy.execute_deployment(deploy.ExecuteRequest(plan_id=plan.plan_id, approved=True)))
+        assert result["status"] == "failed" and result["stage"] == "scan"
+        assert result["security_scan"]["scan_type"] == "gitleaks"
+    assert scans == [("gitleaks", str(tmp_path))] * 2
+
+
+def test_secret_preview_is_a_blocker_and_clean_preview_does_not_disable_rescan(monkeypatch, tmp_path):
+    monkeypatch.setattr(deploy, "_local_image_exists", lambda image: True)
+    async def scan(kind, workspace, target):
+        return {"status": "ok", "critical_count": int(kind == "gitleaks"), "high_count": 0}
+    monkeypatch.setattr(deploy, "_execute_scan", scan)
+    request = deploy.DeployPlanRequest(workspace_path=str(tmp_path), image="recoder-app:v1")
+    gate = asyncio.run(deploy._run_pre_deploy_security_gate(request))
+    assert gate["elevated"] and any("Gitleaks" in b for b in gate["blockers"])

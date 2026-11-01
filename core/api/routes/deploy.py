@@ -3726,7 +3726,7 @@ def _default_image_name(workspace_path: str) -> str:
 
 
 async def _run_pre_deploy_security_gate(request: DeployPlanRequest) -> dict:
-    """Run Trivy (filesystem/image) + Hadolint (Dockerfile) before planning.
+    """Run Gitleaks (source), Trivy (image) and Hadolint before planning.
 
     Returns a dict with:
       - blockers:    list[str]  — human-readable critical findings
@@ -3738,12 +3738,23 @@ async def _run_pre_deploy_security_gate(request: DeployPlanRequest) -> dict:
     blockers: list[str] = []
     risk_reasons: list[str] = []
     reports: dict = {}
+    unverified_reasons: list[str] = []
 
     workspace = request.workspace_path
     ws_path = Path(workspace) if workspace else None
     dockerfile_path = None
     if ws_path is not None and (ws_path / "Dockerfile").exists():
         dockerfile_path = str(ws_path / "Dockerfile")
+
+    if workspace:
+        secret_report = await _execute_scan("gitleaks", workspace, workspace)
+        reports["gitleaks"] = secret_report
+        if secret_report.get("status") == "ok":
+            count = int(secret_report.get("critical_count", 0) or 0)
+            if count:
+                blockers.append(f"Gitleaks: {count} secret(s) in source — remove before deployment")
+        else:
+            unverified_reasons.append("Gitleaks: 소스 비밀키 검사 미완료 — 실행 전에 다시 검사합니다.")
 
     # Hadolint — only meaningful if a Dockerfile exists.
     if dockerfile_path is not None:
@@ -3765,7 +3776,6 @@ async def _run_pre_deploy_security_gate(request: DeployPlanRequest) -> dict:
     #: **보안 스캔이 한 번도 안 돈 채 게이트를 통과**했다(보드 이슈).
     #: 이제 못 돈 스캔은 unverified 로 남기고(승인 강도 반영), 실행 시점에
     #: 빌드 후 1회 스캔을 보장한다(execute_deployment 의 대기 목록 처리).
-    unverified_reasons: list[str] = []
     #: 화면은 이미지 이름을 안 보낸다 — DeployAgent 가 붙일 기본 이름(<폴더>:latest)과
     #: 같은 규칙으로 정해서 이미 빌드된 이미지는 여기서 검사한다. 예전엔 "이미지
     #: 미지정" 으로 미검증 처리돼, 검사가 깨끗해도 승인이 Level 3 로 올라갔다(실기기).
@@ -3819,8 +3829,8 @@ async def _run_pre_deploy_security_gate(request: DeployPlanRequest) -> dict:
 async def create_deployment_plan(request: DeployPlanRequest) -> DeploymentPlan:
     """Generate an executable DeploymentPlan via the DeployAgent.
 
-    Ship Stage security gate: unless ``skip_security_scan=true``, Trivy and
-    Hadolint are run before the plan is built. If any CRITICAL findings are
+    Ship Stage security gate: unless ``skip_security_scan=true``, Gitleaks,
+    Trivy and Hadolint run before the plan is built. If any CRITICAL findings are
     detected, the resulting plan is annotated with ``risk_level=HIGH``,
     ``approval_level=DOUBLE_CONFIRM``, and the blockers are embedded into
     ``risk_reasons`` (prefixed with ``BLOCKER:``).
@@ -4757,6 +4767,21 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         #: 전이라 되돌릴 것이 없다.
         workspace_for_build = _plan_workspaces.get(request.plan_id, "")
         if plan.method == DeployMethod.LOCAL_DOCKER and workspace_for_build and plan.container_name:
+            # Scan the current sources, not only the plan-time preview. Secrets
+            # added while approval was pending must not reach the image build.
+            if request.plan_id in _plans_pending_image_scan:
+                report_progress('scan', '빌드 전에 소스의 비밀키 유출을 검사합니다')
+                source_report = await _execute_scan("gitleaks", workspace_for_build, workspace_for_build)
+                secret_count = int(source_report.get("critical_count", 0) or 0)
+                if source_report.get("status") != "ok" or secret_count:
+                    return {
+                        "status": "failed", "stage": "scan", "plan_id": request.plan_id,
+                        "message": (f"Gitleaks: 비밀키 {secret_count}건 — 소스에서 제거한 뒤 다시 배포하세요."
+                                    if secret_count else "Gitleaks 검사를 완료하지 못해 배포를 차단했습니다. 보안 화면에서 검사 상태를 확인하세요."),
+                        "stdout": "", "stderr": "",
+                        "security_scan": {"status": "blocked" if secret_count else "unverified",
+                                          "scan_type": "gitleaks", "critical_count": secret_count},
+                    }
             #: 승인 뒤에 .env 를 고쳤거나 값을 넣었을 수 있다 — 지금 상태로 다시 본다. 비어 있으면 빌드하지 않는다.
             try:
                 await asyncio.to_thread(_apply_settings_to_plan, plan, workspace_for_build)

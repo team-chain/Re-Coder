@@ -478,12 +478,13 @@ def test_compare_runs_the_same_request_on_both(monkeypatch, tmp_path):
         assert job["status"] == "finished"
         a, b = job["sides"]
         assert (a["provider"], b["provider"]) == ("bedrock", "compatible")
-        assert a["metrics"]["calls"] == 2 and b["metrics"]["calls"] == 4, "고정한 공급자로 모든 호출(절약 등급 포함)"
-        assert len(server.requests) == 4 and len(quality.prompts) == 2
+        assert a["metrics"]["calls"] == 2 and b["metrics"]["calls"] == 4, "생성은 비교 모델, 교정은 항상 품질 모델"
+        assert len(server.requests) == 3 and len(quality.prompts) == 3
         assert (a["metrics"]["repair_calls"], b["metrics"]["repair_calls"]) == (0, 2)
         assert (a["metrics"]["remaining_errors"], b["metrics"]["remaining_errors"]) == (0, 1)
-        assert b["metrics"]["cost_usd"] is None and b["metrics"]["unknown_cost_calls"] == 4
-        assert b["metrics"]["input_tokens"] == 2000 and b["metrics"]["estimated_token_calls"] == 0
+        assert b["metrics"]["unknown_cost_calls"] == 3 and b["metrics"]["cost_usd"] is not None
+        assert b["metrics"]["input_tokens"] >= 1500 and b["metrics"]["estimated_token_calls"] == 1
+        assert len(b["metrics"]["used"]) == 2, "교정에 쓴 품질 모델도 사용량에 기록한다"
         assert a["metrics"]["security_score"] is not None
         v = job["verdict"]
         assert v["fewer_repairs"] == "quality" and v["fewer_errors"] == "quality"
@@ -491,7 +492,7 @@ def test_compare_runs_the_same_request_on_both(monkeypatch, tmp_path):
         assert model_compare.latest()["id"] == job["id"]
         # 일반 호출에는 고정이 남지 않는다
         router_mod.get_router().call(LLMRequest(prompt="later"), operation="generate_code")
-        assert len(server.requests) == 4
+        assert len(server.requests) == 3
     finally:
         server.close()
 

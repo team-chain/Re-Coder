@@ -142,5 +142,7 @@ def run(app) -> int:
                           'checks': checks}))
         return 0
     except Exception as exc:
+        import traceback
+        traceback.print_exc()
         print(json.dumps({'ok': False, 'checks': checks, 'error': str(exc)}))
         return 1

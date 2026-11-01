@@ -401,7 +401,8 @@ class LLMProviderRouter:
         2.0.36 작업 등급
             절약 등급 작업(task_tier.ECONOMY_OPERATIONS)은 절약 공급자가 정해져 있으면 그쪽으로 먼저
             보낸다. 실패하면(잘린 응답 제외) 품질 공급자로 이어 간다 — 비용 때문에 기능이 멈추지 않게.
-            비교 도구가 공급자를 고정한 실행(task_tier.pinned)에서는 다른 공급자로 바꾸지 않는다.
+            비교 도구(task_tier.pinned)에서도 보안·민감 요청의 품질 고정은 우선한다.
+            고정한 공급자가 실패하면 다른 공급자로 바꾸지 않는다.
             품질 공급자 아닌 곳·OpenAI 호환 API 로 나가는 문맥은 비밀값을 가린다.
         """
         LLMError, LLMResponse = _get_base_types()
@@ -411,7 +412,10 @@ class LLMProviderRouter:
 
         tier = tiers.tier_for(operation)
         forced = tiers.forced_provider()
-        if forced:
+        complex_only = tiers.quality_required(operation)
+        if complex_only:
+            chain = [self._bedrock_sonnet]
+        elif forced:
             pinned = self._spec_provider(forced)
             if pinned is None:
                 raise LLMError(f"비교할 AI 공급자를 쓸 수 없습니다({forced}) — 키·주소를 확인하세요.",
@@ -449,6 +453,10 @@ class LLMProviderRouter:
         usage: dict = {}
 
         for provider in chain:
+            if complex_only or (not forced and tiers.role_spec() == "quality" and provider is self._bedrock_sonnet):
+                tier = tiers.QUALITY
+            elif tiers.role_spec() == "fast":
+                tier = tiers.ECONOMY if provider is self._bedrock_haiku else tiers.QUALITY
             prompt, masked = self._outgoing(provider, full_prompt, code_output)
             usage = {}
             br = breaker_mod.breaker_for(f"{provider.provider_name}/{provider.model_id}")
@@ -488,11 +496,11 @@ class LLMProviderRouter:
         fallback = result is None or provider is not chain[0]
         used_provider, used_model = provider.provider_name, provider.model_id
         if result is None:
-            if forced:
-                #: 비교 실험의 조건을 몰래 바꾸지 않는다 — 실패는 실패로 남긴다.
+            if forced or complex_only:
+                #: 비교 조건과 품질 고정을 유지한다 — 실패는 실패로 남긴다.
                 if isinstance(primary_error, LLMError):
                     raise primary_error
-                raise LLMError(f"{forced} 공급자 호출 실패: {primary_error or '연속 실패로 잠시 대기 중'}",
+                raise LLMError(f"{'복잡한 작업 모델' if complex_only else forced} 공급자 호출 실패: {primary_error or '연속 실패로 잠시 대기 중'}",
                                LLMErrorType.SERVICE_ERROR, True, raw=primary_error)
             used_provider, used_model = "gemini", "gemini-2.5-flash"
             prompt, masked = self._outgoing(self._gemini, full_prompt, code_output)
@@ -619,6 +627,7 @@ class LLMProviderRouter:
 
     def routing_status(self) -> dict:
         """확장 설정 화면이 보여 줄 등급별 공급자(키 값은 넣지 않는다)."""
+        from .model_checks import status as model_check_status
         tiers = _get_tiers()
         quality = self._bedrock_sonnet
         economy = self._economy or quality
@@ -638,6 +647,7 @@ class LLMProviderRouter:
                         "note": self._economy_note},
             "economy_operations": sorted(tiers.ECONOMY_OPERATIONS),
             "choices": choices,
+            **model_check_status(self),
         }
 
     @property

@@ -28,6 +28,23 @@ function fixture() {
   return {provider, api, events, messages, setInstance(value) {instance=value;}, health() {healthCallback({status:'ok'});} };
 }
 
+test('generation liveness reaches the webview even without a progress message', async () => {
+  const f = fixture(), messages = [];
+  f.api.generateCodeStream = async (_instruction, _options, onEvent) => {
+    onEvent({step:'generated', message:'파일 30개 작성 완료 — 전체 점검 중', job_id:'job123'});
+    onEvent({step:'heartbeat', job_id:'job123'});
+    onEvent({step:'usage', input_tokens:42});
+    return {ops:[], summary:'checked'};
+  };
+  await f.provider.handleCodeGenerate('test', {requestId:1, requestWebview:{postMessage:m=>messages.push(m)}});
+  const statuses = messages.filter(m => m.type === 'code.status');
+  assert.equal(statuses.length, 5, 'connection, start, progress, heartbeat, usage');
+  assert.deepEqual(statuses.slice(-2).map(m => m.payload.message), ['', '']);
+  assert.ok(statuses.slice(-2).every(m => m.payload.requestId === 1 && m.payload.waitSeconds === 300));
+  assert.deepEqual(messages.filter(m => m.type === 'code.team').map(m => m.payload.event.step), ['generated','usage']);
+  assert.equal(messages.at(-1).type, 'code.result');
+});
+
 test('sidebar and workspace startup share credentials and a diagnostic before any feature click', async () => {
   const f = fixture();
   await Promise.all([f.provider.ensureConnection(), f.provider.ensureConnection(), f.provider.ensureConnection()]);

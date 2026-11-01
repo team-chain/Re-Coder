@@ -96,6 +96,9 @@ class RuntimePlan:
     def block_message(self) -> tuple[str, str]:
         names = ", ".join(m["name"] for m in self.missing)
         reasons = " ".join(dict.fromkeys(m["reason"] for m in self.missing))
+        if any(m["name"] in {"DATABASE_STORAGE", "POSTGRESQL_DRIVER"} for m in self.missing):
+            return (f"데이터를 보존할 DB 구성이 준비되지 않아 ECS 배포를 멈췄습니다: {names}",
+                    reasons + " AWS 자원은 아직 아무것도 만들지 않았습니다.")
         return (f"앱이 시작할 때 요구하는 설정이 없어 ECS 배포를 멈췄습니다: {names}",
                 reasons + " 고급 설정 › 앱 실행 설정의 '비밀값 참조'에 "
                 '{"이름":"arn:aws:secretsmanager:리전:계정:secret:이름"} 처럼 넣고 다시 배포하세요. '
@@ -223,6 +226,13 @@ def plan(workspace: Optional[str], *, key: str, environment: str, provided: Iter
     given = set(provided) | _ALWAYS_PROVIDED
     required = deploy_settings.required_env(workspace)
     readiness = readiness if readiness is not None else _readiness(workspace)
+    if production and readiness is None:
+        result.missing.append({"name": "DATABASE_STORAGE", "reason":
+            "앱의 저장소 구성을 확인하지 못했습니다. 프로젝트 점검을 복구한 뒤 다시 배포하세요."})
+    if production and (getattr(readiness, "sqlite_sources", []) or getattr(readiness, "local_data_files", [])):
+        result.missing.append({"name": "DATABASE_STORAGE", "reason":
+            "SQLite 파일은 Fargate 태스크 교체 시 사라집니다. 앱을 PostgreSQL 같은 외부 DB로 전환하고 "
+            "관리형 DB를 연결하세요. Dockerfile의 VOLUME이나 RDS 선택만으로 SQLite가 변환되지는 않습니다."})
     env_names = sorted(set(deploy_settings.all_env_names(workspace)) | set(getattr(readiness, "env_names", []) or []))
     kinds = [k for k in (getattr(readiness, "services", []) or []) if k in _IMAGES]
     data = _load(key)
@@ -242,7 +252,9 @@ def plan(workspace: Optional[str], *, key: str, environment: str, provided: Iter
     # 1) 앱이 쓰는 DB — 접속 정보를 사용자가 이미 넣었으면(RDS 등) 그대로 쓴다.
     primary = next((k for k in kinds if k != "redis"), None)
     if managed_db and "postgres" not in kinds:
-        result.notes.append("관리형 DB 는 PostgreSQL 을 쓰는 앱만 만듭니다 — 이 앱은 PostgreSQL 을 쓰지 않아 만들지 않습니다.")
+        result.missing.append({"name": "POSTGRESQL_DRIVER", "reason":
+            "관리형 DB를 선택했지만 앱에서 PostgreSQL 드라이버를 찾지 못했습니다. "
+            "앱을 PostgreSQL과 DATABASE_URL을 사용하도록 먼저 수정하세요."})
     for kind in kinds:
         conn = local_services.app_env("ecs", kind, "x", env_names, host="127.0.0.1")
         if _covered(conn, given):

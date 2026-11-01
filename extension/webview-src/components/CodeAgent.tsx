@@ -16,7 +16,7 @@ import { ConsistencyIssue, FallbackDocsNote, RemainingIssues, SecurityReport, Se
 import { TeamBoard } from "./TeamBoard";
 import { TeamSetup } from "./TeamSetup";
 import { AcceptancePanel, ResultSpec } from "./AcceptancePanel";
-import { Preset, RunStat, TeamConfig, addRun, cleanConfig, cleanHistory, defaultConfig, modelOptions, modelsForRequest, readySpecs, setDevs } from "./teamConfig";
+import { Preset, RunStat, TeamConfig, addRun, cleanConfig, cleanHistory, defaultConfig, modelOptions, modelsForRequest, readySpecs, setDevs, effectiveConfig, recommendPreset, restoreRecommendation, updateRecommendation } from "./teamConfig";
 import type { RoutingChoice } from "./modelRoutingModel";
 import { SpecEditor } from "./SpecEditor";
 import { EditableSpec, SpecPayload, addCriterion, emptySpec, fromDraft, hasBlocking, specForRequest, specIssues } from "./specModel";
@@ -89,7 +89,7 @@ interface GenerateRequest { instruction: string; targetFolder: string; contextFi
   /** 2.0.43 사용자가 승인한 명세(합격 조건). 이어서 만들기에도 그대로 다시 보낸다. */
   spec?: SpecPayload | null;
   /** 2.0.45 역할별 모델(설계·개발·검토·테스트 → 공급자 이름) · 테스트 리코더를 돌릴지. */
-  models?: Partial<Record<string, string>> | null; test?: boolean; }
+  models?: Partial<Record<string, string>> | null; test?: boolean; lockSensitive?: boolean; }
 interface PausedInfo { message: string; jobId: string; done: number; total: number; reason?: string; failed?: FailedFile[]; }
 interface Turn { id: number; prompt: string; targetFolder: string; contextNames?: string[]; status: "planning" | "generating" | "done" | "error"; result?: CodeResult; error?: string; progress?: string;
   roster?: TeamMember[]; team?: TeamView; request?: GenerateRequest; paused?: PausedInfo | null;
@@ -170,7 +170,7 @@ function trapTab(e: React.KeyboardEvent<HTMLDivElement>) {
   else if (!e.shiftKey && at === last) { e.preventDefault(); first.focus(); }
 }
 
-export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTurn | null; onReviewRequired?: () => void; connectionPending?: boolean; connectionError?: string; onOpenHub?: (hub: "deploy" | "security") => void }> = ({ isActive, externalTurn, onReviewRequired, connectionPending, connectionError, onOpenHub }) => {
+export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTurn | null; onReviewRequired?: () => void; connectionPending?: boolean; connectionError?: string; onOpenHub?: (hub: "deploy" | "security") => void; onOpenModels?: () => void }> = ({ isActive, externalTurn, onReviewRequired, connectionPending, connectionError, onOpenHub, onOpenModels }) => {
   const { postMessage, useMessage } = useVSCodeApi();
 
   //: 쓰던 요청은 화면이 다시 그려져도(창 다시 불러오기·확장 재시작) 남는다.
@@ -201,6 +201,17 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
   useEffect(() => { saveUiState({ codeTeamHistory: runHistory }); }, [runHistory]);
   //: 역할별 모델 목록(코어 /api/models/routing) — 받기 전에는 기본 두 개만.
   const [routingChoices, setRoutingChoices] = useState<RoutingChoice[] | null>(null);
+  const [aiSettings, setAiSettings] = useState({ autoRecommend: true, lockSensitive: true });
+  const previousInput = React.useRef(input);
+  useEffect(() => {
+    const previous = previousInput.current;
+    previousInput.current = input;
+    setTeamConfig((cfg) => {
+      const next = updateRecommendation(cfg, previous, input, aiSettings.autoRecommend);
+      return next.auto && aiSettings.autoRecommend && next.preset !== "custom" && next.preset !== recommendPreset(input)
+        ? restoreRecommendation(next, input) : next;
+    });
+  }, [input, aiSettings.autoRecommend]);
   const modelChoices = modelOptions(routingChoices);
   const loadModels = useCallback(() => postMessage("models.load"), [postMessage]);
   //: 위치 칩에 보일 프로젝트 이름(확장이 알려 줌).
@@ -289,8 +300,13 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
   useMessage(useCallback((msg) => {
     const { type, payload } = msg;
     const responseId = (payload as {requestId?:number})?.requestId;
+    // A late generation result belongs to its original turn even after the UI
+    // watchdog expires. Late plans must still stay closed.
+    const expiredGeneration = responseId !== undefined && expiredRequests.current.has(responseId)
+      && turnsRef.current.some(t => t.id === responseId && t.status === "error" && t.request);
     if (["code.result", "code.planResult", "code.error", "code.specResult", "code.specError"].includes(type) && !(payload as {ackKey?:string})?.ackKey) {
-      if (responseId !== undefined && expiredRequests.current.has(responseId)) return;
+      if (responseId !== undefined && expiredRequests.current.has(responseId)
+        && !(expiredGeneration && (type === "code.result" || type === "code.error"))) return;
       finishWaiting(responseId);
     }
     if (type === "code.status" || type === "code.generating") {
@@ -312,8 +328,9 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
       return;
     }
     if (type === "models.state") {
-      const st = payload as { routing?: { choices?: RoutingChoice[] } };
+      const st = payload as { routing?: { choices?: RoutingChoice[] }; settings?: { autoRecommend?: boolean; lockSensitive?: boolean } };
       if (Array.isArray(st?.routing?.choices)) setRoutingChoices(st.routing!.choices!);
+      if (st?.settings) setAiSettings({ autoRecommend: st.settings.autoRecommend !== false, lockSensitive: st.settings.lockSensitive !== false });
       return;
     }
     if (type === "code.project") {
@@ -339,8 +356,8 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
       setTurns((ts) => {
         const copy = [...ts];
         for (let i = copy.length - 1; i >= 0; i--) {
-          if ((requestId === undefined || copy[i].id === requestId) && copy[i].status === "generating") {
-            copy[i] = { ...copy[i], status: "done", result: res };
+          if ((requestId === undefined || copy[i].id === requestId) && (copy[i].status === "generating" || expiredGeneration)) {
+            copy[i] = { ...copy[i], status: "done", result: res, error: undefined, paused: null };
             break;
           }
         }
@@ -374,7 +391,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
         const copy = [...ts];
         const requestId = (payload as { requestId?: number })?.requestId;
         for (let i = copy.length - 1; i >= 0; i--) {
-          if ((requestId === undefined || copy[i].id === requestId) && (copy[i].status === "planning" || copy[i].status === "generating")) {
+          if ((requestId === undefined || copy[i].id === requestId) && (copy[i].status === "planning" || copy[i].status === "generating" || expiredGeneration)) {
             //: 다 만든 파일은 코어에 저장돼 있다 — 실패가 아니라 일시 정지로 보여 주고 [이어서 만들기]를 준다.
             const paused = pause.resumable && pause.resumeJob && copy[i].request
               ? { message: m, jobId: pause.resumeJob, done: Number(pause.done) || copy[i].team?.done || 0, total: Number(pause.total) || copy[i].team?.total || 0,
@@ -475,7 +492,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     if (!text || activeRequest.current !== null) { return; }
     const id = _turnSeq++;
     activeRequest.current = id;
-    pendingRequestsRef.current[id] = { instruction: text, targetFolder, contextFiles, team: teamMode, roster, config: teamConfig };
+    pendingRequestsRef.current[id] = { instruction: text, targetFolder, contextFiles, team: teamMode, roster, config: { ...effectiveConfig(teamConfig, text, aiSettings.lockSensitive, aiSettings.autoRecommend), auto: false } };
     // 요청 시점의 폴더를 턴에 **고정**한다 — 이후 폴더 선택을 바꿔도
     // 이 턴의 적용·diff·경로 표시는 전부 이 값을 쓴다.
     setTurns((ts) => [...ts, { id, prompt: text, targetFolder, contextNames: contextFiles.map((f) => f.path), status: "planning", roster }]);
@@ -483,7 +500,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     waitForResponse(id, isHostLinkLost() ? 5 : FIRST_ACK_SECONDS);
     postMessage("code.plan", { requestId: id, instruction: text, targetFolder, contextFiles });
     setInput("");
-  }, [input, targetFolder, contextFiles, postMessage, teamMode, roster, teamConfig]);
+  }, [input, targetFolder, contextFiles, postMessage, teamMode, roster, teamConfig, aiSettings]);
 
   const chooseDecision = useCallback((key: string) => {
     setDecisionModal((current) => current ? {
@@ -535,14 +552,15 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
       //: 팀 모드가 꺼져 있어도 요청이 크면 코어가 자동으로 나눠 만든다(같은 에이전트 수로).
       mode: request.team ? "team" : "auto", agents: cfg.devs,
       spec: withSpec ? specForRequest(decisionModal.spec) : null,
-      models: modelsForRequest(cfg, !!request.team, ready), test: cfg.test,
+      models: modelsForRequest(cfg, !!request.team, ready, request.instruction, aiSettings.lockSensitive, false), test: cfg.test,
+      lockSensitive: aiSettings.lockSensitive,
     };
     setTurns((ts) => ts.map((turn) => turn.id === decisionModal.requestId
       ? { ...turn, status: "generating", request: generate, roster: team, run: { startedAt: Date.now(), preset: cfg.preset } } : turn));
     setDecisionModal(null);
     waitForResponse(decisionModal.requestId, 30);
     postMessage("code.generate", { requestId: decisionModal.requestId, ...generate });
-  }, [postMessage, roster, teamConfig, routingChoices, modelChoices]);
+  }, [postMessage, roster, teamConfig, routingChoices, modelChoices, aiSettings.lockSensitive]);
 
   //: [다음]/[생성] — 고른 선택이 이어서 물을 결정을 갖고 있으면 먼저 끼워 넣거나 AI 에게 받는다.
   const advanceDecision = useCallback(() => {
@@ -945,7 +963,8 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
               <span>참고 파일</span>
             </button>
             <TeamSetup teamMode={teamMode} config={teamConfig} options={modelChoices} history={runHistory} instruction={input}
-              disabled={isBusy} onTeamMode={setTeamMode} onChange={setTeamConfig} onOpen={loadModels} />
+              disabled={isBusy} onTeamMode={setTeamMode} onChange={setTeamConfig} onOpen={loadModels}
+              autoRecommend={aiSettings.autoRecommend} lockSensitive={aiSettings.lockSensitive} onOpenModels={onOpenModels} />
             </div>
             <div className="rc-cg-actions">
             <span className="rc-cg-kbd">Ctrl ↵</span>

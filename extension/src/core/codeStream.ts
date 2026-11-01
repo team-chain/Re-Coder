@@ -89,7 +89,14 @@ export async function readCodeStream<T>(
                 const frame = buffer.slice(0, separator.index);
                 buffer = buffer.slice(separator.index + separator[0].length);
                 const data = frame.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
-                if (!data) continue;
+                if (!data) {
+                    // Core sends these while long checks are running. The webview has
+                    // its own watchdog, so transport liveness must reach it too.
+                    if (frame.split(/\r?\n/).some(line => /^:\s*heartbeat\s*$/.test(line))) {
+                        onEvent({ step: 'heartbeat', job_id: jobId || undefined });
+                    }
+                    continue;
+                }
                 let event: CodeProgressEvent;
                 try { event = JSON.parse(data) as CodeProgressEvent; } catch { continue; }
                 if (event.job_id) jobId = event.job_id;

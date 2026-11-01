@@ -1,11 +1,55 @@
 """AI 자유 생성 앱이 실제 Docker 빌드·배포에서 깨진 원인들(2026-10-10 TEMP 쇼핑몰)을 찾고 고친다."""
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import build_readiness as br
 import code_agent as ca
 import node_fixups as nf
 import node_manifests as nm
+
+
+def test_missing_imports_finishes_for_long_whitespace_and_large_export_index(tmp_path):
+    # Run out of process so a regex performance regression cannot hang pytest.
+    script = r'''
+from pathlib import Path
+from build_readiness import ProjectFiles
+from node_fixups import missing_imports
+sources = {
+    "src/exports.ts": "\n".join(f"export const Value{i} = 1;" for i in range(800)),
+    "src/long.ts": "Value1" + " " * 100_000 + "+ 1",
+    **{f"src/page{i}.ts": "unrelated();\n" * 1000 for i in range(100)},
+    "src/use.ts": "Value2();\nobject.Value3();\nconst Value4 = 1;\nValue4();",
+}
+problems, writes = missing_imports(ProjectFiles(Path("/nonexistent"), sources))
+assert set(writes) == {"src/use.ts"}, writes.keys()
+assert "import { Value2 }" in writes["src/use.ts"]
+'''
+    subprocess.run([sys.executable, "-c", script], cwd=Path(nf.__file__).parent,
+                   check=True, capture_output=True, text=True, encoding="utf-8", timeout=10)
+
+
+def test_new_child_app_checks_its_own_project_without_scanning_parent(tmp_path, monkeypatch):
+    (tmp_path / "package.json").write_text('{"name":"existing-workspace"}', encoding="utf-8")
+    ops = [
+        {"file":"shop/package.json", "content":'{"name":"shop","type":"module"}'},
+        {"file":"shop/src/index.js", "content":"console.log('ready');"},
+    ]
+    visited = []
+    original = br.analyze
+    def analyze(root, *args, **kwargs):
+        visited.append(Path(root))
+        return original(root, *args, **kwargs)
+    monkeypatch.setattr(br, "analyze", analyze)
+    fixed, _ = ca._autofix_ops(tmp_path, "", ops)
+    ca._consistency_issues(tmp_path, "", fixed)
+    assert visited
+    assert set(visited) == {tmp_path / "shop"}
+    assert ca._affected_projects(tmp_path, ["README.md", "shop/package.json"], ("package.json",)) == {"", "shop"}
+    (tmp_path / "shop").mkdir()
+    (tmp_path / "shop/package.json").write_text('{}', encoding="utf-8")
+    assert ca._affected_projects(tmp_path, ["shop/src/index.js"], ("package.json",)) == {"shop"}
 
 
 def _write(root: Path, files: dict) -> Path:
@@ -73,6 +117,17 @@ def _temp_shop(root: Path) -> Path:
     return _write(root, {"package.json": ROOT_PKG, "backend/tsconfig.json": BACKEND_TSCONFIG,
                          "backend/src/app.ts": APP_TS, "backend/src/server.ts": SERVER_TS, "Dockerfile": DOCKERFILE,
                          ".dockerignore": "node_modules\n", **FRONT})
+
+
+def test_child_app_still_repairs_missing_workspace_manifests(tmp_path):
+    source = _temp_shop(tmp_path / "draft")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "package.json").write_text('{}', encoding="utf-8")
+    ops = [{"file":"shop/" + p.relative_to(source).as_posix(), "content":p.read_text(encoding="utf-8")}
+           for p in source.rglob('*') if p.is_file()]
+    fixed, _ = ca._autofix_ops(workspace, "", ops)
+    assert {"shop/backend/package.json", "shop/frontend/package.json"} <= {op["file"] for op in fixed}
 
 
 def test_실기기_TEMP_쇼핑몰의_원인을_모두_찾는다(tmp_path):

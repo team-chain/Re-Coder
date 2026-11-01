@@ -525,7 +525,8 @@ export function activate(context: vscode.ExtensionContext): void {
             if (changed) { await vscode.commands.executeCommand('recoder.restartCore'); }
         }),
         vscode.workspace.onDidChangeConfiguration(async (e) => {
-            const keys = ['economyProvider', 'economyModel', 'compatibleBaseUrl', 'compatibleModel', 'anthropicModel', 'openaiModel', 'prices'];
+            const keys = ['economyProvider', 'economyModel', 'compatibleBaseUrl', 'compatibleModel', 'anthropicModel', 'openaiModel', 'prices',
+                'openaiFastModel', 'anthropicFastModel', 'compatibleFastModel', 'autoRecommend', 'lockSensitive', 'retryWithComplex'];
             if (!keys.some((k) => e.affectsConfiguration(`recoder.ai.${k}`)) || recentRoutingWrite()) { return; }
             const pick = await vscode.window.showInformationMessage('ReCoder: AI 공급자 설정이 바뀌었습니다. Core를 다시 시작해야 적용됩니다.', 'Core 다시 시작');
             if (pick) { await vscode.commands.executeCommand('recoder.restartCore'); }

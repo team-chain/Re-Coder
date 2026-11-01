@@ -29,6 +29,7 @@ import base64
 import logging
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
@@ -183,6 +184,7 @@ def build_image(
     dockerfile: str = "Dockerfile",
     platform: str = "linux/amd64",
     runner: Runner = run_command,
+    rds_tls: bool = False,
 ) -> str:
     """`docker build` 를 실행하고 로컬 태그를 돌려준다.
 
@@ -202,17 +204,34 @@ def build_image(
         raise BuildError(f"Dockerfile 안전 검사에서 막았습니다: {dockerfile_guard.message(unsafe)}",
                          remedy=dockerfile_guard.REMEDY)
     logger.info("docker build 시작: %s (platform=%s)", local_tag, platform)
-    rc, out, err = runner(
-        [
-            "docker", "buildx", "build", "--load", "--pull",
-            "--platform", platform,
-            "-f", dockerfile,
-            "-t", local_tag,
-            ".",
-        ],
-        cwd=workspace_path,
-        timeout=DOCKER_BUILD_TIMEOUT,
-    )
+    # Named context keeps the CA independent of the user's .dockerignore and
+    # leaves their Dockerfile/workspace untouched, even when the build fails.
+    with tempfile.TemporaryDirectory(prefix="recoder-rds-tls-") as tls_dir:
+        extra_args: list[str] = []
+        build_dockerfile = dockerfile
+        if rds_tls:
+            from core.resources import resource
+            ca = resource("starter_templates", "commerce", "certs", "rds-ca.pem")
+            shutil.copyfile(ca, Path(tls_dir) / "rds-ca.pem")
+            prepared = Path(tls_dir) / "Dockerfile"
+            prepared.write_text(path.read_text(encoding="utf-8") + '\n'
+                'COPY --from=recoder-rds-tls /rds-ca.pem /etc/recoder/rds-ca.pem\n'
+                'ENV PGSSLROOTCERT=/etc/recoder/rds-ca.pem PGSSLMODE=verify-full '
+                'NODE_EXTRA_CA_CERTS=/etc/recoder/rds-ca.pem\n', encoding="utf-8")
+            build_dockerfile = str(prepared)
+            extra_args = ["--build-context", f"recoder-rds-tls={tls_dir}"]
+        rc, out, err = runner(
+            [
+                "docker", "buildx", "build", "--load", "--pull",
+                "--platform", platform,
+                "-f", build_dockerfile,
+                "-t", local_tag,
+                *extra_args,
+                ".",
+            ],
+            cwd=workspace_path,
+            timeout=DOCKER_BUILD_TIMEOUT,
+        )
     if rc != 0:
         title, detail, remedy = "", (err or out)[-4000:], (
             "위 docker 출력의 마지막 오류 줄을 확인하세요. 의존성 설치 실패가 가장 흔한 원인입니다.")
@@ -351,6 +370,7 @@ def build_and_push(
     platform: str = "linux/amd64",
     runner: Runner = run_command,
     on_progress: Optional[Callable[[str], None]] = None,
+    rds_tls: bool = False,
 ) -> PushResult:
     """빌드 → 로그인 → push 를 한 번에. 최종 이미지 주소를 돌려준다.
 
@@ -368,7 +388,7 @@ def build_and_push(
     local_tag = f"{repository_uri.rsplit('/', 1)[-1]}:{tag}"
     build_image(
         workspace_path, local_tag, dockerfile=dockerfile,
-        platform=platform, runner=runner,
+        platform=platform, runner=runner, **({"rds_tls": True} if rds_tls else {}),
     )
     if on_progress:
         on_progress("ecr_push")

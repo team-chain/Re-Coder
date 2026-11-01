@@ -194,7 +194,7 @@ class SecurityScanner:
                 local_image = False
             if local_image:
                 trivy_args = trivy_args + ["--image-src", "docker"]
-            else:
+            elif re.match(r"^\d{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com(?:\.cn)?/", image):
                 for name in _AWS_ENV_PASSTHROUGH:
                     if os.environ.get(name):
                         cmd.extend(["-e", name])

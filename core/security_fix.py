@@ -401,12 +401,16 @@ def _pip_maker(pkg: str, target: str) -> Maker:
     return make
 
 
+def _vendored_python(item: dict) -> bool:
+    return bool(re.search(r"(?:^|/)(?:_vendor|vendor|ensurepip)(?:/|$)", str(item.get("pkg_path") or "")))
+
+
 def _python_fixes(root: Path, items: list[dict]) -> list[FixProposal]:
     if _read(root, "requirements.txt") is None:
         return []
     groups: dict[tuple[str, str], list[dict]] = {}
     for item in items:
-        if str(item.get("type") or "") in ("python-pkg", "pip", "poetry", "pipenv"):
+        if str(item.get("type") or "") in ("python-pkg", "pip", "poetry", "pipenv") and not _vendored_python(item):
             groups.setdefault((str(item.get("package")), str(item.get("installed"))), []).append(item)
     out: list[FixProposal] = []
     for (pkg, installed), group in sorted(groups.items()):
@@ -1059,17 +1063,21 @@ def _unhandled_trivy(root: Path, items: list[dict]) -> list[FixProposal]:
             continue
         if where == "app" and typ in ("", "node-pkg", "npm", "yarn", "pnpm") and (root / _manifest_for(str(item.get("pkg_path") or ""), root)).is_file():
             continue
-        if typ in ("python-pkg", "pip", "poetry", "pipenv") and has_req:
+        if typ in ("python-pkg", "pip", "poetry", "pipenv") and has_req and not _vendored_python(item):
             continue
         groups.setdefault((typ or where, str(item.get("package")), str(item.get("installed"))), []).append(item)
     out = []
     for (typ, pkg, installed), group in sorted(groups.items()):
         fixed = _required_version(installed, [str(g.get("fixed") or "") for g in group])
+        vendored = any(_vendored_python(g) for g in group)
         out.append(FixProposal(
             id=_pid("trivy", "manual", typ, pkg, installed), tool="trivy", auto=False,
             title=f"{pkg} {installed}" + (f" → {fixed}" if fixed else " — 고친 버전 없음") + f" (취약점 {len(group)}건)",
-            detail=(f"{typ} 패키지라 자동으로 고치지 못합니다. " if typ else "")
-                   + (f"{pkg} 를 {fixed} 이상으로 올린 뒤 이미지를 다시 빌드하세요." if fixed else "대체 패키지나 베이스 이미지 변경을 검토하세요."),
+            detail=("다른 도구에 내장된 패키지입니다. requirements.txt의 동명 패키지 갱신으로는 고쳐지지 않습니다. "
+                    "해당 도구(pip/setuptools 등)를 갱신하거나 빌드 단계로 옮기고 실행 이미지에서 제거하세요. "
+                    if vendored else f"{typ} 패키지라 자동으로 고치지 못합니다. " if typ else "")
+                   + ("이미지를 다시 빌드하고 내장 패키지 경로까지 재검사하세요." if vendored else
+                      f"{pkg} 를 {fixed} 이상으로 올린 뒤 이미지를 다시 빌드하세요." if fixed else "대체 패키지나 베이스 이미지 변경을 검토하세요."),
             files=[]))
     return out
 

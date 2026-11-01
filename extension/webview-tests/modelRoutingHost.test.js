@@ -77,3 +77,41 @@ test('models.compare.start needs the cost confirmation; poll ignores bad ids', a
     assert.ok(sent.some((m) => m.type === 'models.compare'));
   } finally { vscode.window.showWarningMessage = original; }
 });
+
+test('모델 저장은 확인 통과한 모델과 허용된 설정 키만 저장하고 Core를 재시작한다', async()=>{
+ const updates=[],commands=[];
+ const original={cfg:vscode.workspace.getConfiguration,execute:vscode.commands.executeCommand};
+ const api=fakeApi([]);
+ api.getModelRouting=async()=>({quality:{provider:'openai',model:'q'},configurable:true,
+  catalog:[{model:'q',ready:true,checked:true},{model:'f',ready:true,checked:true},{model:'failed',ready:false,checked:true},
+   {model:'old',ready:true,checked:true,retirement:'2026-12-11'}]});
+ vscode.workspace.getConfiguration=()=>({get:(k,d)=>d,update:async(k,v)=>updates.push([k,v])});
+ vscode.commands.executeCommand=async name=>commands.push(name);
+ const sidebar=new SidebarProvider(vscode.Uri.file('/tmp'),api,{},{});
+ try {
+  for(const model of ['failed','old','unverified']) {
+   const out=await send(sidebar,'models.setModels',{tier:'fast',model});
+   assert.ok(out.some(m=>m.type==='models.error'));
+  }
+  assert.equal(updates.length,0);
+  await send(sidebar,'models.setModels',{tier:'fast',model:'f'});
+  assert.deepEqual(updates,[['openaiFastModel','f']]);assert.equal(commands.at(-1),'recoder.restartCore');
+  await send(sidebar,'models.setToggle',{key:'lockSensitive',value:false});
+  assert.deepEqual(updates.at(-1),['lockSensitive',false]);
+  const count=updates.length;
+  await send(sidebar,'models.setToggle',{key:'openaiKey',value:true});
+  await send(sidebar,'models.setToggle',{key:'lockSensitive',value:'false'});
+  assert.equal(updates.length,count);
+ } finally {vscode.workspace.getConfiguration=original.cfg;vscode.commands.executeCommand=original.execute;}
+});
+test('모델 확인 버튼은 검사 API 결과와 설정값을 반환한다',async()=>{
+ const calls=[],api=fakeApi(calls);
+ const routing=await api.getModelRouting();
+ api.checkModels=async()=>{calls.push(['check']);return {...routing,checked_at:123,catalog:[{model:'m',ready:true,checked:true}]};};
+ const sidebar=new SidebarProvider(vscode.Uri.file('/tmp'),api,{},{});
+ const out=await send(sidebar,'models.check');
+ assert.ok(calls.some(c=>c[0]==='check'));
+ const state=out.find(m=>m.type==='models.state').payload;
+ assert.equal(state.routing.checked_at,123);assert.equal(state.settings.lockSensitive,true);
+ assert.equal(state.settings.autoRecommend,true);assert.deepEqual(state.settings.prices,{});
+});

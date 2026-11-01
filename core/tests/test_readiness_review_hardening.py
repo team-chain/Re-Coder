@@ -94,6 +94,31 @@ def test_ts_exports_and_js_extension_imports_resolve(tmp_path):
     assert "NODE_IMPORT_NAME_MISSING" not in found
 
 
+def test_comment_globs_and_string_literals_do_not_hide_exports(tmp_path):
+    _write(tmp_path, {
+        "package.json": {"name": "test", "type": "module"},
+        "types.ts": '// Routes /api/aws/*\nexport interface AwsStatus { ready: boolean; }\n'
+                    '/** Actual comment */\nexport const glob = "/* retained */";\n',
+        "client.ts": "import { AwsStatus, glob } from './types';\nexport const status: AwsStatus = {ready: true};\n",
+    })
+    assert "NODE_IMPORT_NAME_MISSING" not in codes(tmp_path)
+    assert '"/* retained */"' in br._strip_js_comments((tmp_path / "types.ts").read_text(encoding="utf-8"))
+
+
+def test_consistency_reports_new_import_errors_only(tmp_path):
+    _write(tmp_path, {
+        "package.json": {"name": "test", "type": "module"},
+        "exports.js": "export const known = 1;\n",
+        "old.js": "import { oldMissing } from './exports.js';\nconsole.log(oldMissing);\n",
+    })
+    ops = [{"action": "create", "file": "new.js", "content":
+            "import { newMissing } from './exports.js';\nconsole.log(newMissing);\n"}]
+    issues = ca._consistency_issues(tmp_path, "", ops)
+    messages = " ".join(i["message"] for i in issues)
+    assert "newMissing" in messages
+    assert "oldMissing" not in messages
+
+
 def test_reexports_and_spread_exports_are_not_judged():
     assert br._esm_exports("export * from './x';\nexport const a = 1;") is None
     assert br._esm_exports("export const { a, b } = obj;") is None

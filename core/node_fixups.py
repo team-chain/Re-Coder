@@ -765,16 +765,20 @@ def missing_imports(files) -> tuple[list[str], dict[str, str]]:
         code = _code_only(text)
         side = rel.split("/", 1)[0] if "/" in rel else ""
         adds: list[tuple[str, str]] = []
-        for name, where in owners.items():
+        # Scan identifiers once. Searching the entire file for every export in
+        # a large workspace made full checks take minutes before any progress.
+        used = set(re.findall(r"(?<![\w$.])[A-Za-z_$][\w$]*(?![\w$])", code))
+        for name in sorted(used.intersection(owners)):
+            where = owners[name]
             if len(name) < 4 or rel in where:
                 continue
             same_side = [w for w in where if (w.split("/", 1)[0] if "/" in w else "") == side]
             if len(same_side) != 1:
                 continue
-            if not re.search(rf"(?<![\w$.]){re.escape(name)}(?![\w$])", code) or _declared_here(code, name):
+            if _declared_here(code, name):
                 continue
             #: 실제로 이름으로 쓰는가 — 속성 접근·호출·타입 자리·JSX 태그
-            if not re.search(rf"(?<![\w$.]){re.escape(name)}\s*(?:[.(<\[]|\s*\)|>|\s*\||\s*;|\s*,|\s*\]|\s*=>)|[:<|,]\s*{re.escape(name)}\b|<{re.escape(name)}[\s/>]", code):
+            if not re.search(rf"(?<![\w$.]){re.escape(name)}\s*(?:[.(<\[)>|;,\]]|=>)|[:<|,]\s*{re.escape(name)}\b|<{re.escape(name)}[\s/>]", code):
                 continue
             adds.append((name, same_side[0]))
         if not adds:

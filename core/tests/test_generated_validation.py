@@ -7,6 +7,31 @@ import generated_validation as gv
 from build_readiness import analyze
 
 
+def test_child_app_build_uses_child_context_not_parent(tmp_path, monkeypatch):
+    (tmp_path / 'Dockerfile').write_text('FROM parent:unrelated', encoding="utf-8")
+    seen = []
+    def verify(root, ops, **kwargs):
+        seen.append((root, ops, kwargs))
+        return {'kind': 'docker-build', 'passed': False, 'status': 'failed', 'output': 'real child build error'}
+    monkeypatch.setattr(gv, 'verify_proposal', verify)
+    monkeypatch.setattr(ca, '_verification_ops', lambda base, ops: ops)
+    result = ca._verify_generated_build(tmp_path, '', [
+        {'file': 'shop/Dockerfile', 'content': 'FROM node:22'},
+        {'file': 'shop/server.js', 'content': 'broken'},
+        {'file': 'docs/decision.md', 'content': 'not build input'},
+    ], run_app=True)
+    assert seen[0][0] == tmp_path / 'shop'
+    assert [op['file'] for op in seen[0][1]] == ['Dockerfile', 'server.js']
+    assert seen[0][2]['run_app'] is True
+    assert result['status'] == 'failed' and result['build_folder'] == 'shop'
+
+
+def test_nested_build_rejects_path_escape(tmp_path):
+    result = ca._verify_generated_build(tmp_path, '', [{'file': '../escape/Dockerfile', 'content': 'FROM node:22'}])
+    assert result['status'] == 'failed'
+    assert 'outside' in result['output']
+
+
 def test_copy_sources_and_nested_compiled_entry(tmp_path):
     files = {
         "package.json": "{}",

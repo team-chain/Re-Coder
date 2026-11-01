@@ -604,6 +604,7 @@ export class CoreManager {
         const cfg = vscode.workspace.getConfiguration('recoder.ai');
         return {
             modelFor: (p) => cfg.get<string>(`${p}Model`, '') || '',
+            fastModelFor: (p) => cfg.get<string>(`${p}FastModel`, '') || '',
             economyProvider: cfg.get<string>('economyProvider', '') || '',
             economyModel: cfg.get<string>('economyModel', '') || '',
             compatibleBaseUrl: cfg.get<string>('compatibleBaseUrl', '') || '',

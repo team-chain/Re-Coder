@@ -49,3 +49,20 @@ test('the palette flow stores the key and asks the caller to restart the Core',a
   assert.equal(await ai.currentAiProvider(c),'openai');
  } finally {vscode.window.showInputBox=originalInput;vscode.window.showInformationMessage=originalInfo;}
 });
+
+const {aiKeyEnv: routingEnv}=require('../out/ai/aiKeyEnv');
+for (const provider of ['openai','anthropic','compatible']) {
+ test(`${provider}: separate fast model and implicit economy routing`,async()=>{
+  const c=context(); await ai.storeAiKey(c,provider,'test-key-for-routing');
+  const settings={modelFor:()=> 'complex-model',fastModelFor:()=> 'simple-model',compatibleBaseUrl:'https://api.example.com'};
+  const out=await routingEnv(c,settings),prefix=`RECODER_${provider.toUpperCase()}`;
+  assert.equal(out[`${prefix}_MODEL`],'complex-model'); assert.equal(out[`${prefix}_FAST_MODEL`],'simple-model');
+  assert.equal(out.RECODER_ECONOMY_PROVIDER,'fast');
+  const fallback=await routingEnv(c,{...settings,fastModelFor:()=> '  '});
+  assert.equal(fallback[`${prefix}_FAST_MODEL`],'complex-model'); assert.equal(fallback.RECODER_ECONOMY_PROVIDER,undefined);
+  const explicit=await routingEnv(c,{...settings,economyProvider:provider});
+  assert.equal(explicit.RECODER_ECONOMY_PROVIDER,provider);
+  const defaultQuality=await routingEnv(c,{...settings,modelFor:()=> ''});
+  assert.equal(defaultQuality[`${prefix}_MODEL`],undefined); assert.equal(defaultQuality[`${prefix}_FAST_MODEL`],'simple-model');
+ });
+}
