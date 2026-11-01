@@ -2,7 +2,7 @@
  * 작업별 AI 공급자(2.0.36) — 화면이 쓰는 형태와 순수 계산(포맷·비교 표). React 없이 테스트한다.
  */
 export interface RoutingChoice { spec: string; label: string; ready: boolean; provider: string; model: string }
-export interface CheckedModel { model: string; ready: boolean; retirement?: string; checked?: boolean }
+export interface CheckedModel { model: string; ready: boolean; retirement?: string; checked?: boolean; reason?: string }
 export interface ModelRouting {
   checked_at?: number;
   catalog?: CheckedModel[];

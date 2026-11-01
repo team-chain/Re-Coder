@@ -211,7 +211,7 @@ test('모델 확인을 통과한 항목만 활성화, 종료 날짜 표시, 기�
    settings:{qualityModel:'good',fastModel:'bad',lockSensitive:false}},job:null,pair:['quality','fast'],instruction:'',post(){},onReload(){},onInstruction(){},onPair(){},onStart(){},
  }));
  assert.equal((html.match(/<section/g)||[]).length,3);
- assert.match(html,/<option value="bad" disabled=""[^>]*>bad — 쓸 수 없음/);
+ assert.match(html,/<option value="bad" disabled=""[^>]*>bad — 확인 실패 · 다시 확인/);
  assert.match(html,/<option value="old" disabled=""[^>]*>old — 2026-12-11 종료/);
  assert.match(html,/<option value="good" selected="">good/);
  assert.match(html,/꺼 두면 이런 요청도 간단한 모델을 고를 수 있습니다/);

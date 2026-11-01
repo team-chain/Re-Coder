@@ -103,6 +103,7 @@ class Readiness:
     serves_root: bool = False             # "/" 가 200 을 줄 근거가 있는가
     docs_path: Optional[str] = None       # FastAPI 자동 문서처럼 항상 200 인 경로
     local_data_files: list[str] = field(default_factory=list)  # 작업 폴더에 만드는 SQLite 파일
+    sqlite_sources: list[str] = field(default_factory=list)
     #: 루트 build 스크립트가 들어가서 빌드하는 하위 프로젝트(client/ 등) — 각자 package.json 이 있다.
     subprojects: list[str] = field(default_factory=list)
     server_entry: Optional[str] = None     # 서버 진입 파일(정적 제공 자동 수정 대상)
@@ -3845,6 +3846,24 @@ def analyze(workspace: str | Path, overlay: Optional[Mapping[str, Optional[str]]
     """
     files = ProjectFiles(Path(workspace), overlay)
     result = Readiness(runtime=detect_runtime(files))
+    # Mixed Vite/Python apps are classified as Node. Inspect persistence across
+    # both runtimes, including URL.create("sqlite+pysqlite", database=variable).
+    for rel in files.files():
+        if not rel.endswith((".py", ".js", ".ts", ".mjs", ".cjs", ".prisma")):
+            continue
+        if re.search(r"(^|/)(tests?|migrations)/|(^|/)(test_[^/]*|[^/]*_test|conftest)\.py$", rel):
+            continue
+        body = files.read(rel) or ""
+        sqlite_reference = re.search(r'''(?:from\s+sqlite3\b|import\s+sqlite3\b|["'](?:better-sqlite3|sqlite3?|sqlite\+pysqlite)["']|sqlite(?:\+\w+)?:///)''', body)
+        sqlite_connection = re.search(r'''\b(?:connect|create_engine|Database|URL\.create)\s*\(|require\(["']better-sqlite3["']\)\s*\(''', body)
+        if (sqlite_reference and sqlite_connection) or re.search(r'''provider\s*=\s*["']sqlite["']|django\.db\.backends\.sqlite3''', body):
+            result.sqlite_sources.append(rel)
+        if rel.endswith(".py") and re.search(r"\b(?:psycopg2?|asyncpg)\b|postgres(?:ql)?(?:\+\w+)?://", body):
+            if "postgres" not in result.services:
+                result.services.append("postgres")
+    if (_requirement_names(files) or set()) & {"psycopg", "psycopg2", "psycopg2-binary", "asyncpg"}:
+        if "postgres" not in result.services:
+            result.services.append("postgres")
     if result.runtime == "node":
         _analyze_node(files, result)
         if online:
@@ -3854,11 +3873,11 @@ def analyze(workspace: str | Path, overlay: Optional[Mapping[str, Optional[str]]
         _analyze_python(files, result)
     _check_dead_image_hosts(files, result)
     _check_server_missing(files, result)
-    if result.local_data_files:
-        shown = ", ".join(result.local_data_files[:3])
+    if result.local_data_files or result.sqlite_sources:
+        shown = ", ".join((result.local_data_files or result.sqlite_sources)[:3])
         result.issues.append(ReadinessIssue(
             "DATA_IN_CONTAINER", WARNING,
-            f"앱이 SQLite 파일({shown})을 컨테이너 안의 작업 폴더에 만듭니다. 컨테이너를 다시 배포하면 데이터가 초기화됩니다.",
+            f"앱이 SQLite를 사용합니다({shown}). 외부 저장소 연결 없이 컨테이너를 다시 배포하면 데이터가 초기화됩니다.",
             "실제 운영이라면 데이터 폴더를 볼륨으로 연결하거나(docker run -v) 외부 DB 를 쓰세요. 시연·개발용이면 그대로 둬도 됩니다.", ""))
     if dockerfile and files.exists(dockerfile):
         _analyze_dockerfile(files, result, dockerfile)

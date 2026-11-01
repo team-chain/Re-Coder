@@ -169,7 +169,7 @@ def test_https_and_rds_are_provisioned_and_wired_into_the_task(aws, tmp_path):
     names = [c["name"] for c in td["containerDefinitions"]]
     assert "recoder-db-init" in names and "recoder-postgres" not in names
     app = td["containerDefinitions"][0]
-    assert {"containerName": "recoder-db-init", "condition": "COMPLETE"} in app["dependsOn"]
+    assert {"containerName": "recoder-db-init", "condition": "SUCCESS"} in app["dependsOn"]
     env = {e["name"]: e["value"] for e in td["containerDefinitions"][-1]["environment"]}
     assert env["RECODER_SHIELD_PROXY"] == "cdn"
 

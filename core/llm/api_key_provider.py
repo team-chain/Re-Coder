@@ -135,6 +135,12 @@ class ApiKeyProvider(LLMProvider):
         self._timeout = float(os.environ.get("RECODER_AI_TIMEOUT", "") or "150")
         self.model_id = model_id or model_for(provider)
         self._model_id = self.model_id
+        # These models require Responses for tool calls. Keep the established
+        # Chat Completions path for older models and compatible providers.
+        self._responses = provider == "openai" and bool(re.match(
+            r"^gpt-(?:5\.6-(?:sol|terra|luna)|6\.1-(?:sol|terra)|6-astra)(?:$|-)", self.model_id))
+        if self._responses:
+            self._endpoint = re.sub(r"/chat/completions/?$", "/responses", self._endpoint)
         self._ctx = _ssl_context()
 
     @property
@@ -238,6 +244,18 @@ class ApiKeyProvider(LLMProvider):
                 payload["tools"] = [{"name": TOOL_NAME, "description": "Return structured JSON output matching the provided schema.", "input_schema": schema}]
                 payload["tool_choice"] = {"type": "tool", "name": TOOL_NAME}
             return payload
+        if self._responses:
+            payload = {"model": self.model_id, "input": [{"role": r, "content": t} for r, t in texts],
+                       "max_output_tokens": max_tokens, "reasoning": {"effort": "low"}, "store": False}
+            if system:
+                payload["instructions"] = system
+            if schema:
+                payload["tools"] = [{"type": "function", "name": TOOL_NAME,
+                    "description": "Return structured JSON output matching the provided schema.",
+                    "parameters": schema, "strict": False}]
+                payload["tool_choice"] = {"type": "function", "name": TOOL_NAME}
+                payload["parallel_tool_calls"] = False
+            return payload
         chat = ([{"role": "system", "content": system}] if system else []) + [{"role": r, "content": t} for r, t in texts]
         if self._provider == "compatible":
             #: 호환 서버 대부분은 max_completion_tokens·reasoning_effort 를 모른다.
@@ -263,6 +281,19 @@ class ApiKeyProvider(LLMProvider):
             tool = next((b.get("input") for b in blocks if b.get("type") == "tool_use"), None)
             usage = result.get("usage") or {}
             tokens = int(usage.get("input_tokens", 0)), int(usage.get("output_tokens", 0))
+        elif self._responses:
+            if result.get("status") in ("incomplete", "failed", "cancelled"):
+                raise LLMError("모델 응답이 완료되지 않았습니다.", LLMErrorType.STRUCTURED_OUTPUT)
+            text = self._raw_text(result)["text"]
+            call = next((b for b in result.get("output", [])
+                         if b.get("type") == "function_call" and b.get("name") == TOOL_NAME), None)
+            tool = None
+            if call:
+                try:
+                    tool = json.loads(call.get("arguments") or "{}")
+                except (ValueError, TypeError):
+                    raise LLMError("모델이 올바르지 않은 JSON 을 돌려주었습니다.", LLMErrorType.STRUCTURED_OUTPUT) from None
+            tokens = self._usage(result)
         else:
             choice = (result.get("choices") or [{}])[0]
             if choice.get("finish_reason") == "length":
@@ -297,7 +328,7 @@ class ApiKeyProvider(LLMProvider):
 
     def _usage(self, result: dict) -> tuple[int, int]:
         usage = result.get("usage") or {}
-        if self._provider == "anthropic":
+        if self._provider == "anthropic" or self._responses:
             return int(usage.get("input_tokens", 0) or 0), int(usage.get("output_tokens", 0) or 0)
         return int(usage.get("prompt_tokens", 0) or 0), int(usage.get("completion_tokens", 0) or 0)
 
@@ -307,6 +338,10 @@ class ApiKeyProvider(LLMProvider):
             blocks = result.get("content") or []
             text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
             return {"text": text, "truncated": result.get("stop_reason") == "max_tokens"}
+        if self._responses:
+            text = "".join(c.get("text", "") for b in result.get("output", []) if b.get("type") == "message"
+                           for c in b.get("content", []) if c.get("type") == "output_text")
+            return {"text": text, "truncated": result.get("status") in ("incomplete", "failed", "cancelled")}
         choice = (result.get("choices") or [{}])[0]
         message = choice.get("message") or {}
         return {"text": message.get("content") or "", "truncated": choice.get("finish_reason") == "length"}
@@ -329,6 +364,8 @@ class ApiKeyProvider(LLMProvider):
         result = self._post_once(self._payload(messages, None, schema, 1024))
         if self._provider == "anthropic":
             called = any(b.get("type") == "tool_use" and b.get("name") == TOOL_NAME for b in result.get("content", []))
+        elif self._responses:
+            called = any(b.get("type") == "function_call" and b.get("name") == TOOL_NAME for b in result.get("output", []))
         else:
             message = ((result.get("choices") or [{}])[0].get("message") or {})
             called = any(c.get("function", {}).get("name") == TOOL_NAME for c in message.get("tool_calls", []))
@@ -338,7 +375,7 @@ class ApiKeyProvider(LLMProvider):
 
     def available_models(self) -> list[str]:
         """같은 공급자의 모델 목록만 조회한다. 실패하면 설정된 모델을 확인할 수 있게 빈 목록."""
-        endpoint = re.sub(r"/(chat/completions|messages)/?$", "/models", self._endpoint)
+        endpoint = re.sub(r"/(chat/completions|messages|responses)/?$", "/models", self._endpoint)
         if endpoint == self._endpoint:
             return []
         req = urllib.request.Request(endpoint, method="GET", headers=self._headers())

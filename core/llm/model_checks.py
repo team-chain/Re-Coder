@@ -17,6 +17,12 @@ _CANDIDATES = {
 }
 _SCHEMA = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]}
 _CHECK_LOCK = threading.Lock()
+_FAILURE_LABELS = {
+    "access_denied": "접근 권한 확인 필요", "model_not_found": "모델 접근 불가",
+    "quota_exceeded": "사용 한도 부족", "throttling": "요청 제한 · 다시 확인",
+    "validation_error": "API 요청 호환 오류", "structured_output": "도구 응답 확인 실패",
+    "service_error": "연결 지연·오류 · 다시 확인",
+}
 
 
 def retirement(provider: str, model: str) -> str:
@@ -73,8 +79,11 @@ def check(router) -> dict:
                     if response.parsed != {"ok": True}:
                         return row
                 row["ready"] = True
-            except Exception:
-                pass  # 공급자 예외/본문은 키를 포함할 수 있으므로 노출하지 않는다.
+            except Exception as exc:
+                # Only an allowlisted category crosses the API/UI boundary;
+                # provider messages and response bodies can contain secrets.
+                kind = getattr(getattr(exc, "error_type", None), "value", "")
+                row["reason"] = _FAILURE_LABELS.get(kind, "확인 실패 · 다시 확인")
             return row
 
         with ThreadPoolExecutor(max_workers=3, thread_name_prefix="model-check") as pool:

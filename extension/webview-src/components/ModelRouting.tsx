@@ -125,7 +125,7 @@ export const ModelRoutingView: React.FC<ModelRoutingViewProps> = ({ state, job, 
   const rows = job ? compareRows(job) : [];
   const qualityModel = state.settings.qualityModel || routing.choices.find(c => c.spec === "quality")?.model || routing.quality.model;
   const fastModel = state.settings.fastModel || routing.choices.find(c => c.spec === "fast")?.model || qualityModel;
-  const catalog = routing.catalog || [...new Set([qualityModel, fastModel])].filter(Boolean).map(model => ({ model, ready: false, checked: false, retirement: undefined }));
+  const catalog = routing.catalog || [...new Set([qualityModel, fastModel])].filter(Boolean).map(model => ({ model, ready: false, checked: false, retirement: undefined, reason: undefined }));
   const warning = modelWarning(state);
   const checked = routing.checked_at ? new Date(routing.checked_at).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false }) : "";
   const toggles = [
@@ -149,7 +149,7 @@ export const ModelRoutingView: React.FC<ModelRoutingViewProps> = ({ state, job, 
             value={tier === "quality" ? qualityModel : fastModel} disabled={busy || routing.configurable === false}
             onChange={e => postMessage("models.setModels", { tier, model: e.target.value })}>
             {catalog.map(m => <option key={m.model} value={m.model} disabled={!m.ready || !m.checked || !!m.retirement}>
-              {prettyModel(m.model)}{m.retirement ? ` — ${m.retirement} 종료` : !m.checked ? " — 확인 필요" : !m.ready ? " — 쓸 수 없음" : ""}
+              {prettyModel(m.model)}{m.retirement ? ` — ${m.retirement} 종료` : !m.checked ? " — 확인 필요" : !m.ready ? ` — ${m.reason || "확인 실패 · 다시 확인"}` : ""}
             </option>)}
           </select>
           <span style={{ color: C.muted, fontSize: 12 }} title="100만 토큰당 입력 / 출력 단가">{modelPrice(state.settings.prices, tier === "quality" ? qualityModel : fastModel)} · {tier === "quality" ? "코드 생성 · 보안 수정 · 교정" : "요약 · 오류 분류 · 테스트 초안"}</span>

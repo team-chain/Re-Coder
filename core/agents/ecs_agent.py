@@ -106,14 +106,21 @@ def _probe_http(
     앱이 500 만 뱉고 있는데 "배포 성공"이라고 보고하면 안 된다.
     """
     import time as _time
+    import ssl
     import urllib.error
     import urllib.request
 
+    context = ssl.create_default_context()
+    try:
+        import certifi
+        context.load_verify_locations(certifi.where())
+    except ImportError:
+        pass
     sleeper = sleep or _time.sleep
     last = "시도하지 않음"
     for i in range(attempts):
         try:
-            with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310
+            with urllib.request.urlopen(url, timeout=timeout, context=context) as resp:  # noqa: S310
                 return True, f"HTTP {resp.status}"
         except urllib.error.HTTPError as exc:
             # 4xx 는 "도달했다"로 본다 — 서버가 응답했고 네트워크 경로는
@@ -335,6 +342,10 @@ class ECSAgent:
             initialize_progress(record, request)
             self._advance_progress(record, "preflight")
             aws_policy.validate_region(request.region)
+            production = request.environment.strip().lower() == "production"
+            if production and not request.run_security_scan:
+                raise InfraError("운영 배포는 보안 검사를 생략할 수 없습니다.",
+                                 remedy="보안 검사를 켜고 이미지의 High/Critical 취약점을 해결하세요.")
             # Generated static clients have a fixed listen port. Reject a stale
             # UI/default before any AWS resource is created or changed.
             if request.workspace_path:
@@ -404,7 +415,7 @@ class ECSAgent:
             if request.run_security_scan:
                 self._advance_progress(record, "source_scan")
                 record = await self._step_scan_sources(request, record)
-                blocked = self._scan_gate_message(record.scan_result)
+                blocked = self._scan_gate_message(record.scan_result, block_high=production)
                 if blocked:
                     record.status = ECSDeployStatus.FAILED
                     record.error_message, record.error_remedy = blocked
@@ -423,7 +434,7 @@ class ECSAgent:
             if request.run_security_scan:
                 self._advance_progress(record, "image_scan")
                 record = await self._step_security_scan(request, record, image_uri)
-                blocked = self._scan_gate_message(record.scan_result)
+                blocked = self._scan_gate_message(record.scan_result, block_high=production)
                 if blocked:
                     record.status = ECSDeployStatus.FAILED
                     record.error_message, record.error_remedy = blocked
@@ -574,6 +585,14 @@ class ECSAgent:
                 # 감시자의 롤백 기준은 **마지막 성공 버전**으로 둔다 — 실패한 이번 버전이 기준이 되지 않게.
                 await self._tell_watcher(request, record, clients)
                 return record
+
+            # Older deployments may still use plaintext DB connections. Only
+            # enforce the upgraded policy once TLS-capable tasks are healthy.
+            database = self._db.get(id(request))
+            if database is not None:
+                await asyncio.get_running_loop().run_in_executor(
+                    None, aws_rds.enforce_tls, clients["rds"], database.identifier)
+                record.provisioned["database_tls"] = "TLS 강제 · 서버 인증서와 호스트명 검증"
 
             # 10. 공개 주소 확인 — 카드 DoD 1번 "URL 로 접속됨"
             self._advance_progress(record, "url_check")
@@ -1167,9 +1186,10 @@ class ECSAgent:
         init_sql = runtime.managed_db.get("init_sql_b64", "")
         if init_sql:
             init = aws_rds.init_container(init_sql, plain_url="" if production else values["DATABASE_URL"],
-                                          secret_url_ref=f"{handle.secret_arn}:DATABASE_URL::" if production else "")
+                                          secret_url_ref=f"{handle.secret_arn}:DATABASE_URL::" if production else "",
+                                          region=req.region)
             runtime.sidecars.append(init)
-            runtime.depends_on.append({"containerName": init["name"], "condition": "COMPLETE"})
+            runtime.depends_on.append({"containerName": init["name"], "condition": "SUCCESS"})
         rec.provisioned["database"] = (f"관리형 DB {handle.identifier} 준비됨 — 데이터가 태스크와 상관없이 남습니다"
                                        + (f", 비어 있으면 처음 한 번 {runtime.managed_db.get('init_name')} 로 테이블을 만듭니다" if init_sql else "")
                                        + ".")
@@ -1221,9 +1241,15 @@ class ECSAgent:
                 tag=tag,
                 dockerfile=req.dockerfile,
                 on_progress=lambda key: loop.call_soon_threadsafe(self._advance_progress, rec, key),
+                rds_tls=bool(self._runtime.get(id(req)) and self._runtime[id(req)].managed_db),
             )
 
-        result = await loop.run_in_executor(None, _work)
+        try:
+            result = await loop.run_in_executor(None, _work)
+        finally:
+            # Worker progress is queued on this loop. Drain it before the
+            # caller finalizes a failure, including an immediate push failure.
+            await asyncio.sleep(0)
         rec.image_uri = result.image_uri
         rec.image_digest = result.digest
         rec.image = result.image_uri
@@ -1232,7 +1258,7 @@ class ECSAgent:
         return result.image_uri
 
     @staticmethod
-    def _scan_gate_message(result) -> tuple[str, str] | None:
+    def _scan_gate_message(result, *, block_high: bool = False) -> tuple[str, str] | None:
         """차단 사유와 대처법. 통과면 None.
 
         예전 메시지는 숫자 세 개만 나열하고 대처법은 "취약한 의존성을
@@ -1240,7 +1266,9 @@ class ECSAgent:
         그런데 실제로 가장 자주 걸리는 게 시크릿이라, 사용자는 엉뚱한 곳을
         고치게 된다. 무엇이 걸렸는지, 어느 파일인지까지 말해준다.
         """
-        if result is None or result.scan_passed:
+        if result is None:
+            return ("보안 검사 결과가 없어 배포를 중단합니다.", "보안 검사를 다시 실행하세요.") if block_high else None
+        if result.scan_passed and not (block_high and result.high_count):
             return None
 
         reasons: list[str] = []
@@ -1262,6 +1290,9 @@ class ECSAgent:
         if result.critical_count:
             reasons.append(f"critical 취약점 {result.critical_count}건")
             fixes.append("베이스 이미지를 올리거나 취약한 패키지를 교체하세요.")
+        if block_high and result.high_count:
+            reasons.append(f"high 취약점 {result.high_count}건")
+            fixes.append("운영 배포는 High 취약점도 차단합니다. 패키지 또는 베이스 이미지를 교체하고 다시 검사하세요.")
         if result.hadolint_error_count:
             reasons.append(f"Dockerfile 오류 {result.hadolint_error_count}건")
             fixes.append("hadolint 오류를 수정하세요.")
@@ -1386,6 +1417,21 @@ class ECSAgent:
         rec.scan_result = await security_scanner.scan_all(
             image=image, dockerfile_path=None, repo_path=None
         )
+        if req.environment.strip().lower() == "production":
+            runtime = self._runtime.get(id(req))
+            extra_images = {c["image"] for c in (runtime.sidecars if runtime else [])
+                            if c.get("image") and c["image"] != ecs_runtime.APP_IMAGE}
+            decision = self._shield.get(id(req))
+            if decision and decision.on:
+                extra_images.add(shield_mod.IMAGE)
+            if runtime and runtime.managed_db.get("init_sql_b64"):
+                extra_images.add(aws_rds.INIT_IMAGE)
+            for extra in sorted(extra_images - {image}):
+                additional = await security_scanner.scan_all(image=extra, dockerfile_path=None, repo_path=None)
+                rec.scan_result.findings.extend(additional.findings)
+                rec.provisioned[f"sidecar_scan_{len(rec.provisioned)}"] = (
+                    f"{extra}: Critical {additional.critical_count}, High {additional.high_count}")
+            rec.scan_result.compute_pass()
         if previous is not None:
             # 앞 단계 결과를 합친다 — 사용자에게는 한 번의 검사로 보여야 한다.
             rec.scan_result.findings = list(previous.findings) + list(

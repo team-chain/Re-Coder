@@ -8,8 +8,7 @@ staging 의 태스크 안 임시 Postgres 는 태스크가 바뀌면 데이터�
   · 비밀번호는 ReCoder 가 만들고 접속 정보 전체(DATABASE_URL·PGHOST 등)를 Secrets Manager 비밀 하나에 JSON 으로 둔다.
     태스크에는 staging 이면 그 값을 환경변수로, production 이면 비밀 ARN(valueFrom)으로 넣는다.
     (RDS 가 관리하는 비밀번호(ManageMasterUserPassword)는 사용자명·비밀번호만 담아 생성 앱이 읽는 DATABASE_URL 을 만들 수 없다.)
-  · 생성 앱의 DB 드라이버는 저마다 TLS 설정이 달라(node-postgres 는 sslmode=require 를 인증서 검증으로 다룬다) 연결이 깨지기
-    쉽다. 그래서 TLS 강제(rds.force_ssl)는 끈 파라미터 그룹을 쓴다 — 접속은 VPC 안·태스크 보안 그룹에서만 열린다.
+  · TLS를 강제하고 서버 인증서/호스트를 검증한다. 빌드 단계가 공식 RDS CA를 앱 이미지에 포함한다.
   · 만드는 데 5~10분 걸린다. 생성은 인프라 단계에서 시작하고, 기다림은 태스크 정의 등록 직전에 한다(그 사이 이미지 빌드).
 """
 from __future__ import annotations
@@ -35,6 +34,7 @@ STORAGE_GB = 20
 USER = "recoder"
 DB_NAME = "app"
 PORT = 5432
+CA_PATH = "/etc/recoder/rds-ca.pem"
 FALLBACK_VERSION = ("16", "postgres16")
 COST_NOTE = ("관리형 DB(RDS)는 켜 두는 동안 계속 요금이 나옵니다(db.t4g.micro + 20GB, us-east-1 기준 대략 월 15달러 이상 · "
              "새 계정 1년 무료 사용량 있음). 그만 쓰면 「AWS 리소스 정리」로 지우세요(최종 스냅숏을 남깁니다).")
@@ -118,9 +118,9 @@ def _parameter_group(rds: Any, name: str, family: str, tags: Optional[dict]) -> 
         exists = False
     if not exists:
         rds.create_db_parameter_group(DBParameterGroupName=name, DBParameterGroupFamily=family,
-                                      Description="ReCoder - TLS optional for generated app drivers", Tags=_tag_list(tags))
+                                      Description="ReCoder - verified TLS required", Tags=_tag_list(tags))
     rds.modify_db_parameter_group(DBParameterGroupName=name, Parameters=[
-        {"ParameterName": "rds.force_ssl", "ParameterValue": "0", "ApplyMethod": "pending-reboot"}])
+        {"ParameterName": "rds.force_ssl", "ParameterValue": "1", "ApplyMethod": "immediate"}])
     return name
 
 
@@ -137,6 +137,8 @@ def start(rds: Any, ec2: Any, secretsmanager: Any, *, service: str, vpc_id: str,
     sec_name = secret_name(service)
     secret_arn, password = _secret(secretsmanager, sec_name, tags, create=existing is None)
     if existing is not None:
+        # Existing plaintext clients must keep working while the TLS-capable
+        # replacement rolls out. Enforce TLS after service stabilization.
         return DbHandle(ident, secret_arn, False, db_sg, str(existing.get("DBInstanceStatus", "")), password=password)
     version, family = engine(rds)
     subnet_group = _subnet_group(rds, ec2, f"{ident}-subnets", vpc_id, tags)
@@ -234,6 +236,16 @@ def wait(rds: Any, identifier: str, *, timeout: float = WAIT_S, sleep: Callable[
         sleep(20)
 
 
+def enforce_tls(rds: Any, identifier: str) -> None:
+    db = _describe(rds, identifier)
+    group = f"{identifier}-params"
+    if not db or not any(g.get("DBParameterGroupName") == group for g in db.get("DBParameterGroups", [])):
+        raise InfraError("관리형 DB의 전용 TLS 설정을 확인하지 못했습니다.",
+                         remedy="DB의 ReCoder 전용 파라미터 그룹 연결을 확인하세요.")
+    rds.modify_db_parameter_group(DBParameterGroupName=group, Parameters=[
+        {"ParameterName": "rds.force_ssl", "ParameterValue": "1", "ApplyMethod": "immediate"}])
+
+
 def connection(endpoint: dict, password: str, env_names: list[str]) -> dict[str, str]:
     """앱에 넘길 접속 정보 — 태스크 안 임시 DB 와 같은 이름 규칙(local_services.app_env)으로."""
     try:
@@ -242,8 +254,10 @@ def connection(endpoint: dict, password: str, env_names: list[str]) -> dict[str,
         import local_services  # type: ignore
     host = str(endpoint["Address"])
     env = local_services.app_env("ecs", "postgres", password, env_names, host=host)
-    url = f"postgresql://{USER}:{quote(password, safe='')}@{host}:{int(endpoint.get('Port', PORT))}/{DB_NAME}"
-    return {k: (url if v.startswith("postgresql://") else v) for k, v in env.items()}
+    url = (f"postgresql://{USER}:{quote(password, safe='')}@{host}:{int(endpoint.get('Port', PORT))}/{DB_NAME}"
+           f"?sslmode=verify-full&sslrootcert={CA_PATH}")
+    return {**{k: (url if v.startswith("postgresql://") else v) for k, v in env.items()},
+            "PGSSLMODE": "verify-full", "PGSSLROOTCERT": CA_PATH, "DB_SSL": "true"}
 
 
 def store_connection(sm: Any, secret_arn: str, values: dict[str, str]) -> None:
@@ -259,18 +273,34 @@ def secret_refs(secret_arn: str, names: list[str]) -> dict[str, str]:
 INIT_IMAGE = "public.ecr.aws/docker/library/postgres:16-alpine"
 INIT_BOOT = (
     'n=$(psql "$DATABASE_URL" -tAc "select count(*) from information_schema.tables where table_schema=\'public\'") '
-    '|| { echo "[recoder] DB 에 접속하지 못했습니다" >&2; exit 0; }; '
+    '|| { echo "[recoder] DB 에 접속하지 못했습니다" >&2; exit 1; }; '
     'if [ "$n" = "0" ] && [ -n "$RECODER_INIT_SQL_B64" ]; then '
     'echo "$RECODER_INIT_SQL_B64" | base64 -d > /tmp/recoder-init.sql && '
     'psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction -f /tmp/recoder-init.sql '
-    '&& echo "[recoder] 초기화 SQL 을 넣었습니다" || echo "[recoder] 초기화 SQL 실패 - 되돌렸습니다" >&2; fi; exit 0'
+    '&& echo "[recoder] 초기화 SQL 을 넣었습니다" || { echo "[recoder] 초기화 SQL 실패 - 되돌렸습니다" >&2; exit 1; }; fi'
 )
 
 
-def init_container(init_sql_b64: str, *, plain_url: str = "", secret_url_ref: str = "") -> dict:
+def init_container(init_sql_b64: str, *, plain_url: str = "", secret_url_ref: str = "", region: str = "us-east-1") -> dict:
+    import base64
+    from cryptography import x509
+    from cryptography.hazmat.primitives.serialization import Encoding
+    from cryptography.x509.oid import NameOID
+    from core.resources import resource
+    bundle = resource("starter_templates", "commerce", "certs", "rds-ca.pem").read_bytes()
+    # The global bundle exceeds ECS's 64 KiB task-definition limit. Only the
+    # selected region's roots belong in the init container (no network fetch).
+    ca = b"".join(cert.public_bytes(Encoding.PEM) for cert in x509.load_pem_x509_certificates(bundle)
+                  if any(f"Amazon RDS {region} Root CA " in attr.value
+                         for attr in cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)))
+    if not ca:
+        raise InfraError("이 리전의 RDS CA 인증서가 없습니다.", remedy="ReCoder 인증서 번들을 업데이트하세요.")
+    boot = ('mkdir -p /etc/recoder && printf %s "$RECODER_RDS_CA_B64" | base64 -d > '
+            + CA_PATH + ' && ' + INIT_BOOT)
     item: dict = {"name": "recoder-db-init", "image": INIT_IMAGE, "essential": False,
-                  "entryPoint": ["sh", "-c"], "command": [INIT_BOOT],
-                  "environment": [{"name": "RECODER_INIT_SQL_B64", "value": init_sql_b64}],
+                  "entryPoint": ["sh", "-c"], "command": [boot],
+                  "environment": [{"name": "RECODER_INIT_SQL_B64", "value": init_sql_b64},
+                                  {"name": "RECODER_RDS_CA_B64", "value": base64.b64encode(ca).decode()}],
                   "logConfiguration": {"logDriver": "awslogs", "options": {"awslogs-stream-prefix": "recoder-db-init"}}}
     if secret_url_ref:
         item["secrets"] = [{"name": "DATABASE_URL", "valueFrom": secret_url_ref}]

@@ -98,13 +98,13 @@ def test_바이너리_없고_docker_있으면_trivy_를_컨테이너로_돌린�
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA-test")
     monkeypatch.delenv("AWS_SESSION_TOKEN", raising=False)
 
-    findings = asyncio.run(ss.SecurityScanner()._run_trivy("123.dkr.ecr.ap-northeast-2.amazonaws.com/app:v1"))
+    findings = asyncio.run(ss.SecurityScanner()._run_trivy("123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/app:v1"))
 
     cmd = cap.calls[0]["cmd"]
     assert cmd[:3] == ["docker", "run", "--rm"]
     assert "/var/run/docker.sock:/var/run/docker.sock" in cmd, "로컬 이미지를 못 본다"
     assert ss._DOCKER_IMAGES["trivy"] in cmd
-    assert cmd[-1] == "123.dkr.ecr.ap-northeast-2.amazonaws.com/app:v1"
+    assert cmd[-1] == "123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/app:v1"
     # 자격증명은 값이 아니라 **이름만** 넘긴다
     assert "AWS_ACCESS_KEY_ID" in cmd and "AKIA-test" not in " ".join(cmd)
     assert "AWS_SESSION_TOKEN" not in cmd, "비어 있는 변수까지 넘기면 docker 가 빈 값으로 덮어쓴다"
@@ -120,6 +120,17 @@ def test_바이너리가_있으면_네이티브를_쓴다(monkeypatch, tmp_path)
     asyncio.run(ss.SecurityScanner()._run_trivy("app:latest"))
 
     assert cap.calls[0]["cmd"][0] == "trivy"
+
+
+def test_public_image_scan_never_receives_aws_credentials(monkeypatch, tmp_path):
+    _tools(monkeypatch, native=set(), docker=True)
+    cap = _Capture(tmp_path)
+    monkeypatch.setattr(ss.SecurityScanner, "_run_cmd", staticmethod(cap))
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test-credential")
+    asyncio.run(ss.SecurityScanner()._run_trivy("public.ecr.aws/docker/library/nginx:stable-alpine"))
+    command = cap.calls[0]["cmd"]
+    assert "AWS_ACCESS_KEY_ID" not in command
+    assert not any("/root/.aws" in part for part in command)
 
 
 def test_둘_다_없으면_예전처럼_미설치로_남겨_게이트가_막는다(monkeypatch, tmp_path):

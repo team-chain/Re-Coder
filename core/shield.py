@@ -25,7 +25,9 @@ from dataclasses import dataclass
 from typing import Optional
 
 #: ECR Public 의 Docker 공식 nginx 이미지 — Fargate 가 Docker Hub 내려받기 제한 없이 받는다.
-IMAGE = "public.ecr.aws/docker/library/nginx:stable-alpine"
+# The slim variant provides the proxy and BusyBox health probe without the
+# unused curl/Brotli packages carried by the full Alpine image.
+IMAGE = "public.ecr.aws/docker/library/nginx:stable-alpine-slim"
 CONTAINER = "recoder-shield"
 LEVELS = {
     #: 초당 요청(평균) · 순간 몰림 허용 · IP 당 동시 연결

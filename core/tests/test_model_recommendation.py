@@ -29,10 +29,10 @@ def test_ping_requires_one_valid_tool_call(monkeypatch, provider):
 
 
 @pytest.mark.parametrize('model,effort', [('gpt-6.1-sol','low'), ('gpt-6.1-terra','low'), ('gpt-6-luna','none'), ('gpt-6-sol','none'), ('gpt-5.6-terra','low')])
-def test_reasoning_matches_chat_tool_support(model, effort):
+def test_reasoning_matches_endpoint_tool_support(model, effort):
     p = akp.ApiKeyProvider('openai', model)
     payload = p._payload([{'role': 'user', 'content': [{'text': 'x'}]}], None, {'type': 'object'}, 1024)
-    assert payload['reasoning_effort'] == effort
+    assert payload.get('reasoning_effort', payload.get('reasoning', {}).get('effort')) == effort
 
 
 def test_catalog_excludes_retired_and_failed_models_without_exposing_errors(monkeypatch):
