@@ -2294,7 +2294,8 @@ def _consistency_issues(root: Path, target_folder: str, ops: list[dict]) -> list
         prefix = f"{project}/" if project else ""
         overlay = {rel[len(prefix):]: content for rel, content in written.items() if rel.startswith(prefix)}
         try:
-            before = {(i.code, i.message) for i in analyze(base / project, dockerfile=None).issues}
+            before_result = analyze(base / project, dockerfile=None)
+            before = {(i.code, i.message) for i in before_result.issues}
             #: 새로 쓰는 package.json 은 버전이 npm 에 실제로 있는지도 본다 — AI 가 없는 버전
             #: (jsonwebtoken@^9.1.2 등)을 적어 Docker 빌드가 ETARGET 으로 멈췄다(실기기).
             after = analyze(base / project, overlay, dockerfile="Dockerfile" if "Dockerfile" in overlay else None,
@@ -2302,7 +2303,8 @@ def _consistency_issues(root: Path, target_folder: str, ops: list[dict]) -> list
         except Exception as exc:  # noqa: BLE001 - 점검 실패가 생성을 막지 않는다
             print(f"[code_agent] 일관성 점검 생략: {exc}", flush=True)
             continue
-        details = after.fix_data.get("missing_names_detail") or []
+        before_details = {tuple(d) for d in before_result.fix_data.get("missing_names_detail", [])}
+        details = [d for d in after.fix_data.get("missing_names_detail", []) if tuple(d) not in before_details]
         if details and project and "" in projects:
             details_shown = True  # 루트 점검이 같은 파일들을 이미 파일별로 냈다
         else:
@@ -2547,6 +2549,29 @@ def _verify_generated_build(root: Path, target_folder: str, ops: list[dict], run
                             acceptance=None) -> dict:
     from generated_validation import verify_proposal
     base = (root / target_folder).resolve() if target_folder else root.resolve()
+    # A new app may be proposed inside a child folder of an existing workspace.
+    # Build that app, not the parent repository (or silently report no Dockerfile).
+    docker_dirs = sorted({posixpath.dirname(str(op.get("file", ""))) for op in ops
+                          if op.get("action") != "delete"
+                          and posixpath.basename(str(op.get("file", ""))) == "Dockerfile"})
+    if docker_dirs and "" not in docker_dirs:
+        projects = {}
+        for folder in docker_dirs:
+            child = (base / folder).resolve()
+            if not child.is_relative_to(base):
+                return {"kind": "docker-build", "passed": False, "status": "failed",
+                        "output": "Generated build path is outside the workspace."}
+            prefix = folder + "/"
+            child_ops = [dict(op, file=op["file"][len(prefix):]) for op in ops
+                         if str(op.get("file", "")).startswith(prefix)]
+            projects[folder] = _verify_generated_build(child, "", child_ops, run_app, acceptance)
+        if len(projects) == 1:
+            folder, result = next(iter(projects.items()))
+            return {**result, "build_folder": folder}
+        passed = all(v.get("passed") for v in projects.values())
+        return {"kind": "docker-build", "passed": passed,
+                "status": "passed" if passed else "failed", "projects": projects,
+                "output": "\n".join(f"{folder}: {v.get('output', '')}" for folder, v in projects.items())}
     if run_app:
         if acceptance is not None:
             return verify_proposal(base, _verification_ops(base, ops), run_app=True, acceptance=acceptance)

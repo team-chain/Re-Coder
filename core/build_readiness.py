@@ -268,8 +268,11 @@ _BROWSER_DIRS = ("public/", "static/", "assets/", "www/", "wwwroot/")
 
 
 def _strip_js_comments(text: str) -> str:
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
-    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("//"))
+    # Match strings and line comments before block comments. A glob such as
+    # /api/aws/* inside a line comment must not consume the following exports.
+    tokens = r'''"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|//[^\r\n]*|/\*[\s\S]*?\*/'''
+    return re.sub(tokens, lambda m: re.sub(r"[^\r\n]", " ", m[0])
+                  if m[0].startswith(("//", "/*")) else m[0], text)
 
 
 def _script_commands(script: str) -> list[list[str]]:
@@ -880,6 +883,25 @@ def add_missing_export(text: str, name: str, kind: str) -> Optional[str]:
 def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: dict, owner, undeclared: dict) -> None:
     deps = manifests.get("", set())
     vite = _vite_projects(files, manifests)
+    # A shared Vite/Node package also contains server-only configuration and
+    # helpers without an Express import. Preserve Node semantics throughout
+    # their import graph; an ambiguous shared module is not safe to rewrite.
+    server_modules: set[str] = set()
+    source_text = {rel: _strip_js_comments(files.read(rel) or "")
+                   for rel in files.files() if rel.endswith(_JS_SUFFIXES)}
+    for rel, text in source_text.items():
+        project = owner(rel)
+        local = rel[len(project) + 1:] if project else rel
+        if _is_server_file(text) or re.search(r"(^|/)(?:server|backend)/", local):
+            server_modules.add(rel)
+    pending = list(server_modules)
+    while pending:
+        rel = pending.pop()
+        for spec in _RELATIVE_SPEC.findall(source_text.get(rel, "")):
+            target = _resolve_local(files, rel, spec)
+            if target in source_text and target not in server_modules:
+                server_modules.add(target)
+                pending.append(target)
     missing_files: list[tuple[str, str]] = []
     missing_names: list[str] = []
     type_missing: dict[str, set[str]] = {}
@@ -982,7 +1004,7 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
                     missing_detail.append((rel, name, target))
         # 3) Vite 는 .js 안의 JSX 를 해석하지 않는다 · 브라우저 코드에 process.env 가 없다
         #    (서버 파일·설정 파일은 제외 — 단일 패키지 Vite+Express 앱의 server.js 를 건드리면 안 된다)
-        if project in vite and not _is_server_file(active) and not re.search(r"(^|/)(?:vite|vitest|playwright|cypress|jest|tailwind|postcss|eslint)\.config\.|(^|/)(?:cypress|e2e|tests?|__tests__)/", rel):
+        if project in vite and rel not in server_modules and not re.search(r"(^|/)(?:vite|vitest|playwright|cypress|jest|tailwind|postcss|eslint)\.config\.|(^|/)(?:cypress|e2e|tests?|__tests__)/", rel):
             if rel.endswith(".js") and _JSX_LINE.search(active) and re.search(r"""\bfrom\s+['"]react['"]|\bReact\b|\.jsx?['"]""", active):
                 jsx_in_js.append(rel)
             if re.search(r"\bprocess\.env\.[A-Za-z_]", active):
@@ -1091,7 +1113,7 @@ def _analyze_js_sources(files: "ProjectFiles", result: "Readiness", manifests: d
         if not rel.endswith((".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte")) or "/node_modules/" in f"/{rel}":
             continue
         project = owner(rel)
-        if not _frontend_out_dir(files, project) or _is_server_file(files.read(rel) or ""):
+        if not _frontend_out_dir(files, project) or rel in server_modules:
             continue  # 프런트엔드(빌드 도구가 있는 하위 프로젝트)만 본다
         if re.search(r"(^|/)[\w.-]*\.config\.[cm]?[jt]s$|(^|/)(?:cypress|e2e|tests?|__tests__|mocks?)/|setupProxy\.[jt]s$", rel):
             continue  # 개발 프록시·테스트 설정의 localhost 는 정상이다

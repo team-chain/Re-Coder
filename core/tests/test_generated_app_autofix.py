@@ -27,6 +27,24 @@ def _write(root: Path, files: dict[str, str]) -> Path:
     return root
 
 
+def test_vite_env_fix_preserves_server_config_and_transitive_helpers(tmp_path):
+    root = _write(tmp_path, {
+        "package.json": json.dumps({"type": "module", "scripts": {"build": "vite build"},
+                                    "dependencies": {"vite": "7", "express": "5"}}),
+        "index.html": '<script type="module" src="/web.js"></script>',
+        "web.js": "console.log(process.env.REACT_APP_PUBLIC_URL);",
+        "server/index.js": "import express from 'express';\nimport './config.js';",
+        "server/config.js": "import '../shared/env.js';\nexport const port = process.env.PORT;",
+        "shared/env.js": "import './nested.js';\nexport const secret = process.env.JWT_SECRET;",
+        "shared/nested.js": "export const url = process.env.DATABASE_URL;",
+    })
+    before = {p: (root / p).read_text(encoding="utf-8") for p in ('server/config.js', 'shared/env.js', 'shared/nested.js')}
+    assert br.analyze(root).fix_data['process_env'] == ['web.js']
+    br.apply_fix(root, 'NODE_VITE_PROCESS_ENV')
+    assert 'import.meta.env.VITE_PUBLIC_URL' in (root / 'web.js').read_text(encoding="utf-8")
+    assert all((root / p).read_text(encoding="utf-8") == text for p, text in before.items())
+
+
 SHOP = {
     "package.json": json.dumps({"name": "shop", "scripts": {"start": "node server.js", "build:frontend": "cd frontend && npm run build"},
                                 "dependencies": {"express": "^4", "axios": "^1"}}),

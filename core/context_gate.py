@@ -375,7 +375,7 @@ class ContextGate:
 
         # traceback / stack-trace presence
         has_traceback = bool(
-            re.search(r"traceback|stack trace|at line \d+|\.py.*line \d+", content_lower)
+            re.search(r"traceback|stack trace|at line \d+|\.py.*line \d+|^\s+at\s+.+:\d+(?::\d+)?\)?\s*$", content_lower, re.MULTILINE)
         )
 
         # project-internal file path reference
@@ -444,10 +444,10 @@ class ContextGate:
         score = 0.0
         lower = terminal_output.lower()
 
-        if re.search(r"traceback|stack trace", lower):
+        if re.search(r"traceback|stack trace|^\s+at\s+.+:\d+(?::\d+)?\)?\s*$", lower, re.MULTILINE):
             score += 40.0
 
-        if re.search(r"\berror\b|\bexception\b", lower):
+        if re.search(r"\b(?:[a-z_]\w*)?(?:error|exception)\b", lower):
             score += 25.0
 
         if re.search(r"exit\s*(?:code\s*)?\d+|returned non.zero|exited with", lower):

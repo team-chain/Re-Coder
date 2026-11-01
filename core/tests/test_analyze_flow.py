@@ -16,6 +16,21 @@ import pytest
 from schemas import AnalyzeRequest, FilePatch, PatchProposal, RiskLevel
 
 
+def test_node_reference_error_has_enough_context_for_analysis():
+    from context_gate import ContextGate
+    gate = ContextGate()
+    log = ('/tmp/qa/app.js:2\n  return values.reduce(add, initial);\n'
+           'ReferenceError: initial is not defined\n'
+           '    at sum (/tmp/qa/app.js:2:29)\n'
+           '    at Object.<anonymous> (/tmp/qa/app.js:4:13)\n')
+    request = AnalyzeRequest(workspace_path='/tmp/qa', active_file_path='/tmp/qa/app.js',
+                             terminal_output=log, project_files_summary='app.js: sum(values)')
+    assert gate.compute_trigger_score(log) >= 60
+    quality = gate.compute_quality_score(log, request)
+    assert quality.has_traceback and quality.score >= .7
+    assert gate.compute_trigger_score('Server started at http://localhost:3000') < 60
+
+
 def test_extract_error_text_traceback():
     from analyzer import _extract_error_text
     log = (

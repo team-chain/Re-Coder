@@ -183,7 +183,12 @@ class ECSAgent:
         try:
             readiness = analyze(request.workspace_path, online=False)
             port_from_env = bool(readiness.port_from_env)
-            if readiness.runtime == "python":
+            from core.agents.ecs_health import _runtime_family
+            try:
+                runtime = _runtime_family(Path(request.workspace_path) / request.dockerfile) or readiness.runtime
+            except OSError:
+                runtime = readiness.runtime
+            if runtime == "python":
                 # 2.0.32 — 파이썬은 시작 명령·코드가 PORT 를 정말 쓰는지 본다(포트를 고정한 앱에 켜면 태스크가 계속 교체된다).
                 port_from_env = shield_mod.python_reads_port(request.workspace_path, request.dockerfile)
         except Exception:  # noqa: BLE001 - 판단하지 못하면 켜지 않는다(앱이 안 뜨는 것보다 방패 없는 편이 낫다)

@@ -179,6 +179,21 @@ def test_hardcoded_port_fastapi_deploy_gets_no_shield(tmp_path):
     assert decision.on is False and "PORT" in decision.reason
 
 
+def test_node_frontend_python_runtime_gets_shield_when_final_command_reads_port(tmp_path):
+    from core.agents.ecs_agent import ECSAgent
+    (tmp_path / "package.json").write_text(json.dumps({"scripts": {"build": "vite build"},
+                                                      "devDependencies": {"vite": "7"}}), encoding="utf-8")
+    (tmp_path / "requirements.txt").write_text("fastapi\nuvicorn\n", encoding="utf-8")
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text('FROM node:22 AS frontend\nFROM python:3.13-slim\n'
+                          'CMD ["sh", "-c", "exec uvicorn backend.main:app --port ${PORT}"]\n', encoding="utf-8")
+    req = _req(workspace_path=str(tmp_path), container_port=8000, shield=True)
+    decision = ECSAgent._plan_shield(req)
+    assert decision.on and decision.app_port == 8001
+    dockerfile.write_text(dockerfile.read_text(encoding="utf-8").replace('${PORT}', '8000'), encoding="utf-8")
+    assert not ECSAgent._plan_shield(req).on
+
+
 # ── production 관리형 DB: 실행 역할의 비밀 읽기 권한 ────────────────────────
 
 class _Iam:
