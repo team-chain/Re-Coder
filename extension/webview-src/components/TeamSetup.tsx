@@ -8,6 +8,7 @@
  *
  * 순수 계산은 teamConfig.ts 에 있다(여기서는 그리기와 열고 닫기만).
  */
+import { popupPlacement, PopupPosition } from "./popupPlacement";
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Switch } from "./Check";
 import {
@@ -29,7 +30,7 @@ const css = `
 .rc-ts-seg button{flex:1;height:32px;padding:0 4px;border:0;border-radius:6px;background:transparent;color:var(--rc-fg2);font:inherit;font-size:13px;white-space:nowrap;cursor:pointer}
 .rc-ts-seg button[aria-checked=true]{background:color-mix(in srgb,var(--rc-teal) 16%,transparent);color:var(--rc-fg);font-weight:600}
 .rc-ts-seg small{font-size:10.5px;font-weight:600;color:var(--vscode-textLink-foreground);margin-left:4px}
-.rc-ts-note{display:flex;align-items:flex-start;gap:8px;margin-top:10px;font-size:12.5px;line-height:1.5}.rc-ts-note svg{flex:none;margin-top:2px;color:var(--rc-teal)}.rc-ts-note span{flex:1;min-width:0}.rc-ts-note.changed{color:var(--rc-fg2)}.rc-ts-note.lock,.rc-ts-note.lock svg{color:var(--rc-warn)}
+.rc-ts-note{display:flex;align-items:flex-start;gap:8px;margin-top:10px;font-size:12.5px;line-height:1.5}.rc-ts-note svg{flex:none;margin-top:2px;color:var(--rc-teal)}.rc-ts-note span{flex:1;min-width:0;word-break:keep-all}.rc-ts-note.changed{color:var(--rc-fg2)}.rc-ts-note.lock,.rc-ts-note.lock svg{color:var(--rc-warn)}
 .rc-ts-roles{margin-top:12px;border-top:1px solid var(--rc-line)}
 .rc-ts-row{display:flex;align-items:center;gap:10px;min-height:48px;border-bottom:1px solid var(--rc-line)}.rc-ts-row.off{opacity:.45}
 .rc-ts-name{display:inline-flex;align-items:center;gap:6px;min-width:64px;font-size:13.5px;font-weight:600;white-space:nowrap}
@@ -87,20 +88,20 @@ export interface TeamSetupProps {
 
 export const TeamSetup: React.FC<TeamSetupProps> = ({ teamMode, config, options, history, instruction, disabled, onTeamMode, onChange, onOpen, defaultOpen, lockSensitive = true, autoRecommend = true, onOpenModels }) => {
   const [open, setOpen] = useState(!!defaultOpen);
-  const [pos, setPos] = useState<{ left: number; top?: number; bottom?: number } | null>(null);
+  const [pos, setPos] = useState<PopupPosition | null>(null);
   const btnRef = useRef<HTMLButtonElement | null>(null);
   const popRef = useRef<HTMLDivElement | null>(null);
 
   const place = () => {
     const b = btnRef.current?.getBoundingClientRect();
     if (!b || typeof window === "undefined") return;
-    const width = Math.min(440, window.innerWidth - 24);
-    const left = Math.max(12, Math.min(b.left, window.innerWidth - width - 12));
-    //: 아래 공간이 모자라면(입력창이 화면 아래에 붙어 있을 때) 위로 연다.
-    const below = window.innerHeight - b.bottom;
-    setPos(below >= 470 || b.top < 300 ? { left, top: b.bottom + 8 } : { left, bottom: window.innerHeight - b.top + 8 });
+    const measured = popRef.current;
+    if (!measured) return;
+    const next = popupPlacement(b, { width: window.innerWidth, height: window.innerHeight },
+      { width: 440, height: measured.scrollHeight + 2 }, "left", 470);
+    setPos(old => old?.left === next.left && old.top === next.top && old.maxHeight === next.maxHeight ? old : next);
   };
-  useLayoutEffect(() => { if (open) place(); }, [open]);
+  useLayoutEffect(() => { if (open) place(); });
   useEffect(() => {
     if (!open) return undefined;
     const onDown = (e: MouseEvent) => {
@@ -113,7 +114,10 @@ export const TeamSetup: React.FC<TeamSetupProps> = ({ teamMode, config, options,
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey, true);
     window.addEventListener("resize", onResize);
-    return () => { document.removeEventListener("mousedown", onDown); document.removeEventListener("keydown", onKey, true); window.removeEventListener("resize", onResize); };
+    window.addEventListener("scroll", place, true);
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(place);
+    if (popRef.current) observer?.observe(popRef.current);
+    return () => { observer?.disconnect(); window.removeEventListener("scroll", place, true); document.removeEventListener("mousedown", onDown); document.removeEventListener("keydown", onKey, true); window.removeEventListener("resize", onResize); };
   }, [open]);
   useEffect(() => { if (open) popRef.current?.focus({ preventScroll: true }); }, [open]);
   useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
@@ -152,7 +156,7 @@ export const TeamSetup: React.FC<TeamSetupProps> = ({ teamMode, config, options,
       </button>
       {open && (
         <div ref={popRef} className="rc-ts-pop" role="dialog" aria-label="팀 구성" tabIndex={-1} data-testid="team-setup"
-          style={pos ? { left: pos.left, top: pos.top, bottom: pos.bottom } : { left: 12, top: 12 }}>
+          style={pos ? { ...pos, overflowY: "auto" } : { left: 12, top: 12 }}>
           <div className="rc-ts-hd"><b>팀 구성</b><span className="label">팀 모드</span>
             <Switch checked={teamMode} onChange={onTeamMode} ariaLabel="팀 모드" />
           </div>

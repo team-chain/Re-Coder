@@ -70,3 +70,20 @@ test('작은 요청·직접 설정·민감 요청 화면',()=>{
  const payment=render({instruction:'카드 결제 추가'}); assert.match(payment,/결제가 들어간 요청이라 설계·개발은 복잡한 작업 모델/);
  const same=render({config:C.applyPreset(C.defaultConfig(),'custom',props.instruction)}); assert.match(same,/역할마다 모델을 고르세요. 지금은 추천과 같습니다\./);
 });
+
+test('820px viewport never clips team or AI popup above 12px; short viewports scroll within available space',()=>{
+ const {popupPlacement}=require('../out/webview-test/components/popupPlacement');
+ for (const [width,height,threshold,align] of [[440,420,470,'left'],[324,270,260,'right']]) {
+  for(const y of [20,320,400,720,780]) {
+   const anchor={top:y,bottom:y+36,left:900,right:1000};
+   const pos=popupPlacement(anchor,{width:1280,height:820},{width,height},align,threshold);
+   assert.ok(pos.top>=12,JSON.stringify(pos));
+   assert.ok(pos.top+Math.min(height,pos.maxHeight)<=808,JSON.stringify(pos));
+   assert.ok(pos.left>=12&&pos.left+width<=1268);
+  }
+  const cramped=popupPlacement({top:170,bottom:206,left:10,right:100},{width:360,height:320},{width,height},align,threshold);
+  assert.ok(cramped.top>=12);assert.ok(cramped.maxHeight<height);
+  assert.ok(cramped.top+cramped.maxHeight<=308);
+ }
+ assert.match(render(),/word-break:keep-all/);
+});

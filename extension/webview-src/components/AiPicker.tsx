@@ -6,6 +6,7 @@
  *  - 고르면 Core 를 다시 시작한다 — 그동안 칩은 「바꾸는 중…」.
  *  - 세부 모델(Sonnet ↔ Opus 등)은 메뉴 아래 「모델 설정」 화면에서.
  */
+import { popupPlacement, PopupPosition } from "./popupPlacement";
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { prettyModel } from "./teamConfig";
 
@@ -82,20 +83,20 @@ export interface AiPickerProps {
 
 export const AiPicker: React.FC<AiPickerProps> = ({ current, providers, switching, justSwitched, disabled, onPick, onConnect, onOpenModels, defaultOpen }) => {
   const [open, setOpen] = useState(!!defaultOpen);
-  const [pos, setPos] = useState<{ left: number; top?: number; bottom?: number } | null>(null);
+  const [pos, setPos] = useState<PopupPosition | null>(null);
   const btnRef = useRef<HTMLButtonElement | null>(null);
   const popRef = useRef<HTMLDivElement | null>(null);
 
   const place = () => {
     const b = btnRef.current?.getBoundingClientRect();
     if (!b || typeof window === "undefined") return;
-    const width = Math.min(324, window.innerWidth - 24);
-    //: 칩이 입력창 오른쪽에 있으므로 메뉴의 오른쪽 끝을 칩에 맞춘다.
-    const left = Math.max(12, Math.min(b.right - width, window.innerWidth - width - 12));
-    const below = window.innerHeight - b.bottom;
-    setPos(below >= 260 ? { left, top: b.bottom + 8 } : { left, bottom: window.innerHeight - b.top + 8 });
+    const measured = popRef.current;
+    if (!measured) return;
+    const next = popupPlacement(b, { width: window.innerWidth, height: window.innerHeight },
+      { width: 324, height: measured.scrollHeight + 2 }, "right", 260);
+    setPos(old => old?.left === next.left && old.top === next.top && old.maxHeight === next.maxHeight ? old : next);
   };
-  useLayoutEffect(() => { if (open) place(); }, [open]);
+  useLayoutEffect(() => { if (open) place(); });
   useEffect(() => {
     if (!open) return undefined;
     const onDown = (e: MouseEvent) => {
@@ -118,7 +119,10 @@ export const AiPicker: React.FC<AiPickerProps> = ({ current, providers, switchin
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey, true);
     window.addEventListener("resize", place);
-    return () => { document.removeEventListener("mousedown", onDown); document.removeEventListener("keydown", onKey, true); window.removeEventListener("resize", place); };
+    window.addEventListener("scroll", place, true);
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(place);
+    if (popRef.current) observer?.observe(popRef.current);
+    return () => { observer?.disconnect(); window.removeEventListener("scroll", place, true); document.removeEventListener("mousedown", onDown); document.removeEventListener("keydown", onKey, true); window.removeEventListener("resize", place); };
   }, [open]);
   useEffect(() => { if (disabled || switching) setOpen(false); }, [disabled, switching]);
 
@@ -135,7 +139,7 @@ export const AiPicker: React.FC<AiPickerProps> = ({ current, providers, switchin
       </button>
       {open && (
         <div ref={popRef} className="rc-ai-pop" role="menu" aria-label="AI 고르기" tabIndex={-1} data-testid="ai-menu"
-          style={pos ? { left: pos.left, top: pos.top, bottom: pos.bottom } : { left: 12, top: 12 }}>
+          style={pos ? { ...pos, overflowY: "auto" } : { left: 12, top: 12 }}>
           <div className="rc-ai-hd">AI 모델<span>다음 요청부터 적용</span></div>
           {providers.map((p) => {
             const on = p.id === current;
