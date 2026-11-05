@@ -628,6 +628,7 @@ class LLMProviderRouter:
     def routing_status(self) -> dict:
         """확장 설정 화면이 보여 줄 등급별 공급자(키 값은 넣지 않는다)."""
         from .model_checks import status as model_check_status
+        from .api_key_provider import DEFAULT_MODELS
         tiers = _get_tiers()
         quality = self._bedrock_sonnet
         economy = self._economy or quality
@@ -647,6 +648,8 @@ class LLMProviderRouter:
                         "note": self._economy_note},
             "economy_operations": sorted(tiers.ECONOMY_OPERATIONS),
             "choices": choices,
+            "provider_defaults": {name: {"model": models[0], "fast_model": models[1]}
+                                  for name, models in DEFAULT_MODELS.items()},
             **model_check_status(self),
         }
 

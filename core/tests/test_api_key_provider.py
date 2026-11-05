@@ -88,6 +88,7 @@ def test_anthropic_structured_output_uses_forced_tool(env):
     }))
     try:
         _use(env, "anthropic", server)
+        env.setenv("RECODER_ANTHROPIC_MODEL", "claude-sonnet-5")
         provider = akp.ApiKeyProvider("anthropic")
         messages = [{"role": "user", "content": [{"text": "question"}]}]
         assert asyncio.run(provider.converse(messages, system="sys", output_schema=SCHEMA, max_tokens=500)) == {"answer": "42"}
@@ -123,6 +124,80 @@ def test_openai_structured_output_and_reasoning_parameters(env):
         assert body["tool_choice"] == {"type": "function", "function": {"name": "output"}}
     finally:
         server.close()
+
+
+@pytest.mark.parametrize("model", ["claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1", "claude-mythos-5-1-20261001"])
+def test_new_claude_uses_auto_and_strict_tools(env, model):
+    payload = akp.ApiKeyProvider("anthropic", model)._payload([], "original", SCHEMA, 1024)
+    assert payload["tool_choice"] == {"type": "auto"}
+    assert payload["tools"][0]["strict"] is True
+    assert payload["tools"][0]["input_schema"] == {**SCHEMA, "additionalProperties": False}
+    assert "additionalProperties" not in SCHEMA
+    assert payload["system"].startswith("original\n") and "output tool" in payload["system"]
+    assert "temperature" not in payload
+
+
+@pytest.mark.parametrize("second_status", [200, 400])
+def test_unknown_claude_retries_tool_choice_only_once(env, second_status):
+    def respond(body, n):
+        if n == 1 or second_status == 400:
+            return 400, {"error": {"message": "tool_choice: forced use is unsupported"}}
+        return 200, {"content": [{"type": "tool_use", "name": "output", "input": {"ok": True}}]}
+    server = _Server(respond)
+    try:
+        _use(env, "anthropic", server)
+        provider = akp.ApiKeyProvider("anthropic", "claude-future")
+        if second_status == 400:
+            with pytest.raises(LLMError):
+                provider.ping()
+        else:
+            provider.ping()
+        assert len(server.requests) == 2
+        assert server.requests[0]["body"]["tool_choice"]["type"] == "tool"
+        assert server.requests[1]["body"]["tool_choice"] == {"type": "auto"}
+        assert server.requests[1]["body"]["tools"][0]["strict"] is True
+    finally:
+        server.close()
+
+
+def test_claude_auto_ping_rejects_plain_json(env):
+    server = _Server(lambda body, n: (200, {"content": [{"type": "text", "text": '{"ok":true}'}]}))
+    try:
+        _use(env, "anthropic", server)
+        with pytest.raises(LLMError) as error:
+            akp.ApiKeyProvider("anthropic").ping()
+        assert error.value.error_type == LLMErrorType.STRUCTURED_OUTPUT
+    finally:
+        server.close()
+
+
+def test_claude_defaults_and_overrides_and_routing_disclosure(env):
+    env.setenv("RECODER_AI_PROVIDER", "anthropic")
+    env.setenv("RECODER_ANTHROPIC_API_KEY", KEY)
+    env.delenv("RECODER_ANTHROPIC_FAST_MODEL", raising=False)
+    assert akp.model_for("anthropic") == "claude-sonnet-5-5"
+    assert akp.model_for("anthropic", fast=True) == "claude-haiku-5-5"
+    env.setenv("RECODER_ANTHROPIC_MODEL", "claude-opus-5-5")
+    assert akp.model_for("anthropic", fast=True) == "claude-opus-5-5"
+    env.setenv("RECODER_ANTHROPIC_FAST_MODEL", "claude-haiku-4-5")
+    assert akp.model_for("anthropic", fast=True) == "claude-haiku-4-5"
+    status = pr_mod.LLMProviderRouter().routing_status()
+    assert status["provider_defaults"]["anthropic"] == {"model": "claude-sonnet-5-5", "fast_model": "claude-haiku-5-5"}
+    assert status["provider_defaults"]["openai"] == {"model": "gpt-6-sol", "fast_model": "gpt-6-sol"}
+    assert KEY not in json.dumps(status)
+
+
+def test_claude_strict_grammar_accepts_real_plan_schema_without_mutating_it(env):
+    from code_agent import PLAN_SCHEMA
+    original = json.dumps(PLAN_SCHEMA)
+    transformed = akp._strict_tool_schema(PLAN_SCHEMA)
+    decisions = transformed["properties"]["decisions"]
+    options = decisions["items"]["properties"]["options"]
+    assert "maxItems" not in decisions and "maxItems" in decisions["description"]
+    assert "minItems" not in options and "minItems" in options["description"]
+    assert decisions["items"]["additionalProperties"] is False
+    assert options["items"]["additionalProperties"] is False
+    assert json.dumps(PLAN_SCHEMA) == original
 
 
 def test_plain_text_matches_bedrock_contract(env):
@@ -205,7 +280,7 @@ def test_ai_ready_diagnostics_ping_the_selected_provider(env):
     try:
         _use(env, "anthropic", server)
         status, model, region, provider, cross = first_run._check_ai_ready_sync()
-        assert (status, model, provider) == (first_run.ReadyStatus.OK, "claude-sonnet-5", "anthropic")
+        assert (status, model, provider) == (first_run.ReadyStatus.OK, "claude-sonnet-5-5", "anthropic")
         assert server.requests[0]["body"]["max_tokens"] == 1024
     finally:
         server.close()

@@ -40,7 +40,7 @@ log = logging.getLogger(__name__)
 
 PROVIDERS = ("anthropic", "openai", "compatible")
 DEFAULT_MODELS = {
-    "anthropic": ("claude-sonnet-5", "claude-sonnet-5"),
+    "anthropic": ("claude-sonnet-5-5", "claude-haiku-5-5"),
     "openai": ("gpt-6-sol", "gpt-6-sol"),
     "compatible": ("deepseek-chat", "deepseek-chat"),
 }
@@ -51,6 +51,37 @@ ENDPOINTS = {
 LABELS = {"anthropic": "Claude API", "openai": "OpenAI API", "compatible": "OpenAI 호환 API"}
 _LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 TOOL_NAME = "output"
+_AUTO_TOOL_MODELS = ("claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-mythos-5-1")
+
+
+def _anthropic_auto_tool(payload: dict) -> dict:
+    """Claude 5.5: strict belongs to the tool, not tool_choice."""
+    return {**payload, "tool_choice": {"type": "auto"},
+            "tools": [{**tool, "strict": True, "input_schema": _strict_tool_schema(tool["input_schema"])} for tool in payload["tools"]],
+            "system": (payload.get("system", "") + "\nRespond only by calling the output tool with the requested result.").strip()}
+
+
+def _strict_tool_schema(schema: dict) -> dict:
+    """Adapt the grammar subset; keep unsupported bounds as model instructions."""
+    out = dict(schema)
+    bounds = {key: out.pop(key) for key in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
+              "multipleOf", "minLength", "maxLength", "maxItems", "uniqueItems") if key in out}
+    if out.get("minItems", 0) not in (0, 1):
+        bounds["minItems"] = out.pop("minItems")
+    if bounds:
+        out["description"] = (str(out.get("description", "")) + " Constraints: " + json.dumps(bounds)).strip()
+    if out.get("type") == "object" or "properties" in out:
+        out["additionalProperties"] = False
+    for key in ("properties", "$defs", "definitions"):
+        if isinstance(out.get(key), dict):
+            out[key] = {name: _strict_tool_schema(value) for name, value in out[key].items()}
+    for key in ("items",):
+        if isinstance(out.get(key), dict):
+            out[key] = _strict_tool_schema(out[key])
+    for key in ("anyOf", "allOf", "oneOf"):
+        if isinstance(out.get(key), list):
+            out[key] = [_strict_tool_schema(value) for value in out[key]]
+    return out
 
 
 def compatible_endpoint(raw: str) -> str:
@@ -204,6 +235,11 @@ class ApiKeyProvider(LLMProvider):
                 return self._post_once(payload)
             except LLMError as exc:
                 text = str(exc)
+                if (self._provider == "anthropic" and exc.error_type == LLMErrorType.VALIDATION_ERROR
+                        and "(400)" in text and "tool_choice" in text.lower()
+                        and payload.get("tools") and payload.get("tool_choice", {}).get("type") != "auto"):
+                    payload = _anthropic_auto_tool(payload)
+                    continue  # Only once: the replacement already uses auto.
                 if self._provider == "compatible" and exc.error_type == LLMErrorType.VALIDATION_ERROR and "tools" in payload:
                     #: 강제 도구 호출을 모르는 호환 서버 — 같은 요청을 JSON 모드로 한 번 더.
                     payload = _json_mode(payload)
@@ -243,6 +279,8 @@ class ApiKeyProvider(LLMProvider):
             if schema:
                 payload["tools"] = [{"name": TOOL_NAME, "description": "Return structured JSON output matching the provided schema.", "input_schema": schema}]
                 payload["tool_choice"] = {"type": "tool", "name": TOOL_NAME}
+                if self.model_id.startswith(_AUTO_TOOL_MODELS):
+                    payload = _anthropic_auto_tool(payload)
             return payload
         if self._responses:
             payload = {"model": self.model_id, "input": [{"role": r, "content": t} for r, t in texts],
@@ -361,7 +399,8 @@ class ApiKeyProvider(LLMProvider):
         schema = {"type": "object", "properties": {"ok": {"type": "boolean"}},
                   "required": ["ok"], "additionalProperties": False}
         messages = [{"role": "user", "content": [{"text": 'Call the output tool with {"ok": true}.'}]}]
-        result = self._post_once(self._payload(messages, None, schema, 1024))
+        payload = self._payload(messages, None, schema, 1024)
+        result = self._post(payload) if self._provider == "anthropic" else self._post_once(payload)
         if self._provider == "anthropic":
             called = any(b.get("type") == "tool_use" and b.get("name") == TOOL_NAME for b in result.get("content", []))
         elif self._responses:

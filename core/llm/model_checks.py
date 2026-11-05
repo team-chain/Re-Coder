@@ -13,7 +13,7 @@ from .base import LLMRequest
 # https://developers.openai.com/api/docs/deprecations
 _CANDIDATES = {
     "openai": ["gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-5-mini"],
-    "anthropic": ["claude-sonnet-5", "claude-haiku-4-5"],
+    "anthropic": ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5", "claude-sonnet-5", "claude-haiku-4-5"],
 }
 _SCHEMA = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]}
 _CHECK_LOCK = threading.Lock()

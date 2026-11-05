@@ -778,7 +778,7 @@
         "recoder.ai.anthropicModel": {
           "type": "string",
           "default": "",
-          "description": "Claude API 키로 연결했을 때 쓸 모델 ID. 비우면 claude-sonnet-5."
+          "description": "Claude API 키로 연결했을 때 쓸 모델 ID. 비우면 claude-sonnet-5-5."
         },
         "recoder.ai.openaiModel": {
           "type": "string",
@@ -803,7 +803,7 @@
         "recoder.ai.anthropicFastModel": {
           "type": "string",
           "default": "",
-          "description": "Claude API의 간단한 작업 모델. 비우면 복잡한 작업 모델과 같습니다."
+          "description": "Claude API의 간단한 작업 모델. 비우면 claude-haiku-5-5. 복잡한 작업 모델만 정했으면 그 모델을 씁니다."
         },
         "recoder.ai.compatibleFastModel": {
           "type": "string",
