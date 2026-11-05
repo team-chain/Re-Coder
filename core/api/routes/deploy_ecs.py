@@ -32,7 +32,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 # 그러면 **서로 다른 모듈 객체**가 되어 enum 클래스도 갈라진다
 # (isinstance 가 거짓이 된다). 협력 상대인 api/routes/ecs.py 가
 # `core.schemas` 를 쓰므로 여기서도 같은 쪽을 본다.
-from core.schemas import ECSDeployRecord, ECSDeployRequest, ECSDeployStatus, ECSDeployStep
+from core.schemas import ECSDeployRecord, ECSDeployRequest, ECSDeployStatus, ECSDeployStep, ManagedBuildReference
 from core import aws_infra
 
 logger = logging.getLogger(__name__)
@@ -56,6 +56,7 @@ class ExtensionEcsDeployRequest(BaseModel):
     """
 
     workspace_path: Optional[str] = None
+    managed_build: Optional[ManagedBuildReference] = None
     image_name: Optional[str] = None
     repo_name: Optional[str] = None
     tag: Optional[str] = None
@@ -299,6 +300,8 @@ def to_core_request(
             "skip_opa 요청을 받았지만 정책 평가는 건너뛰지 않습니다 — "
             "승인 레벨은 서버가 정합니다."
         )
+    if body.managed_build is not None:
+        fields["managed_build"] = body.managed_build
     return ECSDeployRequest(**fields)
 
 

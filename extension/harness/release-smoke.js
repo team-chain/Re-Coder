@@ -91,6 +91,11 @@ async function installed(ext, home) {
     console.log('PASS: packaged diagnostics and live health without AI credentials');
     const canvas = await api('/api/deploy/canvas');
     assert.equal(canvas.aws.ready, false, 'clean install unexpectedly contains AWS credentials');
+    assert.deepEqual(await api('/api/aws/managed/session'),{connected:false},'managed features must reuse the disconnected Core account');
+    const invalidAudit=await fetch(`http://127.0.0.1:${manager.getPort()}/api/security/audit/step`,{
+      method:'POST',headers:{'Content-Type':'application/json','X-Session-Token':manager.getSessionToken()},
+      body:JSON.stringify({role:'shell',instructions:'invalid test input',data:{}}),signal:AbortSignal.timeout(5000)});
+    assert.equal(invalidAudit.status,422,'packaged read-only audit route must validate before any model call');
     const job = new AnalysisJob();
     const project = await job.run(workspace);
     assert.equal(project.files_scanned, 2);

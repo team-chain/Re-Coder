@@ -312,6 +312,11 @@ const QuickAccess: React.FC<{ onSelectMode: (m: ViewMode) => void }> = ({ onSele
 const WorkspaceConnection: React.FC = () => {
   const { postMessage, useMessage } = useVSCodeApi();
   const [open, setOpen] = useState(false), [visited, setVisited] = useState(false);
+  useEffect(() => {
+    const show = () => { setVisited(true); setOpen(true); };
+    window.addEventListener('recoder:aws-connection', show);
+    return () => window.removeEventListener('recoder:aws-connection', show);
+  }, []);
   const [ready, setReady] = useState<boolean | null>(null);
   useEffect(() => { postMessage('aws.status'); }, [postMessage]);
   useMessage(useCallback(({ type, payload }) => {

@@ -38,7 +38,23 @@ const {
   STATIC_DIR_CANDIDATES,
   MAX_FILES,
   MAX_BYTES_PER_FILE,
+  MAX_TOTAL_BYTES,
 } = require('../out/deploy/staticSite.js');
+
+test('production sites with many chunks are complete and aggregate limits precede reads', () => {
+  const tree={'index.html':'<h1>site</h1>'};
+  for(let i=0;i<120;i++)tree[`assets/chunk-${i}.js`]='export default 1';
+  assert.equal(collectStaticFiles('.',fakeFs(tree),join,'dist').files.length,121);
+  const oversized=fakeFs(tree);let reads=0;
+  oversized.statSync=()=>({size:MAX_BYTES_PER_FILE});oversized.readFileSync=()=>{reads++;return Buffer.alloc(0);};
+  assert.throws(()=>collectStaticFiles('.',oversized,join,'dist'),/전체 크기/);assert.equal(reads,0);
+  assert.equal(MAX_TOTAL_BYTES,32*1024*1024);
+});
+
+test('files growing during collection are rejected before sending a partial deployment', () => {
+  const changed=fakeFs({'index.html':'<h1>site</h1>'});changed.statSync=()=>({size:1});
+  assert.throws(()=>collectStaticFiles('.',changed,join,'dist'),/크기가 바뀌었습니다/);
+});
 
 test('빌드하지 않은 CRA/Vite 진입 파일은 업로드 전에 멈추고 빌드 결과는 허용한다', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'recoder-static-entry-'));
@@ -353,7 +369,7 @@ test('상한 초과 자산은 읽기 전에 로컬에서 차단한다', () => {
     () => collectStaticFiles('.', oversized, join),
     (err) => err instanceof StaticAssetTooLargeError
       && err.relativePath === 'assets/demo.mp4'
-      && /3,000,000/.test(err.message),
+      && err.message.includes(MAX_BYTES_PER_FILE.toLocaleString()),
   );
   assert.strictEqual(oversizedWasRead, false, '큰 파일을 먼저 읽어 확장 호스트 메모리를 소모한다');
 });

@@ -2,8 +2,11 @@
 
 배포 대상은 **Windows x64**, **Linux x64**, **macOS Apple Silicon(arm64)** 이다. 최종 산출물은 Python 런타임과 Core가 들어 있는
 플랫폼 지정 VSIX(`dist/recoder-<버전>-win32-x64.vsix`, `-linux-x64.vsix`, `-darwin-arm64.vsix`)이며,
-사용자 PC에 Python·Node.js를 설치할 필요가 없다. VS Code와 기능별 외부 도구(Docker Desktop, Git),
-사용자 AWS/AI 인증은 별도다. Intel Mac(darwin-x64)은 잠근 의존성(grpcio 등)의 x86_64 휠이 없어 대상에서 뺐다. `nobinary` 파일은 개발용이다.
+Core 실행에는 사용자 PC의 Python·Node.js 설치가 필요 없다. Windows x64는 Git·Node/npm이 없으면 고정 SHA256의 공식 도구를 자동 준비한다. 다른 OS의 Git·로컬 빌드 도구는 기존 설치를 사용한다. VS Code·AWS/AI 계정 연결은 별도다. Docker Desktop은 내 PC에서 컨테이너를 실행하는 로컬 모드에 필요하다. 관리형 S3/ECS 빌드·보안 검사는 AWS에서 실행한다. Intel Mac(darwin-x64)은 잠근 의존성(grpcio 등)의 x86_64 휠이 없어 대상에서 뺐다. `nobinary` 파일은 개발용이다.
+
+현재 새 설치본의 대상은 Windows x64다. 버전별 빌드·설치본 실행 검사 결과는 `docs/managed-execution-release.md`에 기록한다. Linux·macOS 같은 버전의 설치 검증과 AWS 실환경 검증을 완료하기 전까지 해당 플랫폼·관리형 기능의 출시 완료로 표현하지 않는다.
+
+`npm run package`는 Core가 포함되지 않으면 실패한다. 웹뷰 빌드와 `verify:package` 통과만으로 사용자 설치본이 완성되었다고 판단하지 않는다. 사용자 배포본은 아래 `build-release.py`로 플랫폼에 맞는 Core를 새로 빌드하고 버전을 확인한 뒤 생성한다. Core 없는 3.0.4 일반 VSIX는 설치만으로 작동하는 배포본이 아니며, 사용자 설치 안내에서 제외한다.
 
 플랫폼별 Core는 해당 OS에서 빌드한다. Windows 실행 파일을 macOS/Linux용으로 이름만 바꾸어
 배포하지 않는다. 기존 `package-extension.sh`는 준비된 다른 플랫폼 바이너리 패키징용으로 유지한다.
@@ -72,7 +75,9 @@ Linux Core는 오래된 배포판에서도 돌도록 glibc가 낮은 환경(CI�
 - `recoder-<버전>-<플랫폼>.release.json`: 버전·플랫폼·Core/VSIX 해시·Python 의존성 명세
 
 개발자의 `.env`, 자격증명, 테스트 하네스, 소스맵, 구형 UI는 포함하지 않는다.
-명령/인프라 템플릿, AWS 서비스 정의, TLS 인증서, 분석 worker와 WebSocket 런타임은 포함한다.
+명령/인프라 템플릿, CodeBuild를 포함한 AWS 서비스 정의, TLS 인증서, 분석 worker, WebSocket·ZIP 런타임을 포함한다. `verify-built-vsix.js`가 실제 VSIX의 필수 런타임과 Core를 현재 빌드 파일과 바이트 단위로 비교한다.
+
+Windows 도구 자동 준비는 `node extension/scripts/check-portable-tools.js`로 별도 검증한다. 시스템 Git·Node/npm을 PATH에서 제외하고 공식 도구 설치, 임시 저장소의 커밋·로컬 원격 저장소 푸시, 실제 npm 빌드를 실행한다. GitHub 공개 푸시나 AWS 배포 성공 증거로 대체하지 않는다. 관리형 컨테이너 경로는 실제 CodeBuild→검사→ECR→승인→ECS→상태 확인까지 검증해야 한다.
 
 ## CI
 

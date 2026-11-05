@@ -15,8 +15,41 @@ const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'recoder-workspace-previ
 fs.writeFileSync(path.join(workspace, 'index.html'), '<script src="app.js"></script>');
 fs.writeFileSync(path.join(workspace, 'app.js'), 'function render() { loadPosts(); }\nfunction loadPosts() { return []; }\nrender();');
 vscode.workspace.workspaceFolders = [{uri:vscode.Uri.file(workspace)}];
-const core = {getPort:()=>Number(process.env.HARNESS_PORT || 18795), getSessionToken:()=>'harness-token-123', ensureRunning:async()=>true, refreshToken:async()=>true,coreInstanceKey:()=> 'fixture-core', getStoredAwsConnection:async()=>null, getAwsRoleArn:async()=>''};
+const core = {getPort:()=>Number(process.env.HARNESS_PORT || 18795), getSessionToken:()=>'harness-token-123', ensureRunning:async()=>true, refreshToken:async()=>true,coreInstanceKey:()=> 'fixture-core', getStoredAwsConnection:async()=>null, getAwsRoleArn:async()=>'', isBrowserAwsLogin:()=>false, getManagedAwsConnection:async()=>undefined};
 const api = new ApiClient(core);
+// Explicit, offline security UI fixture. Never contacts PentAGI, AWS or a scanner.
+if (process.env.HARNESS_SECURITY === '1') {
+  vscode.workspace.isTrusted = true;
+  // Use the real source-audit host and UI; only the AI response is a fixture.
+  vscode.window.showInformationMessage=async(_title,_options,choice)=>choice;
+  api.securityAuditStep=async(role)=>{await new Promise(resolve=>setTimeout(resolve,150));return {result:['hunter','critic'].includes(role)?{findings:[]}:{boundaries:[],entrypoints:[],unknowns:[]},provider:'UI fixture only',model:'no paid model call',inputTokens:0,outputTokens:0};};
+  let sampleRun=null;
+  require('../out/security/redTeamHost').RedTeamHost.prototype.handle=async action=>{
+    if(action==='localStart') sampleRun={session:'ui-fixture',target:'http://host.docker.internal:3000/',createdAt:new Date().toISOString(),phase:'removed',step:'UI 예시 · 검사 환경 삭제 완료',outcome:'finished',tasks:[{id:'1',title:'보안 헤더 점검 · UI 예시',status:'finished',result:'이 결과는 화면 검증용 예시입니다. 실제 Docker·모델·스캐너를 실행하지 않았습니다.'}]};
+    return {localMode:true,local:sampleRun,localHistory:[]};
+  };
+  api.securityCheck = async kind => {
+    await new Promise(resolve => setTimeout(resolve, 300));
+    if (kind === 'code') return {score:70, files_checked:12, scope:'UI 검증용 예시 데이터', findings:[
+      {rule:'OWNER_CHECK',file:'app.js',line:1,message:'다른 사용자의 주문을 조회할 수 있습니다',severity:'medium',fix:'요청 사용자와 주문 소유자를 비교하세요.',precise:false},
+      {rule:'SQL_INJECTION',file:'app.js',line:2,message:'검색 입력이 SQL 쿼리에 직접 들어갑니다',severity:'high',fix:'자리표시자와 값 배열을 사용하세요.',precise:true}]};
+    if (kind === 'policy') return {opa_available:false,is_valid:false};
+    if (kind === 'recheck') return {status:'not_run',message:'재검사할 배포 SBOM이 없습니다.'};
+    return {};
+  };
+  api.runScan = async scanType => {await new Promise(resolve=>setTimeout(resolve,300));return {scan_type:scanType,status:'ok',findings:[],critical_count:0,high_count:0,medium_count:0};};
+  if(process.env.HARNESS_MANAGED==='1') {
+    // Explicit UI samples. The real host tests cover consent and dispatch separately.
+    require('../out/security/managedSecurityHost').ManagedSecurityHost.prototype.handle=async(_action,_workspace,mode='redteam')=>{
+      const run={id:'ui-sample-'+mode,mode,createdAt:new Date().toISOString(),files:12,bytes:1024,status:'SUCCEEDED',terminal:true};
+      const report={schema:1,runId:run.id,mode,sourceSha256:'UI sample only',status:'completed',stage:'UI 예시 · 실제 검사를 실행하지 않았습니다',tasks:[]};
+      if(mode==='scans')report.scans={checks:['gitleaks','hadolint','dependencies','image'].map(tool=>({tool,status:'completed',count:0,blockingCount:0,findings:[]})),policy:{decision:'allow',reason:'UI 예시 — 실제 정책 평가 아님',scope:'화면 검증용'}};
+      if(mode==='audit')report.audit={scope:'UI 예시 · 실제 모델 호출 없음',files:['app.js'],skipped:[],calls:0,inputTokens:0,outputTokens:0,findings:[{title:'주문 소유자 확인 필요 · UI 예시',file:'app.js',line:1,severity:'high',impact:'다른 사용자 데이터 접근 여부 확인',fix:'소유자 검증 추가',verification:'화면 검증용 예시'}],needsValidation:[]};
+      if(mode==='redteam'){report.isolationVerified=true;report.cleaned=true;report.tasks=[{id:'ui-task',title:'실행 증거 확인 · UI 예시',status:'finished',result:'화면 표시 검증용 예시입니다. PentAGI 또는 AWS 작업을 실행하지 않았습니다.'}];}
+      return {managed:true,connected:true,ready:true,account:'123456789012',region:'ap-northeast-2',stackStatus:'CREATE_COMPLETE',runs:[run],report};
+    };
+  }
+}
 const ready = {core_ready:'ok',ai_ready:'ok',docker_ready:'ok',aws_deploy_ready:'ok',ops_ready:'ok',issues:[]};
 api.getDiagnostics = async()=>ready;
 api.runDiagnostics = async()=>{await new Promise(resolve=>setTimeout(resolve,1000));return ready;};

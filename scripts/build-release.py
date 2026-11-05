@@ -37,7 +37,7 @@ def notices() -> None:
     lines += [f'OpenSSL ({ssl.OPENSSL_VERSION}) — bundled with the Python runtime',
               'Licensed under the Apache License 2.0 (OpenSSL 3.x). https://www.openssl.org/source/license.html', '']
     # 확장(webpack 번들)에 들어가는 npm 패키지.
-    for package in ('react', 'react-dom', 'scheduler', 'three', 'ws'):
+    for package in ('react', 'react-dom', 'scheduler', 'three', 'ws', 'yauzl', 'pend'):
         folder = EXT / 'node_modules' / package
         manifest = folder / 'package.json'
         if not manifest.is_file():

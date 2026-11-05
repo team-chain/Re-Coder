@@ -277,7 +277,9 @@ def test_security_routes(home, monkeypatch):
     assert [f["file"] for f in r["findings"]] == ["backend/server.js"]
     assert c.post("/api/security/code", json={"workspace_path": str(ws / "nope")}).status_code == 400
     monkeypatch.setattr(vuln_recheck_records := __import__("vuln_recheck"), "records_from_store", lambda: [])
-    assert c.post("/api/security/vulns/check").json() == {"raised": 0}
+    checked = c.post("/api/security/vulns/check").json()
+    assert checked['raised'] == 0
+    assert checked['status'] == 'not_run'  # no SBOM must not look like a successful clean scan
 
 
 def test_recheck_is_off_in_tests_and_when_disabled(monkeypatch):

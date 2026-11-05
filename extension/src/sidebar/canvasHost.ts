@@ -5,9 +5,11 @@ import { promisify } from 'util';
 import { createHash, randomUUID } from 'crypto';
 import { ApiClient } from '../core/ApiClient';
 import * as fs from 'fs';
+import { ensurePortableTool,toolEnvironment } from '../runtime/portableTools';
 import { AnalysisJob } from '../codemap/analysisJob';
 import { collectStaticFiles, describeExcludedFiles, pickStaticDir } from '../deploy/staticSite';
-import { buildFailureSummary, buildFrontend, detectFrontendProject, needsBuild } from '../deploy/frontendBuild';
+import { buildFailureSummary, buildFrontend, detectFrontendProject, needsBuild, FrontendProject, BuildOutcome } from '../deploy/frontendBuild';
+import {ManagedContainerReference} from '../security/managedContainerContract';
 import { CommitPreview, previewCommit, commitSelected } from './githubCommit';
 import { DiscordWebhook } from './discordWebhook';
 import { DiscordBotToken, normalizeBotToken as normalizeToken } from './discordBotToken';
@@ -17,7 +19,7 @@ const exec = promisify(execFile);
 type Send = (type: string, payload: unknown) => void;
 type Target = 'ecs' | 's3' | 'github';
 export interface CanvasConfig { target: Target; image_name: string; tag: string; aws_region: string; ecs_cluster: string; ecs_service: string; task_family: string; container_port: number; cpu: string; memory: string; environment: string; dir: string; env_vars?: Record<string,string>; secret_refs?: Record<string,string>; target_group_arn?: string; cloudfront_domain?: string; assign_public_ip?: boolean; subnet_ids?: string[]; security_group_ids?: string[]; shield?: boolean; shield_level?: 'loose' | 'normal' | 'strict'; alerts?: boolean; alert_email?: string; edge?: 'none' | 'alb' | 'alb_waf'; waf_rate_limit?: number; waf_window?: 60 | 120 | 300 | 600; edge_cost_approved?: boolean; https?: boolean; custom_domain?: string; database?: 'task' | 'rds'; db_cost_approved?: boolean }
-interface Plan { id: string; config: CanvasConfig; workspace: string; git: Awaited<ReturnType<typeof gitContext>>; account: string; created: number; targetState: Awaited<ReturnType<ApiClient['getCanvasTarget']>> | null; staticDigest?: string }
+interface Plan { id: string; config: CanvasConfig; workspace: string; git: Awaited<ReturnType<typeof gitContext>>; account: string; created: number; targetState: Awaited<ReturnType<ApiClient['getCanvasTarget']>> | null; staticDigest?: string; managedBuild?:ManagedContainerReference }
 
 export function staticPreview(workspace: string, dir: string) {
     const root = fs.realpathSync(workspace), selected = fs.realpathSync(path.resolve(root, dir));
@@ -29,7 +31,7 @@ export function staticPreview(workspace: string, dir: string) {
 }
 
 export async function gitContext(workspace: string) {
-    const run = async (args: string[]) => (await exec('git', ['-C', workspace, ...args], { timeout: 5000, windowsHide: true, maxBuffer: 1024 * 1024 })).stdout.trim();
+    const run = async (args: string[]) => (await exec(await ensurePortableTool('git'), ['-C', workspace, ...args], { timeout: 5000, windowsHide: true, maxBuffer: 1024 * 1024,env:toolEnvironment() })).stdout.trim();
     const empty = { repository: '', branch: '', head: '', dirty: false, connected: false, initialized:false, hasOrigin:false, fingerprint:'', error:'' };
     if (!workspace) return empty;
     try {
@@ -215,7 +217,9 @@ export class CanvasHost {
     private connecting = false;
     //: 기본은 develop 의 Discord 로그인(oauth). 저장된 방식이 있으면 그것을 따른다(웹후크·내 봇 토큰·봇 서버).
     private discordMode = 'oauth';
-    constructor(private api: ApiClient, private readGit = gitContext, private webhook?: DiscordWebhook, private preferences?: vscode.Memento, private botToken?: DiscordBotToken) {}
+    constructor(private api: ApiClient, private readGit = gitContext, private webhook?: DiscordWebhook, private preferences?: vscode.Memento, private botToken?: DiscordBotToken,
+        private frontendBuilder?:(workspace:string,project:FrontendProject,progress:(message:string)=>void,region:string)=>Promise<BuildOutcome>,
+        private containerBuilder?:(workspace:string,region:string,progress:(message:string)=>void)=>Promise<ManagedContainerReference|undefined>) {}
     async handle(type: string, raw: unknown, send: Send, project: (workspace: string) => string, execute: (type: string, payload: unknown) => Promise<void>) {
         const p = (raw ?? {}) as Record<string, unknown>, requestId = String(p.requestId || '');
         const workspace = activeProjectPath();
@@ -298,11 +302,13 @@ export class CanvasHost {
                         } catch { /* 점검을 못 해도 배포 준비는 계속한다 */ }
                         if (needsBuild(workspace, frontend)) {
                             send('canvas.executing', { requestId, message: `${where} 의 ${frontend.label} 화면을 빌드합니다` });
-                            const outcome = await buildFrontend(workspace, frontend, message => send('canvas.executing', { requestId, message }));
+                            const notify=(message:string)=>send('canvas.executing', {requestId,message});
+                            const outcome = this.frontendBuilder ? await this.frontendBuilder(workspace,frontend,notify,config.aws_region) : await buildFrontend(workspace,frontend,notify);
                             if (generation !== this.prepareGeneration) return;
                             const script = frontend.script || 'build';
                             if (!outcome.ok) throw new Error(`${where} 빌드(npm run ${script})에 실패해 S3 에 올릴 화면을 만들지 못했습니다.\n${buildFailureSummary(outcome.output)}`);
-                            staticNotes.push(`${where} 에서 npm run ${script} 를 실행해 ${frontend.outDir} 를 새로 만들었습니다${outcome.via === 'docker' ? '(Docker)' : ''}.`);
+                            if(outcome.outDir)frontend.outDir=outcome.outDir;
+                            staticNotes.push(`${where} 에서 npm run ${script} 를 실행해 ${frontend.outDir} 를 새로 만들었습니다${outcome.via === 'managed' ? '(AWS)' : outcome.via === 'docker' ? '(Docker)' : ''}.`);
                         }
                         config.dir = frontend.outDir;
                         if (frontend.callsApi) {
@@ -319,6 +325,9 @@ export class CanvasHost {
                 if (config.target !== 'github' && !aws.ready) throw new Error('AWS 계정을 먼저 연결하세요.');
                 if (config.target === 'github' && (!git.connected || !git.branch)) throw new Error('GitHub 원격 저장소와 브랜치를 연결하세요.');
                 if (config.target === 'github' && !git.head) throw new Error('먼저 소스 제어에서 올릴 파일을 확인하고 첫 커밋을 만드세요.');
+                const managedBuild = config.target==='ecs'&&!preflight.blocked&&this.containerBuilder
+                    ? await this.containerBuilder(workspace,config.aws_region,message=>send('canvas.executing',{requestId,message})) : undefined;
+                if(generation!==this.prepareGeneration)return;
                 //: 2.0.35 배포 전 신뢰 점검(제로 트러스트) — 실패해도 승인 카드는 그대로 뜬다(점검 칸만 빠짐).
                 const trustPromise = config.target === 'github' ? Promise.resolve(null)
                     : Promise.resolve().then(() => this.api.getTrustCheck(workspace, config.target as 'ecs' | 's3', trustConfig(config), String((aws.identity as { arn?: string } | null | undefined)?.arn || ''))).catch(() => null);
@@ -329,7 +338,7 @@ export class CanvasHost {
                 if (generation !== this.prepareGeneration) return;
                 const id=randomUUID();
                 this.plans.clear(); // Older approvals must not execute after editing a target.
-                this.plans.set(id,{id,config,workspace,git,account:aws.identity?.account || '',created:Date.now(),targetState,staticDigest:staticSite?.digest});
+                this.plans.set(id,{id,config,workspace,git,account:aws.identity?.account || '',created:Date.now(),targetState,staticDigest:staticSite?.digest,managedBuild});
                 send('canvas.plan', { requestId, id, config, projectName:path.basename(workspace), repository:git.repository, branch:git.branch, commit:git.head, dirty:git.dirty, coreRegion:aws.ready ? aws.region : '', account:aws.identity?.account || '', preflight, targetState, trust, staticSite:staticSite ? {files:staticSite.files,excluded:staticSite.excluded,notes:staticNotes} : undefined });
                 return;
             }
@@ -359,11 +368,11 @@ export class CanvasHost {
                             if(current.exists!==plan.targetState.exists || current.task_definition!==plan.targetState.task_definition) throw new Error('승인 후 대상 서비스의 태스크 정의가 바뀌었거나 재확인할 수 없습니다. 다시 확인하세요.');
                         }
                         send('canvas.executing',{requestId,message:'대상 리전·권한 확인 중'});
-                        const status=await this.api.checkAwsPermissions({ecrRepo:ecrRepoName(c.image_name),ecsCluster:c.ecs_cluster,ecsService:c.ecs_service,taskFamily:c.task_family,awsRegion:c.aws_region});
+                        const status=await this.api.checkAwsPermissions({ecrRepo:plan.managedBuild?'recoder-managed-images-v1':ecrRepoName(c.image_name),ecsCluster:c.ecs_cluster,ecsService:c.ecs_service,taskFamily:c.task_family,awsRegion:c.aws_region});
                         const permission=status.permission_check as (typeof status.permission_check & { advisory_only?: boolean });
                         if(!status.ready || permission?.missing_actions?.length || !(permission?.inspected || permission?.advisory_only)) throw new Error('ECS 배포 권한을 확인하지 못했습니다. AWS 연결에서 권한을 확인하세요.');
                         //: 승인 카드(canvas.execute approved:true)를 거친 요청만 여기까지 온다 — 그 승인을 실어 보낸다.
-                        await execute('workspace.deploy.ecs', {...c, repo_name:ecrRepoName(c.image_name), workspace_path:workspace, approved:true});
+                        await execute('workspace.deploy.ecs', {...c, repo_name:plan.managedBuild?'recoder-managed-images-v1':ecrRepoName(c.image_name), workspace_path:workspace, approved:true,...(plan.managedBuild?{managed_build:plan.managedBuild}:{})});
                     } else if(c.target==='s3') {
                         if(staticPreview(workspace,c.dir).digest !== plan.staticDigest) throw new Error('승인 후 정적 파일이 변경되었습니다. 배포 내용을 다시 확인하세요.');
                         // Existing handler owns path confinement, sensitive-file filtering and stream.
@@ -427,7 +436,7 @@ export class CanvasHost {
             const result=await this.api.githubConnectRepository({repository,create:p.create===true,private:p.visibility!=='public'});
             if(result.status!=='ok') throw new Error(result.message || '저장소를 확인하지 못했습니다.');
             if (activeProjectPath()!==workspace || (await this.readGit(workspace)).fingerprint!==current.fingerprint) throw new Error('연결 중 프로젝트 또는 Git 상태가 바뀌었습니다. 상태를 새로고침하세요.');
-            const run=async(args:string[]) => (await exec('git',['-C',workspace,...args],{timeout:10000,windowsHide:true})).stdout.trim();
+            const run=async(args:string[]) => (await exec(await ensurePortableTool('git'),['-C',workspace,...args],{timeout:10000,windowsHide:true,env:toolEnvironment()})).stdout.trim();
             if (!current.initialized) await run(['init','--initial-branch=main']);
             const remote=await run(['remote','get-url','origin']).catch(()=>'');
             if(remote && current.repository!==repository) await run(['remote','set-url','origin',`https://github.com/${repository}.git`]);

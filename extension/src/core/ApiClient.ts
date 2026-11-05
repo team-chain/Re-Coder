@@ -23,6 +23,7 @@ import {
     S3DeployResult,
 } from '../types';
 import { CoreManager } from './CoreManager';
+import type { ManagedConnection } from '../cloud/connectedAws';
 import { describeHttpError, parseHttpErrorDetail, CoreHttpError } from './httpError';
 
 /** 2.0.25 공격·장애 감지 알림 한 건 — 코어 ops_alerts 가 실제 지표로 만든 것. */
@@ -1016,6 +1017,22 @@ export class ApiClient {
         return resp.data as { status: string; repos: Array<{ name: string; private: boolean; html_url: string }> };
     }
 
+    /** Read-only security tools; deployment approval remains in its existing path. */
+    async securityAuditStep(role:string,instructions:string,data:unknown):Promise<{result:unknown;provider:string;model:string;inputTokens:number;outputTokens:number}> {
+        const response=await this.request<{result:unknown;provider:string;model:string;inputTokens:number;outputTokens:number}>('POST','/api/security/audit/step',{role,instructions,data},false,125000);
+        if(!response.success||!response.data)throw new Error(response.error||'기존 AI 연결에서 감사를 완료하지 못했습니다.');
+        return response.data;
+    }
+
+    async securityCheck(kind: 'code' | 'history' | 'recheck' | 'policy', workspace: string): Promise<Record<string, unknown>> {
+        const paths = { code: '/api/security/code', history: '/api/security/vulns/history', recheck: '/api/security/vulns/check', policy: '/api/policy/cache/status' };
+        const resp = await this.request<Record<string, unknown>>(
+            kind === 'history' || kind === 'policy' ? 'GET' : 'POST', paths[kind],
+            kind === 'code' ? { workspace_path: workspace } : undefined, false, 180000);
+        if (!resp.success || !resp.data) throw new Error(resp.error ?? '보안 검사 요청에 실패했습니다.');
+        return resp.data;
+    }
+
     async runScan(
         scanType: 'trivy' | 'hadolint' | 'gitleaks',
         workspacePath: string,
@@ -1399,6 +1416,18 @@ export class ApiClient {
         };
     }
 
+    async getManagedAwsSession(): Promise<ManagedConnection> {
+        const result=await this.request<ManagedConnection>('GET','/api/aws/managed/session',undefined,false,60000);
+        if(!result.success||!result.data)throw new Error(result.error||'기존 AWS 연결을 확인하지 못했습니다.');
+        return result.data;
+    }
+
+    async managedAwsRequest(input:Record<string,unknown>): Promise<{status:number;body_base64?:string;error_code?:string}> {
+        const result=await this.request<{status:number;body_base64?:string;error_code?:string}>('POST','/api/aws/managed/request',input,false,90000);
+        if(!result.success||!result.data)throw new Error(result.error||'AWS 응답을 확인하지 못했습니다. 새 실행 전에 상태를 확인하세요.');
+        return result.data;
+    }
+
     /** GET /api/aws/onboarding-link — 원클릭 IAM 셋업 링크 + CloudFormation 템플릿. */
     async getAwsOnboardingLink(): Promise<{
         quick_create_url: string;
@@ -1477,6 +1506,12 @@ export class ApiClient {
      * POST /api/aws/connect — STS 검증만 수행한다.
      * 키의 영속 보관은 Extension의 SecretStorage가 담당한다.
      */
+    async connectAwsBrowser(connection: {endpoint: string; token: string; region: string; account: string}): Promise<AwsStatus> {
+        const resp = await this.request<AwsStatus>('POST', '/api/aws/connect-browser', connection, false, 90000);
+        if (!resp.success || !resp.data?.ready) throw new Error(resp.error ?? '브라우저 AWS 연결을 확인하지 못했습니다.');
+        return resp.data;
+    }
+
     async connectAws(creds: AwsConnectInput): Promise<AwsStatus> {
         const resp = await this.request<AwsStatus>('POST', '/api/aws/connect', {
             access_key_id: creds.accessKeyId,
@@ -1752,6 +1787,7 @@ export class ApiClient {
     /** POST /api/deploy/ecs — ECS Fargate 배포 시작. */
     async deployEcs(req: {
         workspace_path?: string;
+        managed_build?: {run_id:string;build_id:string;source_sha256:string};
         image_name?: string;
         repo_name?: string;
         tag?: string;

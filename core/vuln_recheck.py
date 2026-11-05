@@ -158,7 +158,12 @@ def query(packages: list[dict], *, post: Callable[[str, dict], dict] = _post_jso
     for i in range(0, len(packages), 1000):
         batch = packages[i:i + 1000]
         res = post(OSV_BATCH, {"queries": [{"package": {"purl": p["purl"]}} for p in batch]})
-        for p, r in zip(batch, res.get("results") or []):
+        results = res.get("results")
+        if not isinstance(results, list) or len(results) != len(batch) or any(not isinstance(r, dict) for r in results):
+            raise ValueError('OSV 응답이 불완전합니다. 이전 취약점을 해결 처리하지 않습니다.')
+        for p, r in zip(batch, results):
+            if 'vulns' in r and (not isinstance(r['vulns'], list) or any(not isinstance(v, dict) or not v.get('id') for v in r['vulns'])):
+                raise ValueError('OSV 취약점 목록 형식이 올바르지 않습니다.')
             ids = [v["id"] for v in (r or {}).get("vulns") or [] if v.get("id")]
             if ids:
                 found[p["purl"]] = ids

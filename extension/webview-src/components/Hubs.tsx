@@ -20,6 +20,7 @@ import { isNotApplicable } from './securityGate';
 import { SecurityFixList } from './SecurityFixList';
 import { Ring } from './shell/parts';
 import { FeatureHero, hasHero } from './shell/FeatureHero';
+import { SecurityDashboard } from './SecurityDashboard';
 
 export type HubId = "develop" | "deploy" | "security" | "monitor";
 export type FeatureId =
@@ -319,7 +320,7 @@ export function securityResultDetail(r?: ScanResultLite): string {
   return `${cause}${r.next_action ? `\n다음 행동: ${r.next_action}` : ''}`;
 }
 
-export const SecurityScanPanel: React.FC<{ kinds: ScanKind[]; title: string; note: string; onChange?: (results: Partial<Record<ScanKind, ScanResultLite>>, running: boolean) => void }> = ({ kinds, title, note, onChange }) => {
+export const SecurityScanPanel: React.FC<{ kinds: ScanKind[]; title: string; note: string; runSignal?: number; compact?: boolean; onChange?: (results: Partial<Record<ScanKind, ScanResultLite>>, running: boolean) => void }> = ({ kinds, title, note, onChange, runSignal = 0, compact = false }) => {
   const { postMessage, useMessage } = useVSCodeApi();
   const [running, setRunning] = useState<ScanKind | null>(null);
   const [results, setResults] = useState<Partial<Record<ScanKind, ScanResultLite>>>({});
@@ -334,13 +335,16 @@ export const SecurityScanPanel: React.FC<{ kinds: ScanKind[]; title: string; not
       if (queue.current.current?.requestId !== request.requestId) return;
       queue.current.stop(); setRunning(null);
       setResults(cur => ({ ...cur, [request.scanType]: { scan_type: request.scanType, status: 'unverified', cause: '검사 응답을 받지 못했습니다.', next_action: '연결 상태를 확인한 뒤 다시 검사하세요.' } }));
-    }, 330000);
+    }, 690000);
   }, [postMessage]);
   useEffect(() => () => { clearTimeout(timeout.current); queue.current.stop(); }, []);
   //: 배포 캔버스의 보안 게이트가 이 결과로 초록/빨강을 표시한다.
   useEffect(() => { onChange?.(results, running !== null); }, [results, running, onChange]);
 
   useMessage(useCallback((msg) => {
+    if (msg.type === 'canvas.projectChanged') {
+      clearTimeout(timeout.current);queue.current.stop();setRunning(null);setResults({});signalSeen.current=0;return;
+    }
     if (msg.type === "scanResult") {
       const r = msg.payload as ScanResultLite;
       const k = r.scan_type as ScanKind;
@@ -354,6 +358,8 @@ export const SecurityScanPanel: React.FC<{ kinds: ScanKind[]; title: string; not
     setResults(cur => { const next = { ...cur }; selected.forEach(k => { delete next[k]; }); return next; });
     send(request);
   }, [send]);
+  const signalSeen = useRef(0);
+  useEffect(() => { if (runSignal > signalSeen.current) { signalSeen.current = runSignal; run(kinds); } }, [runSignal, run, kinds]);
   const label: Record<ScanKind, string> = { trivy: '이미지 · 의존성', hadolint: 'Dockerfile', gitleaks: '시크릿' };
 
   const VC = { bad: "var(--rc-bad,#ff8b8b)", warn: "var(--rc-warn,#f0b35b)", ok: "var(--rc-ok,#7ed3a2)" };
@@ -389,7 +395,7 @@ export const SecurityScanPanel: React.FC<{ kinds: ScanKind[]; title: string; not
         .rc-scan-detail{font-size:12.5px;line-height:1.7;color:${C.muted};padding:0 16px 16px}.rc-scan-detail p{margin:0 0 12px;overflow-wrap:anywhere}
         .rc-security-page{width:100%}.rc-security-policy{margin-top:22px}.rc-security-policy>summary{cursor:pointer;color:${C.muted};font-size:12.5px;padding:12px 0}
       `}</style>
-      {(() => {
+      {!compact && (() => {
         const done = kinds.filter(k => results[k]);
         const v = kinds.map(k => verdict(results[k]));
         const bad = v.some(x => x.color === VC.bad), warn = v.some(x => x.color === VC.warn);
@@ -418,11 +424,12 @@ export const SecurityScanPanel: React.FC<{ kinds: ScanKind[]; title: string; not
   );
 };
 
-export const SecurityHub: React.FC<{ onHome?: () => void; onHub?: (hub: HubId) => void; onGo?: (view: string) => void }> = ({ onHub, onGo }) => <section className="rc-security-page">
-  <HubTabs hub="security" current="hub:security" onGo={onGo ?? ((v) => { if (v.startsWith("hub:")) onHub?.(v.slice(4) as HubId); })} />
-  <div><SecurityScanPanel kinds={['trivy','hadolint','gitleaks']} title="배포 전 확인" note="이미지, Dockerfile, 소스에 남은 비밀값을 한 번에 검사하세요." /></div>
-  <details className="rc-security-policy"><summary>배포 승인 · 차단 기준 보기</summary><PolicyPanel /></details>
-</section>;
+export const SecurityHub: React.FC<{ onHome?: () => void; onHub?: (hub: HubId) => void; onGo?: (view: string) => void }> = ({ onGo }) => {
+  const { useMessage } = useVSCodeApi();
+  const [generation, setGeneration] = useState(0);
+  useMessage(useCallback(msg => { if (msg.type === 'canvas.projectChanged') setGeneration(n => n + 1); }, []));
+  return <SecurityDashboard key={generation} onGo={onGo} />;
+};
 
 export const PolicyPanel: React.FC = () => {
   const { postMessage } = useVSCodeApi();

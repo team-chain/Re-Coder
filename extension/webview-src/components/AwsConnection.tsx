@@ -205,7 +205,8 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
       )}
       <details style={{ marginTop:20 }}><summary style={{ cursor:'pointer',fontSize:12,padding:'10px 0' }}>자격증명 관리</summary>
       <div style={{ marginTop: 11, color: "var(--vscode-descriptionForeground, #999)", fontSize: 11, lineHeight: 1.5 }}>
-        {status.storage === "assumed_role"
+        {status.storage === "browser_login" ? "브라우저 로그인으로 받은 임시 자격증명을 사용하며 자동 갱신됩니다. 로그인 정보는 OS 보안 금고에 보관됩니다."
+          : status.storage === "assumed_role"
           ? "장기 키를 저장하지 않습니다. 보관하는 건 역할 ARN 하나이고, 임시 자격증명은 만료 전에 코어가 다시 빌립니다."
           : status.storage === "aws_profile" || status.storage === "aws_credentials_file"
             ? "AWS CLI 프로필의 자격증명을 사용합니다. 키를 다시 입력할 필요가 없습니다."
@@ -231,9 +232,10 @@ export const AwsConnection: React.FC<{ ecsPolicyContext?: EcsPolicyContext }> = 
   }
 
   return <div style={card}>
-    <p style={{ margin: "0 0 24px", color: "var(--vscode-descriptionForeground, #999)", fontSize: 12, lineHeight: 1.7 }}>본인의 AWS 계정에 연결해 배포합니다. {profiles.length ? '이 컴퓨터에 있는 프로필로 연결할 수 있습니다.' : '브라우저에서 배포 전용 권한을 먼저 만들어 주세요.'}</p>
-    <details open={profiles.length === 0 || Boolean(onboarding)} style={{ marginBottom: 20, padding: "14px 16px", borderRadius: 8, background: "rgba(78,201,176,.05)", border: "1px solid rgba(78,201,176,.22)" }}>
-      <summary style={{ cursor:'pointer',fontSize:13,fontWeight:600 }}>브라우저에서 AWS 연결 준비{!profiles.length && ' · 권장'}</summary>
+    <p style={{ margin: "0 0 16px", color: "var(--vscode-descriptionForeground, #999)", fontSize: 12, lineHeight: 1.7 }}>본인의 AWS 계정으로 로그인합니다. CLI 설치나 장기 키 입력 없이 임시 자격증명을 사용합니다.</p>
+    <button disabled={busy} onClick={()=>{setBusy(true);setError('');postMessage('aws.browserLogin');}} style={{...button,marginBottom:20}}>{busy?'AWS 연결 중…':'브라우저로 AWS 로그인'}</button>
+    <details open={Boolean(onboarding)} style={{ marginBottom: 20, padding: "14px 16px", borderRadius: 8, background: "rgba(78,201,176,.05)", border: "1px solid rgba(78,201,176,.22)" }}>
+      <summary style={{ cursor:'pointer',fontSize:13,fontWeight:600 }}>기존 방식 · IAM 사용자와 키로 연결</summary>
       {/*
         원클릭 IAM 셋업 — 보드 카드 「AWS 온보딩 마찰 제거」.
         키가 아직 없는 사용자용: 버튼을 누르면 최소권한 사용자·정책·키를

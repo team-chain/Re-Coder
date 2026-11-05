@@ -7,6 +7,7 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { blockedFile } from './githubCommit';
+import { ensurePortableTool,toolEnvironment } from '../runtime/portableTools';
 
 const exec = promisify(execFile);
 
@@ -18,9 +19,9 @@ export interface WorkingChanges {
 }
 
 async function git(root: string, args: string[]): Promise<string> {
-    return (await exec('git', ['-C', root, '--literal-pathspecs', ...args], {
+    return (await exec(await ensurePortableTool('git'), ['-C', root, '--literal-pathspecs', ...args], {
         windowsHide: true, timeout: 5000, maxBuffer: 2 * 1024 * 1024,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+        env: { ...toolEnvironment(), GIT_TERMINAL_PROMPT: '0' },
     })).stdout;
 }
 

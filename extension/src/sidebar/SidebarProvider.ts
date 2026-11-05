@@ -1,7 +1,13 @@
 import { SEEN_KEY, pendingCount } from '../ops/monitorDigest';
+import { RedTeamHost } from '../security/redTeamHost';
+import { ManagedSecurityHost } from '../security/managedSecurityHost';
+import { ManagedFrontendHost } from '../deploy/managedFrontend';
+import { ManagedContainerHost } from '../deploy/managedContainer';
+import { SourceAuditHost } from '../security/sourceAuditHost';
+import { gitExecutable } from '../runtime/portableTools';
 import { currentAiProvider, isEconomyProvider, storedAiKeys } from '../ai/aiKeyEnv';
 import { withTimeout } from '../core/timeouts';
-import { detectFrontendProject } from '../deploy/frontendBuild';
+import { buildFrontend, detectFrontendProject } from '../deploy/frontendBuild';
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -69,13 +75,13 @@ function _normalizeReadyValue(v: unknown): string {
 function s3RepositoryIdentity(workspacePath: string): string {
     try {
         const remote = execFileSync(
-            'git',
+            gitExecutable(),
             ['-C', workspacePath, 'remote', 'get-url', 'origin'],
             { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
         ).trim();
         if (remote) {
             const repositoryRoot = execFileSync(
-                'git',
+                gitExecutable(),
                 ['-C', workspacePath, 'rev-parse', '--show-toplevel'],
                 { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
             ).trim();
@@ -142,6 +148,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     /** 구조 지도도 작업 스레드에서 — 큰 저장소·이상한 파일이 확장 호스트(채팅·승인)를 멈추게 하지 않는다(2.0.34). */
     private _mapJob = new AnalysisJob(30000);
     private _mapRefreshJob = new AnalysisJob(30000);
+    private _redTeam?: RedTeamHost;
+    private _managedSecurity?: ManagedSecurityHost;
+    private _managedFrontend?: ManagedFrontendHost;
+    private _managedContainer?: ManagedContainerHost;
+    private _sourceAudit?: SourceAuditHost;
 
     constructor(
         private readonly _extensionUri: vscode.Uri,
@@ -154,6 +165,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         //: 아직 발송 못 한 chat.actionAccepted 를 여기 적어 두고 이어서 보낸다.
         private readonly _globalState?: vscode.Memento,
         private readonly _secrets?: vscode.SecretStorage,
+        private readonly _storageUri?: vscode.Uri,
     ) {
         this._state = { currentMode: Mode.BUILD, proposals: [], isLoading: false };
         //: 배포 화면이 보는 프로젝트가 바뀌면 열린 캔버스가 이전 프로젝트 상태를 버리고 다시 읽는다.
@@ -788,7 +800,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         if (type.startsWith('canvas.')) {
             let host = this._canvasHosts.get(requestWebview);
-            if (!host) { host = new CanvasHost(this._apiClient, undefined, this._secrets ? new DiscordWebhook(this._secrets) : undefined, this._globalState, this._secrets ? new DiscordBotToken(this._secrets, fetch, String(vscode.extensions?.getExtension?.('recoder-team.recoder')?.packageJSON?.version || '')) : undefined); this._canvasHosts.set(requestWebview, host); }
+            if (!host) {
+                if(this._globalState)this._managedFrontend??=new ManagedFrontendHost(this._coreManager,this._globalState,vscode.Uri.joinPath(this._extensionUri,'out','security').fsPath);
+                if(this._globalState)this._managedContainer??=new ManagedContainerHost(this._coreManager,this._globalState,vscode.Uri.joinPath(this._extensionUri,'out','security').fsPath);
+                host = new CanvasHost(this._apiClient, undefined, this._secrets ? new DiscordWebhook(this._secrets) : undefined, this._globalState, this._secrets ? new DiscordBotToken(this._secrets, fetch, String(vscode.extensions?.getExtension?.('recoder-team.recoder')?.packageJSON?.version || '')) : undefined,
+                    this._managedFrontend?(workspace,project,progress,region)=>vscode.workspace.getConfiguration('recoder').get<boolean>('experimental.managedExecution',false)?this._managedFrontend!.build(workspace,project,progress,region):buildFrontend(workspace,project,progress):undefined,
+                    this._managedContainer?(workspace,region,progress)=>vscode.workspace.getConfiguration('recoder').get<boolean>('experimental.managedExecution',false)?this._managedContainer!.build(workspace,region,progress):Promise.resolve(undefined):undefined);
+                this._canvasHosts.set(requestWebview, host);
+            }
             await host.handle(type, payload,
                 (reply, data) => this.postMessageToWebview(requestWebview, reply, data),
                 workspace => s3ProjectIdentifier(s3RepositoryIdentity(workspace), path.basename(workspace)),
@@ -1022,6 +1041,48 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 this.postMessageToWebview(requestWebview, 'githubActions.saveResult', { proposalId, ...ghResult });
                 if (ghResult.status === 'error') {
                     this.postMessage('errorMessage', { message: `GitHub Actions 워크플로우를 저장하지 못했습니다.${ghResult.message ? ` ${ghResult.message}` : ''}` });
+                }
+                break;
+            }
+            case 'security.audit': {
+                const p=payload as {action:string;requestId:string};const workspace=activeProjectPath();
+                try{
+                    if(!this._globalState)throw new Error('감사 기록 저장소를 사용할 수 없습니다.');
+                    this._sourceAudit??=new SourceAuditHost(this._apiClient,this._globalState,vscode.Uri.joinPath(this._extensionUri,'media','security-audit').fsPath);
+                    const result=await this._sourceAudit.handle(p.action,workspace);
+                    this.postMessageToWebview(requestWebview,'security.auditResult',{...result,requestId:p.requestId,workspace});
+                }catch(error){this.postMessageToWebview(requestWebview,'security.auditResult',{requestId:p.requestId,workspace,error:error instanceof Error?error.message:'감사 요청 실패'});}
+                break;
+            }
+            case 'security.redteam': {
+                const p = payload as { action: string; requestId: string; mode?: 'audit'|'redteam'|'scans' };
+                const workspace = activeProjectPath();
+                try {
+                    if (!['configure', 'start', 'status', 'stop', 'recover', 'localStart', 'localStatus', 'localStop', 'localCleanup', 'localOpenReport', 'localKey', 'managedStatus', 'managedLogin', 'managedSetup', 'managedPermissions', 'managedStart', 'managedAuditStart', 'managedScansStart', 'managedStop', 'managedReport'].includes(p.action)) throw new Error('지원하지 않는 요청입니다.');
+                    if(p.action.startsWith('managed')) {
+                        if(!this._globalState)throw new Error('검사 기록 저장소를 사용할 수 없습니다.');
+                        this._managedSecurity??=new ManagedSecurityHost(this._coreManager,this._globalState,vscode.Uri.joinPath(this._extensionUri,'out','security').fsPath);
+                        const result=await this._managedSecurity.handle(p.action,workspace,p.mode);
+                        this.postMessageToWebview(requestWebview,'security.redteamResult',{requestId:p.requestId,workspace,...result});break;
+                    }
+                    this._redTeam ??= new RedTeamHost(this._secrets, this._globalState, this._storageUri ? vscode.Uri.joinPath(this._storageUri, 'redteam').fsPath : undefined);
+                    const result = await this._redTeam.handle(p.action, workspace);
+                    this.postMessageToWebview(requestWebview, 'security.redteamResult', { requestId: p.requestId, workspace, ...result });
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'security.redteamResult', { requestId: p.requestId, workspace, error: err instanceof Error ? err.message : String(err) });
+                }
+                break;
+            }
+            case 'security.check': {
+                const p = payload as { kind: 'code' | 'history' | 'recheck' | 'policy'; requestId: string };
+                const workspace = activeProjectPath();
+                try {
+                    if (!['code', 'history', 'recheck', 'policy'].includes(p.kind)) throw new Error('지원하지 않는 검사입니다.');
+                    if (!workspace) throw new Error('검사할 프로젝트를 먼저 여세요.');
+                    const result = await this._apiClient.securityCheck(p.kind, workspace);
+                    this.postMessageToWebview(requestWebview, 'security.checkResult', { requestId: p.requestId, kind: p.kind, workspace, result });
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'security.checkResult', { requestId: p.requestId, kind: p.kind, workspace, error: err instanceof Error ? err.message : String(err) });
                 }
                 break;
             }
@@ -1866,6 +1927,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 } catch (err) {
                     this.postMessage('aws.onboarding.result', { error: String(err) });
                 }
+                break;
+            }
+            case 'aws.browserLogin': {
+                try {
+                    const ok=await vscode.commands.executeCommand<boolean>('recoder.awsBrowserLogin');
+                    const status=ok?await this._apiClient.getAwsStatus():undefined;
+                    this.postMessage('aws.configure.result',{ok:!!ok,status,message:ok?'AWS 브라우저 연결 완료':'AWS 연결이 완료되지 않았습니다.'});
+                }catch{this.postMessage('aws.configure.result',{ok:false,message:'AWS 연결을 확인하지 못했습니다. 다시 로그인하세요.'});}
                 break;
             }
             case 'aws.status': {

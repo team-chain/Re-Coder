@@ -28,6 +28,9 @@ import logging
 import os
 import stat
 import sys
+import hashlib
+import time
+import uuid
 from urllib.parse import unquote
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +38,13 @@ from typing import Any, Optional
 import asyncio as _asyncio
 import functools as _functools
 import threading as _threading
+
+try:
+    import aws_browser
+    import managed_aws
+except ImportError:
+    from core import aws_browser
+    from core import managed_aws
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator, StrictBool
@@ -60,6 +70,8 @@ router = APIRouter(tags=["aws"])
 # 같이 멈춘다. 본문은 스레드에서 돌리고, os.environ 을 바꾸는 흐름끼리는
 # 예전처럼 한 번에 하나씩만 돌도록 잠근다.
 _AWS_ROUTE_LOCK = _threading.RLock()
+_managed_connection_id = uuid.uuid4().hex
+_managed_identities: dict[str, tuple[float, dict]] = {}
 
 
 def _off_loop(fn):
@@ -108,6 +120,7 @@ def _user_disconnected() -> bool:
         _disconnected_flag().exists()
         and not os.environ.get("AWS_ACCESS_KEY_ID")
         and not os.environ.get("AWS_PROFILE")
+        and not aws_browser.active()
         and _role_state is None
     )
 
@@ -534,6 +547,7 @@ def _apply_to_process_env(
     그렇지 않으면 환경변수가 우선한다.
     """
     global _active_profile
+    aws_browser.leave()
     _active_profile = profile or None
 
     os.environ["AWS_ACCESS_KEY_ID"] = access_key_id
@@ -593,6 +607,7 @@ def _call_sts_get_caller_identity(profile: Optional[str], region: str) -> dict[s
     try:
         sts = session.client("sts", region_name=region)
         identity = sts.get_caller_identity()
+        aws_browser.validate_account(identity.get("Account", ""))
         return {
             "account": identity.get("Account", ""),
             "arn": identity.get("Arn", ""),
@@ -636,6 +651,8 @@ def _detect_credential_source() -> tuple[str, str]:
     반환: (storage_label, profile_name)
     storage_label: "recoder" | "aws_credentials_file" | "env" | "assumed_role" | ""
     """
+    if aws_browser.active():
+        return "browser_login", ""
     if _role_state is not None:
         #: 환경변수에 있는 건 빌린 역할의 임시 자격증명이다 — "env" 로 보이면
         #: 화면이 키 연결로 착각한다.
@@ -1118,6 +1135,9 @@ def _credentials_changed() -> None:
 
     클라이언트를 먼저 버려야 진단(ai_ready 등)이 새 자격증명으로 돈다.
     """
+    global _managed_connection_id
+    _managed_connection_id = uuid.uuid4().hex
+    _managed_identities.clear()
     _invalidate_llm_clients()
     _refresh_diagnostics_cache()
 
@@ -1156,6 +1176,8 @@ def _load_into_process_if_needed() -> None:
     Core 가 재시작된 경우 환경변수가 비어있을 수 있으므로 status 조회 시점에
     한번 더 시도한다.
     """
+    if aws_browser.active():
+        return
     if os.environ.get("AWS_ACCESS_KEY_ID"):
         _enter_role_mode_from_env()
         return
@@ -1177,6 +1199,7 @@ def _environment_snapshot() -> tuple[dict[str, Optional[str]], Optional[str]]:
     """검증용 임시 환경변수를 원상 복구하기 위한 스냅샷."""
     return (
         {
+            **{key: os.environ.get(key) for key in aws_browser.ENV_KEYS},
             "AWS_ACCESS_KEY_ID": os.environ.get("AWS_ACCESS_KEY_ID"),
             "AWS_SECRET_ACCESS_KEY": os.environ.get("AWS_SECRET_ACCESS_KEY"),
             "AWS_SESSION_TOKEN": os.environ.get("AWS_SESSION_TOKEN"),
@@ -1343,6 +1366,36 @@ def _leave_role_mode(clear_env: bool = True) -> None:
 # ---------------------------------------------------------------------------
 
 
+class AwsBrowserConnectRequest(BaseModel):
+    endpoint: str = Field(..., max_length=128)
+    token: str = Field(..., min_length=64, max_length=64, repr=False)
+    region: str = Field(..., max_length=32)
+    account: str = Field(..., pattern=r'^\d{12}$')
+
+
+@router.post('/api/aws/connect-browser', response_model=AwsStatus)
+@_off_loop
+@_with_disconnect_guard
+def connect_aws_browser(req: AwsBrowserConnectRequest) -> AwsStatus:
+    """Bind to the extension's refreshable provider; no long-lived keys in Core."""
+    global _active_profile
+    snapshot, previous_profile = _environment_snapshot()
+    try:
+        aws_browser.configure(req.endpoint, req.token, req.region, req.account)
+        _active_profile = None
+        identity = _call_sts_get_caller_identity(profile=None, region=req.region)
+    except Exception as exc:
+        _restore_environment(snapshot, previous_profile)
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(status_code=400, detail='브라우저 AWS 연결을 확인하지 못했습니다. 다시 로그인하세요.') from exc
+    _leave_role_mode()
+    _mark_connected()
+    _credentials_changed()
+    return AwsStatus(ready=True, identity=AwsIdentity(**identity), region=req.region,
+                     storage='browser_login', message='AWS 브라우저 로그인으로 연결되었습니다. 임시 자격증명은 자동 갱신됩니다.')
+
+
 @router.post("/api/aws/connect", response_model=AwsStatus)
 @_off_loop
 @_with_disconnect_guard
@@ -1434,6 +1487,7 @@ def _apply_profile_to_process_env(profile: str, region: str) -> None:
     뜨는 채로 **다른 계정에 배포되는** 조용한 사고다.
     """
     global _active_profile
+    aws_browser.leave()
     _active_profile = profile
     os.environ.pop("AWS_ACCESS_KEY_ID", None)
     os.environ.pop("AWS_SECRET_ACCESS_KEY", None)
@@ -1540,7 +1594,7 @@ def get_aws_status() -> AwsStatus:
 
     # SSO·assume-role 프로필은 ~/.aws/config 에만 있다 — credentials 파일이 없다고
     # "자격증명 없음"으로 끊으면 프로필로 연결한 사용자가 영영 준비 안 됨으로 보인다.
-    if not access_key and not os.environ.get("AWS_PROFILE") and not AWS_CREDENTIALS_FILE.exists():
+    if not access_key and not os.environ.get("AWS_PROFILE") and not aws_browser.active() and not AWS_CREDENTIALS_FILE.exists():
         return AwsStatus(
             ready=False,
             identity=None,
@@ -1607,6 +1661,63 @@ def get_aws_status() -> AwsStatus:
         ),
         **_role_status_fields(),
     )
+
+
+def _managed_connection_context():
+    """Use the same saved key/profile/role/browser chain as existing deployment."""
+    _load_into_process_if_needed()
+    _refresh_role_credentials()
+    if _user_disconnected():
+        return None
+    region = os.environ.get('AWS_REGION') or os.environ.get('AWS_DEFAULT_REGION') or DEFAULT_REGION
+    storage, profile = _detect_credential_source()
+    session = _build_boto3_session(profile=None if storage == 'assumed_role' else (profile or None), region=region)
+    try:
+        credentials = session.get_credentials()
+        if credentials is None:
+            return None
+        frozen = credentials.get_frozen_credentials()
+        fingerprint = hashlib.sha256((frozen.access_key + '\0' + (frozen.token or '')).encode()).hexdigest()
+        cached = _managed_identities.get(fingerprint)
+        if cached and time.monotonic() - cached[0] < 300:
+            identity = cached[1]
+        else:
+            # Validate the exact frozen credentials used for this request, including role refresh.
+            identity = session.client('sts', region_name=region, aws_access_key_id=frozen.access_key,
+                                      aws_secret_access_key=frozen.secret_key, aws_session_token=frozen.token).get_caller_identity()
+            if len(_managed_identities) >= 16:
+                _managed_identities.clear()
+            _managed_identities[fingerprint] = (time.monotonic(), identity)
+        aws_browser.validate_account(identity.get('Account', ''))
+        if not isinstance(identity.get('Account'), str) or len(identity['Account']) != 12 or not identity['Account'].isdigit():
+            raise ValueError('Invalid identity')
+        return {'connected': True, 'account': identity['Account'], 'region': region,
+                'connection_id': _managed_connection_id}, frozen
+    except Exception as exc:
+        raise HTTPException(409, detail='현재 AWS 연결을 확인하지 못했습니다. 기존 AWS 연결 화면에서 상태를 확인하세요.') from exc
+
+
+@router.get('/api/aws/managed/session')
+@_off_loop
+def managed_session() -> dict:
+    context = _managed_connection_context()
+    return context[0] if context else {'connected': False}
+
+
+@router.post('/api/aws/managed/request')
+@_off_loop
+def managed_request(req: managed_aws.ManagedAwsRequest) -> dict:
+    # Validate the allowed runner operation before resolving any credentials.
+    body = managed_aws.validate_request(req)
+    if req.connection_id != _managed_connection_id:
+        raise HTTPException(409, detail='AWS 연결이 변경되었습니다. 실행 내용을 다시 확인하세요.')
+    context = _managed_connection_context()
+    if context is None:
+        raise HTTPException(409, detail='AWS 연결이 해제되었습니다.')
+    metadata, credentials = context
+    if metadata['account'] != req.account or metadata['region'] != req.region:
+        raise HTTPException(409, detail='AWS 계정 또는 리전이 변경되었습니다. 실행 내용을 다시 확인하세요.')
+    return managed_aws.execute(req, body, credentials)
 
 
 def _role_status_fields() -> dict[str, str]:
@@ -1921,6 +2032,7 @@ def clear_aws() -> dict[str, Any]:
     ~/.aws/credentials 의 [profile] 섹션은 사용자 안전을 위해 자동 제거하지 않는다.
     환경변수는 현재 프로세스 한정으로 unset 한다.
     """
+    aws_browser.leave()
     removed_path: Optional[str] = None
     if CREDENTIALS_FILE.exists():
         try:

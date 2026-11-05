@@ -39,8 +39,9 @@ test('canvas approval reaches existing ECS/S3 HTTP contracts with workspace, reg
  try {
   fs.mkdirSync(path.join(workspace,'dist'));fs.writeFileSync(path.join(workspace,'dist/index.html'),'<h1>verified</h1>');fs.writeFileSync(path.join(workspace,'dist/.env'),'SECRET=fixture');
   await new Promise(r=>server.listen(0,'127.0.0.1',r));
-  const core={getPort:()=>server.address().port,getSessionToken:()=>'canvas-test-session',refreshToken:async()=>true};
-  const provider=new SidebarProvider(vscode.Uri.file(workspace),new ApiClient(core),core,{});
+  let managedConnections=0;
+  const core={getPort:()=>server.address().port,getSessionToken:()=>'canvas-test-session',refreshToken:async()=>true,getManagedAwsConnection:async()=>{managedConnections++;throw Error('Default deployment must not ask for a managed connection');}};
+  const provider=new SidebarProvider(vscode.Uri.file(workspace),new ApiClient(core),core,{},undefined,{get:(_key,fallback)=>fallback,update:async()=>{}});
   const webview={postMessage:async m=>{messages.push(m);return true;}};
   const other={postMessage:async m=>{otherMessages.push(m);return true;}};
   provider._view={webview};
@@ -49,6 +50,7 @@ test('canvas approval reaches existing ECS/S3 HTTP contracts with workspace, reg
   const last=type=>messages.findLast(m=>m.type===type)?.payload;
   await send('canvas.prepare',{config});const plan=last('canvas.plan');assert.ok(plan,JSON.stringify(messages));
   assert.equal(plan.targetState.task_definition,'task:7');assert.equal(plan.config.aws_region,'us-east-1');
+  assert.equal(managedConnections,0,'default ECS prepare must retain the original connection/deployment path');
   assert.equal(requests.some(r=>r.path==='/api/deploy/ecs'),false);
   await send('canvas.execute',{planId:plan.id,approved:true},other);
   assert.equal(otherMessages.at(-1).type,'canvas.error');
@@ -72,9 +74,41 @@ test('canvas approval reaches existing ECS/S3 HTTP contracts with workspace, reg
   assert.ok(last('workspace.deploy.s3.result').result.excluded_note.includes('.env'));
   assert.ok(last('workspace.deploy.s3.progress'));
   assert.ok(requests.every(r=>r.token==='canvas-test-session'));
+
+  // Managed build output must use the SAME approval and S3 HTTP path; never publish local stale dist.
+  fs.writeFileSync(path.join(workspace,'package.json'),JSON.stringify({scripts:{build:'vite build'}}));
+  fs.utimesSync(path.join(workspace,'dist','index.html'),new Date(0),new Date(0));
+  const managedDir='.recoder/cloud-build-fixture';fs.mkdirSync(path.join(workspace,managedDir),{recursive:true});
+  let builds=0;
+  provider._canvasHosts.get(webview).frontendBuilder=async(root,project,progress,region)=>{
+   assert.equal(root,workspace);assert.equal(region,'us-east-1');assert.equal(project.tool,'vite');builds++;
+   fs.writeFileSync(path.join(workspace,managedDir,'index.html'),'<h1>managed output</h1>');progress('fixture managed build complete');
+   return {ok:true,via:'managed',outDir:managedDir,output:'verified'};
+  };
+  await send('canvas.prepare',{config:{...config,target:'s3',dir:''},autoDir:true});
+  assert.equal(last('canvas.plan').config.dir,path.normalize(managedDir));assert.equal(builds,1);
+  fs.writeFileSync(path.join(workspace,managedDir,'index.html'),'<h1>changed after approval</h1>');
+  await send('canvas.execute',{planId:last('canvas.plan').id,approved:true});
+  assert.equal(requests.filter(r=>r.path==='/api/deploy/s3/stream').length,1,'changed managed output must not upload');
+  await send('canvas.prepare',{config:{...config,target:'s3',dir:''},autoDir:true});
+  await send('canvas.execute',{planId:last('canvas.plan').id,approved:true});
+  assert.equal(requests.filter(r=>r.path==='/api/deploy/s3/stream').length,2);
+  assert.equal(requests.findLast(r=>r.path==='/api/deploy/s3/stream').body.files[0].content,'<h1>managed output</h1>');
+  assert.equal(fs.readFileSync(path.join(workspace,'dist','index.html'),'utf8'),'<h1>verified</h1>');
+
+  // A cloud image uses the same native approval -> host -> authenticated HTTP path.
+  // Neither canvas.prepare nor a forged execute payload can replace its host-owned reference.
+  deny=false;
+  const managedRef={run_id:'rc-rt-'+'a'.repeat(24),build_id:'recoder-container-v1:11111111-2222-3333-4444-555555555555',source_sha256:'b'.repeat(64)};
+  provider._canvasHosts.get(webview).containerBuilder=async(root,region,progress)=>{assert.equal(root,workspace);assert.equal(region,'us-east-1');progress('fixture image inspected');return managedRef;};
+  await send('canvas.prepare',{config:{...config,managed_build:{passed:true}}});
+  const managedPlan=last('canvas.plan');assert.ok(managedPlan.id);
+  await send('canvas.execute',{planId:managedPlan.id,approved:true,managed_build:{passed:true}});
+  const managedEcs=requests.findLast(r=>r.path==='/api/deploy/ecs').body;
+  assert.deepEqual(managedEcs.managed_build,managedRef);assert.equal(managedEcs.repo_name,'recoder-managed-images-v1');
+  assert.equal(managedEcs.approved,true);assert.equal(managedEcs.workspace_path,workspace);
  } finally {
   server.closeAllConnections();await new Promise(r=>server.close(r));
-  for(const name of ['index.html','.env'])if(fs.existsSync(path.join(workspace,'dist',name)))fs.unlinkSync(path.join(workspace,'dist',name));
-  if(fs.existsSync(path.join(workspace,'dist')))fs.rmdirSync(path.join(workspace,'dist'));fs.rmdirSync(workspace);
+  assert.equal(path.dirname(path.resolve(workspace)),os.tmpdir());fs.rmSync(workspace,{recursive:true,force:true});
  }
 });
