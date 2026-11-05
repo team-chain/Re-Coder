@@ -286,6 +286,7 @@ export function cleanTeamModels(raw: unknown): TeamModels | null {
 /** 2.0.36 작업별 AI 공급자 — 형태는 webview-src/components/modelRoutingModel.ts 와 같다(키 값은 오지 않는다). */
 export interface CheckedModel { model: string; ready: boolean; retirement?: string; checked?: boolean }
 export interface ModelRouting {
+  provider_defaults?: Record<string, { model: string; fast_model: string }>;
   checked_at?: number;
   catalog?: CheckedModel[];
   configurable?: boolean;

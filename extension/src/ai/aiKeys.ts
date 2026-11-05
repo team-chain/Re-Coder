@@ -65,6 +65,13 @@ export async function storeAiKey(context: Ctx, provider: AiKeyProvider, key: str
     if (makeDefault) { await context.globalState.update(AI_PROVIDER_STATE, provider); }
 }
 
+/** 저장한 키는 그대로 두고 기본 공급자만 선택한다. */
+export async function switchAiProvider(context: Ctx, provider: AiKeyProvider): Promise<boolean> {
+    if (!await context.secrets.get(SECRET[provider])) { return false; }
+    await context.globalState.update(AI_PROVIDER_STATE, provider);
+    return true;
+}
+
 export async function clearAiKeys(context: Ctx): Promise<void> {
     await Promise.all(AI_PROVIDERS.map((p) => context.secrets.delete(SECRET[p])));
     await context.globalState.update(AI_PROVIDER_STATE, undefined);

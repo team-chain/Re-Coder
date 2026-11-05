@@ -66,3 +66,15 @@ for (const provider of ['openai','anthropic','compatible']) {
   assert.equal(defaultQuality[`${prefix}_MODEL`],undefined); assert.equal(defaultQuality[`${prefix}_FAST_MODEL`],'simple-model');
  });
 }
+
+test('switch uses an existing key without overwriting either key; missing key leaves selection intact', async () => {
+ const c=context();
+ await ai.storeAiKey(c,'openai',openaiKey);
+ assert.equal(await ai.switchAiProvider(c,'anthropic'),false);
+ assert.equal(await ai.currentAiProvider(c),'openai');
+ await ai.storeAiKey(c,'anthropic',anthropicKey,false);
+ const before=[...c.secrets_];
+ assert.equal(await ai.switchAiProvider(c,'anthropic'),true);
+ assert.equal(await ai.currentAiProvider(c),'anthropic');
+ assert.deepEqual([...c.secrets_],before);
+});

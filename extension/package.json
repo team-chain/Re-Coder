@@ -80,6 +80,10 @@
     },
     "commands": [
       {
+        "command": "recoder.ai.switch",
+        "title": "ReCoder: AI 바꾸기 (Claude / GPT)"
+      },
+      {
         "command": "recoder.analyzeError",
         "title": "ReCoder: Analyze Error",
         "icon": "$(bug)"

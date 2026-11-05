@@ -115,3 +115,115 @@ test('모델 확인 버튼은 검사 API 결과와 설정값을 반환한다',as
  assert.equal(state.routing.checked_at,123);assert.equal(state.settings.lockSensitive,true);
  assert.equal(state.settings.autoRecommend,true);assert.deepEqual(state.settings.prices,{});
 });
+
+function switchHarness({claude=true}={}) {
+ const state=new Map([['recoder.ai.provider','openai']]);
+ const keys=new Map([['recoder.ai.openaiKey',KEY],...(claude?[['recoder.ai.anthropicKey','sk-ant-'+KEY]]:[])]);
+ const storage={get:async k=>keys.get(k),store:async(k,v)=>{keys.set(k,v);},delete:async k=>{keys.delete(k);}};
+ const global={get:(k,d)=>state.has(k)?state.get(k):d,update:async(k,v)=>{state.set(k,v);}};
+ const api=fakeApi([]);
+ api.getModelRouting=async()=>({quality:{provider:state.get('recoder.ai.provider'),model:'m'},choices:[],
+  provider_defaults:{anthropic:{model:'claude-sonnet-5-5',fast_model:'claude-haiku-5-5'},openai:{model:'gpt-6-sol',fast_model:'gpt-6-sol'}}});
+ const side=new SidebarProvider(vscode.Uri.file('/tmp'),api,{}, {},undefined,global,storage);
+ const a=[],b=[];
+ side._view={webview:{postMessage:m=>a.push(m)}};
+ side._workspacePanelWebview={postMessage:m=>b.push(m)};
+ side._workspaceReady=true;
+ return {side,state,keys,a,b,api};
+}
+
+test('switch broadcasts defaults and preserves keys, without paid checks or key prompts',async()=>{
+ const h=switchHarness(),original=vscode.commands.executeCommand;
+ const before=[...h.keys];let restarts=0;
+ vscode.commands.executeCommand=async name=>{assert.equal(name,'recoder.restartCore');restarts++;return true;};
+ try {
+  await h.side.handleMessage({type:'ai.switch',payload:{provider:'anthropic'}});
+  assert.equal(restarts,1);assert.equal(h.state.get('recoder.ai.provider'),'anthropic');
+  for(const messages of [h.a,h.b]) {
+   const model=messages.find(m=>m.type==='models.state');assert.ok(model,JSON.stringify(messages));
+   assert.equal(model.payload.settings.providers.anthropic.fastModel,'claude-haiku-5-5');
+   assert.equal(model.payload.activity.switching,false);
+   assert.ok(!JSON.stringify(messages).includes(KEY));
+  }
+  assert.deepEqual([...h.keys],before);
+  await h.side.changeAiProvider('anthropic');assert.equal(restarts,1);
+  await h.side.changeAiProvider('openai');assert.equal(restarts,2);
+ } finally {vscode.commands.executeCommand=original;}
+});
+
+test('model defaults follow configured fast > configured complex > Core defaults',async()=>{
+ const h=switchHarness(),original=vscode.workspace.getConfiguration;
+ vscode.workspace.getConfiguration=()=>({get:(k,d)=>({anthropicModel:' custom ',openaiFastModel:' fast '}[k]??d)});
+ try {
+  await h.side.handleMessage({type:'models.load'});
+  assert.deepEqual(h.a.find(m=>m.type==='models.state').payload.settings.providers,{
+   anthropic:{model:'custom',fastModel:'custom'},openai:{model:'gpt-6-sol',fastModel:'fast'}});
+ } finally {vscode.workspace.getConfiguration=original;}
+});
+
+test('missing key opens secure input; Esc settles both views without selecting or restarting',async()=>{
+ const h=switchHarness({claude:false});const original={input:vscode.window.showInputBox,execute:vscode.commands.executeCommand};
+ let prompts=0;vscode.window.showInputBox=async o=>{assert.equal(o.password,true);prompts++;return undefined;};
+ vscode.commands.executeCommand=async()=>{throw new Error('must not restart');};
+ try {
+  assert.equal(await h.side.changeAiProvider('anthropic'),false);assert.equal(prompts,1);
+  assert.equal(h.state.get('recoder.ai.provider'),'openai');
+  assert.ok(h.a.some(m=>m.type==='models.state'));assert.ok(h.b.some(m=>m.type==='models.state'));
+  vscode.window.showInputBox=async()=> 'sk-ant-'+KEY;
+  vscode.commands.executeCommand=async()=>true;
+  assert.equal(await h.side.changeAiProvider('anthropic'),true);
+  assert.equal(h.state.get('recoder.ai.provider'),'anthropic');
+ } finally {vscode.window.showInputBox=original.input;vscode.commands.executeCommand=original.execute;}
+});
+
+for(const rollback of [true,false]) test(`restart failure restores selection and reports rollback ${rollback}`,async()=>{
+ const h=switchHarness(),original=vscode.commands.executeCommand;let count=0;
+ vscode.commands.executeCommand=async()=>++count===1?false:rollback;
+ try {
+  assert.equal(await h.side.changeAiProvider('anthropic'),false);
+  assert.equal(h.state.get('recoder.ai.provider'),'openai');assert.equal(count,2);
+  const err=h.a.find(m=>m.type==='ai.switchError').payload.message;
+  assert.match(err,rollback ? /되돌렸습니다/ : /재연결도 실패/);
+  assert.ok(!JSON.stringify(h.a).includes(KEY));
+ } finally {vscode.commands.executeCommand=original;}
+});
+
+test('host guards all generation phases, releases counters on failure, and rejects new generation during switch',async()=>{
+ const h=switchHarness(),original=vscode.commands.executeCommand;let restarts=0;
+ vscode.commands.executeCommand=async()=>{restarts++;return true;};
+ try {
+  for(const type of ['code.plan','code.planFollowup','code.spec','code.generate']) {
+   let release;const gate=new Promise(resolve=>release=resolve);
+   const dispatch=h.side.dispatchMessage;
+   h.side.dispatchMessage=async()=>{await gate;throw new Error('test failure');};
+   const work=h.side.handleMessage({type,payload:{requestId:'qa'}});
+   assert.equal(await h.side.changeAiProvider('anthropic'),false);
+   assert.match(h.a.findLast(m=>m.type==='ai.switchError').payload.message,/코드 생성/);
+   assert.equal(restarts,0);release();await work;h.side.dispatchMessage=dispatch;
+   assert.equal(h.side._codeRequests,0);
+  }
+  let release;const gate=new Promise(resolve=>release=resolve);
+  vscode.commands.executeCommand=async()=>{restarts++;await gate;return true;};
+  const switching=h.side.changeAiProvider('anthropic');
+  while(!restarts) await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(await h.side.changeAiProvider('openai'),false); // duplicate ignored
+  await h.side.handleMessage({type:'code.generate',payload:{requestId:'blocked'}});
+  assert.ok(h.a.some(m=>m.type==='code.error'&&m.payload.requestId==='blocked'&&/AI 전환/.test(m.payload.message)));
+  release();await switching;assert.equal(restarts,1);
+ } finally {vscode.commands.executeCommand=original;}
+});
+
+test('a load started before switching cannot overwrite the final provider',async()=>{
+ const h=switchHarness(),original=vscode.commands.executeCommand;
+ const route=h.api.getModelRouting;let release;
+ const stale=await route();h.api.getModelRouting=()=>new Promise(resolve=>{release=()=>resolve(stale);});
+ const load=h.side.handleMessage({type:'models.load'});
+ h.api.getModelRouting=route;vscode.commands.executeCommand=async()=>true;
+ try {
+  await h.side.changeAiProvider('anthropic');release();await load;
+  const states=h.a.filter(m=>m.type==='models.state');
+  assert.equal(states.length,1);assert.equal(states[0].payload.routing.quality.provider,'anthropic');
+  await h.side.handleMessage({type:'ai.switch',payload:{provider:'invalid'}});
+  assert.match(h.a.findLast(m=>m.type==='ai.switchError').payload.message,/알 수 없는/);
+ } finally {vscode.commands.executeCommand=original;}
+});

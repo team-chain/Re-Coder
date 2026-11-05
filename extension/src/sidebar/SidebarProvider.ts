@@ -1,6 +1,6 @@
-import { saveRoutingSettings } from '../ai/aiKeys';
+import { runAiConnectCommand, saveRoutingSettings, switchAiProvider } from '../ai/aiKeys';
 import { SEEN_KEY, pendingCount } from '../ops/monitorDigest';
-import { currentAiProvider, isAiKeyProvider, isEconomyProvider, pricesEnv, storedAiKeys } from '../ai/aiKeyEnv';
+import { AI_KEY_SECRET, AI_PROVIDERS, AI_PROVIDER_STATE, AiKeyProvider, currentAiProvider, isAiKeyProvider, isEconomyProvider, pricesEnv, storedAiKeys } from '../ai/aiKeyEnv';
 import { withTimeout } from '../core/timeouts';
 import { detectFrontendProject } from '../deploy/frontendBuild';
 import * as vscode from 'vscode';
@@ -761,6 +761,97 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         return healed;
     }
 
+    private _codeRequests = 0;
+    private _aiChanging = false;
+    private _aiTarget: string | null = null;
+    private _routingRevision = 0;
+
+    private aiActivity() {
+        return { generating: this._codeRequests > 0, switching: this._aiChanging, target: this._aiTarget };
+    }
+
+    private async publishModelsState(requestWebview?: vscode.Webview, check = false, settled = false): Promise<void> {
+        const revision = this._routingRevision;
+        const [routing, costs, compare, keys] = await Promise.all([
+            check ? this._apiClient.checkModels() : this._apiClient.getModelRouting(),
+            this._apiClient.getModelCosts(30), this._apiClient.getModelCompare('').catch(() => null),
+            this._secrets && this._globalState ? storedAiKeys({ secrets: this._secrets, globalState: this._globalState }) : Promise.resolve(null),
+        ]);
+        // A response started before a switch must never repaint the old provider.
+        if (revision !== this._routingRevision || (this._aiChanging && !settled)) { return; }
+        const cfg = vscode.workspace.getConfiguration('recoder.ai');
+        const providers = Object.fromEntries(['anthropic', 'openai'].map(p => {
+            const model = cfg.get<string>(`${p}Model`, '').trim();
+            const fast = cfg.get<string>(`${p}FastModel`, '').trim();
+            return [p, { model: model || routing.provider_defaults?.[p]?.model || '',
+                fastModel: fast || model || routing.provider_defaults?.[p]?.fast_model || '' }];
+        }));
+        this.postMessageToWebview(requestWebview, 'models.state', {
+            routing, costs, compare, keys,
+            activity: settled ? { ...this.aiActivity(), switching: false, target: null } : this.aiActivity(),
+            settings: { providers, economyProvider: cfg.get<string>('economyProvider', '') || '', compatibleBaseUrl: cfg.get<string>('compatibleBaseUrl', '') || '',
+                qualityModel: routing.choices.find(c => c.spec === 'quality')?.model || routing.quality.model,
+                fastModel: routing.choices.find(c => c.spec === 'fast')?.model || routing.quality.model,
+                autoRecommend: cfg.get<boolean>('autoRecommend', true), lockSensitive: cfg.get<boolean>('lockSensitive', true),
+                retryWithComplex: cfg.get<boolean>('retryWithComplex', true), prices: JSON.parse(pricesEnv(cfg.get('prices', {})) || '{}') },
+        });
+    }
+
+    /** Both the command palette and webviews use the same serialized transaction. */
+    public async changeAiProvider(provider?: AiKeyProvider, connect = false): Promise<boolean> {
+        const fail = (message: string) => { this.postMessage('ai.switchError', { message }); return false; };
+        if (!connect && provider !== 'anthropic' && provider !== 'openai') { return fail('알 수 없는 AI입니다.'); }
+        if (!this._secrets || !this._globalState) { return fail('AI 보안 저장소를 사용할 수 없습니다.'); }
+        if (this._aiChanging) { return false; }
+        this._aiChanging = true; // Reserve before the first await, including key-store reads.
+        this._aiTarget = provider || null;
+        this._routingRevision++;
+        const context = { secrets: this._secrets, globalState: this._globalState };
+        const previous = this._globalState.get<string | undefined>(AI_PROVIDER_STATE, undefined);
+        const savedKeys = new Map<string, string | undefined>();
+        let mutated = false;
+        try {
+            if (!connect && provider === await currentAiProvider(context)) {
+                await this.publishModelsState(undefined, false, true);
+                return false;
+            }
+            if (this._codeRequests > 0) { return fail('코드 생성이 끝난 뒤 바꿀 수 있습니다.'); }
+            this.postMessage('ai.activity', this.aiActivity());
+            // A connect command may replace a key or explicitly select AWS (delete keys).
+            // Keep its rollback snapshot only in memory, never in messages or logs.
+            if (connect) {
+                for (const p of AI_PROVIDERS) { savedKeys.set(AI_KEY_SECRET[p], await this._secrets.get(AI_KEY_SECRET[p])); }
+            }
+            mutated = true;
+            const changed = connect ? await runAiConnectCommand(context, provider)
+                : await switchAiProvider(context, provider!) || await runAiConnectCommand(context, provider);
+            if (!changed) { mutated = false; await this.publishModelsState(undefined, false, true); return false; }
+            if (await vscode.commands.executeCommand('recoder.restartCore') !== true) { throw new Error('restart failed'); }
+            await this.publishModelsState(undefined, false, true);
+            return true;
+        } catch {
+            if (!mutated) { return fail('AI 연결 상태를 읽지 못했습니다. 다시 시도해 주세요.'); }
+            let restored = false;
+            try {
+                for (const [key, value] of savedKeys) {
+                    if (value === undefined) { await this._secrets.delete(key); } else { await this._secrets.store(key, value); }
+                }
+                await this._globalState.update(AI_PROVIDER_STATE, previous);
+                restored = await vscode.commands.executeCommand('recoder.restartCore') === true;
+                if (restored) { await this.publishModelsState(undefined, false, true); }
+            } catch { restored = false; }
+            const name = provider === 'anthropic' ? 'Claude' : provider === 'openai' ? 'GPT' : 'AI';
+            const old = previous === 'anthropic' ? 'Claude' : previous === 'openai' ? 'GPT' : '기존 연결';
+            return fail(restored ? `${name}로 바꾸지 못했습니다. 이전 AI(${old})로 되돌렸습니다.`
+                : `${name}로 바꾸지 못했고 이전 AI 재연결도 실패했습니다. Core 연결 상태를 확인해 주세요.`);
+        } finally {
+            this._aiChanging = false;
+            this._aiTarget = null;
+            this._routingRevision++;
+            this.postMessage('ai.activity', this.aiActivity());
+        }
+    }
+
     private async handleMessage(
         message: { type: string; payload: unknown },
         requestWebview?: vscode.Webview,
@@ -769,6 +860,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         if (/^(canvas\.graph|code\.|chat\.)/.test(message.type)) {
             console.info(`[ReCoder] request ${message.type} id=${String(p.requestId ?? p.id ?? '')}`);
         }
+        const codeRequest = ['code.plan', 'code.planFollowup', 'code.spec', 'code.generate'].includes(message.type);
+        if (codeRequest && this._aiChanging) {
+            this.postMessageToWebview(requestWebview, 'code.error', { ...p, message: 'AI 전환이 끝난 뒤 다시 요청해 주세요.' });
+            return;
+        }
+        if (codeRequest) { this._codeRequests++; this.postMessage('ai.activity', this.aiActivity()); }
         try {
             await this.dispatchMessage(message, requestWebview);
         } catch (error) {
@@ -778,6 +875,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 : message.type.startsWith('code.') ? 'code.error'
                 : message.type.startsWith('chat.') ? 'chat.error' : 'errorMessage';
             this.postMessageToWebview(requestWebview, reply, { ...p, context: message.type, message: detail });
+        } finally {
+            if (codeRequest) { this._codeRequests--; this.postMessage('ai.activity', this.aiActivity()); }
         }
     }
 
@@ -857,6 +956,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 } catch (err) {
                     this.postMessage('errorMessage', { message: String(err) });
                 }
+                break;
+            }
+            case 'ai.switch': {
+                const provider = (payload as { provider?: unknown } | undefined)?.provider;
+                await this.changeAiProvider(provider as AiKeyProvider);
                 break;
             }
             case 'ai.connect': {
@@ -2550,21 +2654,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             case 'models.load': {
                 //: 2.0.36 작업별 AI 공급자 화면 — 등급별 공급자·30일 비용·마지막 비교. 키 값은 보내지 않는다(있는지만).
                 try {
-                    const [routing, costs, compare, keys] = await Promise.all([
-                        type === 'models.check' ? this._apiClient.checkModels() : this._apiClient.getModelRouting(),
-                        this._apiClient.getModelCosts(30),
-                        this._apiClient.getModelCompare('').catch(() => null),
-                        this._secrets && this._globalState ? storedAiKeys({ secrets: this._secrets, globalState: this._globalState }) : Promise.resolve(null),
-                    ]);
-                    const cfg = vscode.workspace.getConfiguration('recoder.ai');
-                    this.postMessageToWebview(requestWebview, 'models.state', {
-                        routing, costs, compare, keys,
-                        settings: { economyProvider: cfg.get<string>('economyProvider', '') || '', compatibleBaseUrl: cfg.get<string>('compatibleBaseUrl', '') || '',
-                            qualityModel: routing.choices.find(c => c.spec === 'quality')?.model || routing.quality.model,
-                            fastModel: routing.choices.find(c => c.spec === 'fast')?.model || routing.quality.model,
-                            autoRecommend: cfg.get<boolean>('autoRecommend', true), lockSensitive: cfg.get<boolean>('lockSensitive', true),
-                            retryWithComplex: cfg.get<boolean>('retryWithComplex', true), prices: JSON.parse(pricesEnv(cfg.get('prices', {})) || '{}') },
-                    });
+                    await this.publishModelsState(requestWebview, type === 'models.check');
                 } catch (err) {
                     this.postMessageToWebview(requestWebview, 'models.error', { message: err instanceof Error ? err.message : String(err) });
                 }
@@ -2572,6 +2662,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
             case 'models.setModels': {
                 try {
+                    if (this._codeRequests || this._aiChanging) { throw new Error('진행 중인 AI 작업이 끝난 뒤 설정을 바꿀 수 있습니다.'); }
                     const p = (payload ?? {}) as { tier?: unknown; model?: unknown };
                     if ((p.tier !== 'quality' && p.tier !== 'fast') || typeof p.model !== 'string') { throw new Error('모델 설정 값이 올바르지 않습니다.'); }
                     const routing = await this._apiClient.getModelRouting();
@@ -2589,6 +2680,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             }
             case 'models.setToggle': {
                 try {
+                    if (this._codeRequests || this._aiChanging) { throw new Error('진행 중인 AI 작업이 끝난 뒤 설정을 바꿀 수 있습니다.'); }
                     const p = (payload ?? {}) as { key?: unknown; value?: unknown };
                     if (typeof p.key !== 'string' || !['autoRecommend', 'lockSensitive', 'retryWithComplex'].includes(p.key) || typeof p.value !== 'boolean') {
                         throw new Error('추천 설정 값이 올바르지 않습니다.');

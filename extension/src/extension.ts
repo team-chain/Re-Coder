@@ -16,7 +16,7 @@ import { activeProjectPath, initActiveProject, pickProjectFolder } from './activ
 import { DiscordWebhook } from './sidebar/discordWebhook';
 import { AlertWatcher } from './ops/alertWatcher';
 import { MonitorDigest } from './ops/monitorDigest';
-import { isAiKeyProvider, isEconomyProvider, recentRoutingWrite, runAiConnectCommand, runEconomyCommand } from './ai/aiKeys';
+import { isAiKeyProvider, isEconomyProvider, recentRoutingWrite, storedAiKeys, runEconomyCommand } from './ai/aiKeys';
 import * as path from 'path';
 import * as fs from 'fs';
 import { CoreManager } from './core/CoreManager';
@@ -512,9 +512,25 @@ export function activate(context: vscode.ExtensionContext): void {
     // AWS 를 쓰지 않는 사용자를 위한 경로. 키를 저장하면 Core 를 재시작해 새 키로 연결을 확인한다.
     context.subscriptions.push(
         vscode.commands.registerCommand('recoder.ai.connect', async (provider?: unknown) => {
-            const changed = await runAiConnectCommand(context, isAiKeyProvider(provider) ? provider : undefined);
-            if (changed) { await vscode.commands.executeCommand('recoder.restartCore'); }
+            return sidebarProvider.changeAiProvider(isAiKeyProvider(provider) ? provider : undefined, true);
         })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('recoder.ai.switch', async (provider?: unknown) => {
+            if (provider === undefined) {
+                const keys = await storedAiKeys(context);
+                const pick = await vscode.window.showQuickPick((['anthropic', 'openai'] as const).map(value => ({
+                    label: value === 'anthropic' ? 'Claude' : 'GPT', value,
+                    description: keys[value] ? '연결됨' : '키 연결 필요',
+                })), { title: 'ReCoder: AI 바꾸기 (Claude / GPT)' });
+                if (!pick) { return false; }
+                provider = pick.value;
+            }
+            const changed = await sidebarProvider.changeAiProvider(provider as 'anthropic' | 'openai');
+            if (changed) { vscode.window.showInformationMessage(`ReCoder: ${provider === 'anthropic' ? 'Claude' : 'GPT'}로 바꿨습니다.`); }
+            return changed;
+        }),
     );
 
     // ── Command: 절약 등급 AI 공급자 (2.0.36) ─────────────────────────────────
@@ -553,10 +569,12 @@ export function activate(context: vscode.ExtensionContext): void {
                         sidebarProvider.triggerDiagnostics();
                     }
                 );
-            } catch (err) {
-                const message = err instanceof Error ? err.message : String(err);
+                return true;
+            } catch {
+                const message = 'Core 연결을 다시 시작하지 못했습니다. 연결 상태를 확인해 주세요.';
                 vscode.window.showErrorMessage(`ReCoder Core 재시작 실패: ${message}`);
                 sidebarProvider.postMessage('core.error', { message });
+                return false;
             }
         })
     );
