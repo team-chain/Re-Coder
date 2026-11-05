@@ -10,7 +10,7 @@ const React = require('react');
 const STARTUP = new Set(['code.project', 'models.load']);
 function mount(props = {}) {
   const states = [], effects = [], timers = new Map(), messages = [], startup = [];
-  let cursor = 0, tree, receive, timerId = 0, reviews = 0, now = 0;
+  let cursor = 0, tree, receivers = [], timerId = 0, reviews = 0, now = 0;
   const exports = {};
   const hooks = {
     ...React,
@@ -19,6 +19,7 @@ function mount(props = {}) {
       if (!(index in states)) states[index] = typeof initial === 'function' ? initial() : initial;
       return [states[index], value => { states[index] = typeof value === 'function' ? value(states[index]) : value; }];
     },
+    useReducer(reducer, initial) { const [value, setValue] = hooks.useState(initial); return [value, event => setValue(old => reducer(old, event))]; },
     useRef(initial) { const index = cursor++; return states[index] ?? (states[index] = {current: initial}); },
     useCallback: fn => fn,
     useEffect(fn, deps) {
@@ -28,7 +29,7 @@ function mount(props = {}) {
       }
     },
   };
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../out/webview-test/components/CodeAgent.js'), 'utf8'), {
+  const sandbox = {
     exports,
     setTimeout(fn, ms) { const id = ++timerId; timers.set(id, {fn, at:now + ms}); return id; },
     clearTimeout(id) { timers.delete(id); },
@@ -36,13 +37,19 @@ function mount(props = {}) {
       if (id === 'react') return hooks;
       if (id === '../hooks/useVSCodeApi') return {useVSCodeApi: () => ({
         //: 처음 그릴 때 묻는 프로젝트 이름·모델 목록은 따로 모은다(요청 흐름 시험이 세는 메시지와 섞지 않는다).
-        postMessage: (type, payload) => (STARTUP.has(type) ? startup : messages).push({type, payload}), useMessage: fn => {receive = fn;},
+        postMessage: (type, payload) => (STARTUP.has(type) ? startup : messages).push({type, payload}), useMessage: fn => {receivers.push(fn);},
       })};
+      if (id === '../hooks/useAiSwitch') {
+        const module = { ...sandbox, exports: {}, require: name => name === './useVSCodeApi' ? sandbox.require('../hooks/useVSCodeApi') : sandbox.require(name) };
+        vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../out/webview-test/hooks/useAiSwitch.js'), 'utf8'), module);
+        return module.exports;
+      }
       return require(path.join(__dirname, '../out/webview-test/components', id));
     },
-  });
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../out/webview-test/components/CodeAgent.js'), 'utf8'), sandbox);
   function render() {
-    cursor = 0;
+    cursor = 0; receivers = [];
     tree = exports.CodeAgent({isActive: true, onReviewRequired: () => reviews++, ...props});
     effects.splice(0).forEach(fn => fn());
   }
@@ -60,7 +67,7 @@ function mount(props = {}) {
     find: predicate => nodes().find(predicate),
     button(label) { const node = nodes().find(n => n.type === 'button' && text(n) === label); assert.ok(node, label); return node; },
     input(value) { nodes().find(n => n.type === 'textarea').props.onChange({target: {value}}); render(); },
-    emit(type, payload) { receive({type, payload}); render(); },
+    emit(type, payload) { receivers.forEach(receive => receive({type, payload})); render(); },
     expire() { const callbacks = [...timers.values()]; timers.clear(); callbacks.forEach(({fn}) => fn()); render(); },
     advance(ms) {
       now += ms;
@@ -439,4 +446,19 @@ test('위치 칩: 폴더를 고르지 않았으면 열린 프로젝트 이름을
   assert.ok(label().includes('board-app'), label());
   ui.emit('code.setTargetFolder', {folder: 'server/src'});
   assert.ok(label().includes('server/src'));
+});
+
+test('composer follows remote provider switch, hides chip for non-API routing, and blocks sends while host is busy',()=>{
+ const ui=mount();
+ const model=(provider)=>({routing:{quality:{provider},choices:[]},settings:{providers:{}},keys:{anthropic:true,openai:true},activity:{switching:false,target:null,generating:false}});
+ ui.emit('models.state',model('openai'));
+ let picker=ui.find(n=>n.props.current==='openai' && n.props.onPick);assert.ok(picker);
+ picker.props.onPick('anthropic');ui.render();
+ assert.equal(ui.messages.at(-1).type,'ai.switch');
+ ui.input('게시판');ui.button('보내기').props.onClick();assert.ok(!ui.messages.some(m=>m.type==='code.plan'));
+ ui.emit('models.state',model('anthropic'));
+ picker=ui.find(n=>n.props.current==='anthropic' && n.props.onPick);assert.equal(picker.props.justSwitched,true);
+ ui.emit('ai.activity',{switching:false,target:null,generating:true});
+ assert.equal(ui.button('보내기').props.disabled,true);
+ ui.emit('models.state',model('bedrock'));assert.ok(!ui.find(n=>n.props.onPick&&n.props.current));
 });

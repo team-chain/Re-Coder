@@ -217,3 +217,16 @@ test('모델 확인을 통과한 항목만 활성화, 종료 날짜 표시, 기�
  assert.match(html,/꺼 두면 이런 요청도 간단한 모델을 고를 수 있습니다/);
  assert.equal((html.match(/role="switch"/g)||[]).length,3);
 });
+
+test('provider cards show current, connected, missing key and switching; all controls lock during generation',()=>{
+ const props={state:{routing,costs,keys:{anthropic:true,openai:false},settings:{}},job:null,compareError:'',starting:false,instruction:'',pair:['',''],post(){},onReload(){},onInstruction(){},onPair(){},onStart(){}};
+ const html=extra=>renderToStaticMarkup(React.createElement(ModelRoutingView,{...props,...extra}));
+ assert.match(html(),/role="radiogroup" aria-label="AI"/);
+ assert.match(html(),/aria-checked="true"[^>]+data-provider="anthropic"/);
+ assert.match(html(),/키 연결/);
+ assert.match(html({state:{...props.state,keys:{anthropic:true,openai:true}}}),/연결됨/);
+ assert.match(html({switching:'openai'}),/바꾸는 중…/);
+ const locked=html({aiLocked:true});
+ assert.equal((locked.match(/data-provider="[^"]+" disabled=""/g)||[]).length,2);
+ assert.match(locked,/<select[^>]+disabled=""/);
+});

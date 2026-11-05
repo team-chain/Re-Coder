@@ -15,6 +15,8 @@ import FlowPreviewPanel from "./FlowPreviewPanel";
 import { ConsistencyIssue, FallbackDocsNote, RemainingIssues, SecurityReport, SecurityScoreNote, UnusedFile, UnusedFilesNote, applyLocked, filesToApply } from "./codeIssues";
 import { TeamBoard } from "./TeamBoard";
 import { TeamSetup } from "./TeamSetup";
+import { useAiSwitch } from "../hooks/useAiSwitch";
+import { AiPicker, AiId, AI_IDS } from "./AiPicker";
 import { AcceptancePanel, ResultSpec } from "./AcceptancePanel";
 import { Preset, RunStat, TeamConfig, addRun, cleanConfig, cleanHistory, defaultConfig, modelOptions, modelsForRequest, readySpecs, setDevs, effectiveConfig, recommendPreset, restoreRecommendation, updateRecommendation } from "./teamConfig";
 import type { RoutingChoice } from "./modelRoutingModel";
@@ -202,6 +204,9 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
   //: 역할별 모델 목록(코어 /api/models/routing) — 받기 전에는 기본 두 개만.
   const [routingChoices, setRoutingChoices] = useState<RoutingChoice[] | null>(null);
   const [aiSettings, setAiSettings] = useState({ autoRecommend: true, lockSensitive: true });
+  //: 작성창 AI 칩 — 지금 공급자 · 공급자별 모델 · 저장된 키. 바꾸는 동안에는 switching.
+  const [ai, setAi] = useState<{ current: AiId; keys: Record<string, boolean>; providers: Record<string, { model: string; fastModel: string }> } | null>(null);
+  const aiSwitch = useAiSwitch();
   const previousInput = React.useRef(input);
   useEffect(() => {
     const previous = previousInput.current;
@@ -331,6 +336,12 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
       const st = payload as { routing?: { choices?: RoutingChoice[] }; settings?: { autoRecommend?: boolean; lockSensitive?: boolean } };
       if (Array.isArray(st?.routing?.choices)) setRoutingChoices(st.routing!.choices!);
       if (st?.settings) setAiSettings({ autoRecommend: st.settings.autoRecommend !== false, lockSensitive: st.settings.lockSensitive !== false });
+      const full = payload as { routing?: { quality?: { provider?: string } }; keys?: Record<string, boolean> | null; settings?: { providers?: Record<string, { model: string; fastModel: string }> } };
+      const provider = full?.routing?.quality?.provider;
+      if (provider === "anthropic" || provider === "openai") {
+        setAi({ current: provider, keys: full.keys ?? {}, providers: full.settings?.providers ?? {} });
+
+      } else { setAi(null); }
       return;
     }
     if (type === "code.project") {
@@ -489,7 +500,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
 
   const send = useCallback(() => {
     const text = input.trim();
-    if (!text || activeRequest.current !== null) { return; }
+    if (!text || activeRequest.current !== null || aiSwitch.locked || aiSwitch.generating) { return; }
     const id = _turnSeq++;
     activeRequest.current = id;
     pendingRequestsRef.current[id] = { instruction: text, targetFolder, contextFiles, team: teamMode, roster, config: { ...effectiveConfig(teamConfig, text, aiSettings.lockSensitive, aiSettings.autoRecommend), auto: false } };
@@ -500,7 +511,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     waitForResponse(id, isHostLinkLost() ? 5 : FIRST_ACK_SECONDS);
     postMessage("code.plan", { requestId: id, instruction: text, targetFolder, contextFiles });
     setInput("");
-  }, [input, targetFolder, contextFiles, postMessage, teamMode, roster, teamConfig, aiSettings]);
+  }, [input, targetFolder, contextFiles, postMessage, teamMode, roster, teamConfig, aiSettings, aiSwitch.locked, aiSwitch.generating]);
 
   const chooseDecision = useCallback((key: string) => {
     setDecisionModal((current) => current ? {
@@ -641,7 +652,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
     border: "1px solid var(--vscode-input-border, #3f3f3f)", borderRadius: 4, padding: "3px 9px",
     fontSize: 11, cursor: "pointer",
   };
-  const isBusy = turns.some((turn) => turn.status === "planning" || turn.status === "generating");
+  const isBusy = aiSwitch.locked || aiSwitch.generating || turns.some((turn) => turn.status === "planning" || turn.status === "generating");
   const hasTurns = turns.length > 0;
 
   return (
@@ -933,6 +944,8 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
             {!connectionPending && !isActive && <button onClick={() => postMessage("ai.connect")} style={{ ...linkBtn, marginLeft: 10 }}>AWS 없이 API 키로 연결</button>}
           </div>
         )}
+        {aiSwitch.notice && <div role="alert" className="rc-cg-notice" data-testid="ai-notice">{aiSwitch.notice}
+          <button onClick={aiSwitch.clearNotice} style={{ ...linkBtn, marginLeft: 10 }}>닫기</button></div>}
         <div className="rc-cg-box">
           <textarea
             ref={inputRef}
@@ -967,6 +980,10 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
               autoRecommend={aiSettings.autoRecommend} lockSensitive={aiSettings.lockSensitive} onOpenModels={onOpenModels} />
             </div>
             <div className="rc-cg-actions">
+            {ai && <AiPicker current={ai.current} switching={aiSwitch.switching} justSwitched={aiSwitch.done} disabled={isBusy} onOpenModels={onOpenModels}
+              providers={AI_IDS.map((id) => ({ id, quality: ai.providers[id]?.model ?? "", fast: ai.providers[id]?.fastModel ?? "", connected: !!ai.keys[id] }))}
+              onPick={(id) => aiSwitch.begin(id)}
+              onConnect={(id) => aiSwitch.begin(id, true)} />}
             <span className="rc-cg-kbd">Ctrl ↵</span>
             <button type="button" onClick={send} disabled={!input.trim() || isBusy} className="rc-cg-send" title="보내기 (Ctrl+Enter)">
               <svg width="19" height="19" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5" /></svg>

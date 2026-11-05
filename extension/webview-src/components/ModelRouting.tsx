@@ -11,6 +11,24 @@ import { Switch } from "./Check";
 import { RecommendationIcon } from "./TeamSetup";
 import { prettyModel } from "./teamConfig";
 import { MarkGlyph } from "./ui/marks";
+import { AI_CSS, AI_IDS, AI_NAME, AI_VENDOR, AiId, AiMark } from "./AiPicker";
+
+//: 공급자 카드 — Claude / GPT 중 하나. 키가 없으면 「키 연결」.
+const PROVIDER_CSS = `
+.rc-mr-prov{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:16px}
+.rc-mr-pcard{display:flex;align-items:center;gap:12px;min-height:66px;padding:0 14px;border-radius:14px;border:1px solid var(--rc-line2);background:var(--rc-tile);color:var(--rc-fg);font:inherit;text-align:left;cursor:pointer;transition:border-color .12s ease,background .12s ease}
+.rc-mr-pcard:hover{border-color:color-mix(in srgb,var(--rc-teal) 45%,var(--rc-line2));background:var(--rc-tile2)}
+.rc-mr-pcard[aria-checked=true]{border-color:var(--rc-teal);background:color-mix(in srgb,var(--rc-teal) 9%,transparent);box-shadow:0 0 0 3px color-mix(in srgb,var(--rc-teal) 12%,transparent)}
+.rc-mr-pcard:focus-visible{outline:2px solid var(--rc-teal);outline-offset:2px}
+.rc-mr-pcard:disabled{cursor:default;opacity:.6}
+.rc-mr-pcard .txt{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.rc-mr-pcard b{font-size:14.5px;font-weight:650}
+.rc-mr-pcard small{font-size:12px;color:var(--rc-fg2)}
+.rc-mr-state{display:inline-flex;align-items:center;gap:5px;font-size:12.5px;font-weight:600;color:var(--rc-fg2);white-space:nowrap}
+.rc-mr-state.on{color:var(--rc-teal)}
+@media(max-width:560px){.rc-mr-prov{grid-template-columns:1fr}}
+`;
+import { useAiSwitch } from "../hooks/useAiSwitch";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import {
   CompareJob, ModelsState, TIER_LABEL, compareChoices, compareRows, costCell, formatTokens,
@@ -53,6 +71,7 @@ export const ModelRouting: React.FC = () => {
   const [busy, setBusy] = useState(false);
   const [instruction, setInstruction] = useState("");
   const [pair, setPair] = useState<[string, string]>(["", ""]);
+  const aiSwitch = useAiSwitch();
   const poll = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const seenRunning = useRef<string>("");
 
@@ -79,6 +98,7 @@ export const ModelRouting: React.FC = () => {
     } else if (m.type === "models.compareError") {
       setStarting(false);
       setCompareError(String((m.payload as { message?: string })?.message || ""));
+
     }
   });
 
@@ -98,22 +118,30 @@ export const ModelRouting: React.FC = () => {
   if (!state) { return <div style={{ ...card, color: C.muted, fontSize: 12 }}>{friendlyError(error) || "AI 모델 정보를 읽는 중…"}{error && <button style={btn(false)} onClick={load}>다시 읽기</button>}</div>; }
 
   return <ModelRoutingView state={state} job={job} compareError={compareError} starting={starting} instruction={instruction}
-    pair={pair} busy={busy} error={error} post={(type, payload) => {
+    pair={pair} busy={busy} error={aiSwitch.notice || error} switching={aiSwitch.switching} aiLocked={aiSwitch.locked || aiSwitch.generating} post={(type, payload) => {
       if (["models.check", "models.setModels", "models.setToggle"].includes(type)) { setBusy(true); setError(""); }
+      if (type === "ai.switch" || type === "ai.connect") {
+        const provider = (payload as { provider?: string })?.provider;
+        if (provider === "anthropic" || provider === "openai") { setError(""); aiSwitch.begin(provider, type === "ai.connect"); }
+        return;
+      }
       postMessage(type, payload);
     }} onReload={load} onInstruction={setInstruction} onPair={setPair}
     onStart={() => { setStarting(true); setCompareError(""); postMessage("models.compare.start", { instruction: instruction.trim(), providers: pair }); }} />;
 };
 
 export interface ModelRoutingViewProps {
-  busy?: boolean; error?: string;
+  busy?: boolean; error?: string; aiLocked?: boolean;
+  /** 바꾸는 중인 공급자(anthropic/openai) — 그동안 카드는 잠긴다. */
+  switching?: string | null;
   state: ModelsState; job: CompareJob | null; compareError: string; starting: boolean; instruction: string; pair: [string, string];
   post: (type: string, payload?: unknown) => void; onReload: () => void; onInstruction: (v: string) => void;
   onPair: (f: (p: [string, string]) => [string, string]) => void; onStart: () => void;
 }
 
 /** 화면 본체 — 상태는 위 컨테이너가 갖고, 이쪽은 그리기만 한다(Node 에서 렌더 검사). */
-export const ModelRoutingView: React.FC<ModelRoutingViewProps> = ({ state, job, compareError, starting, instruction, pair, post, onReload, onInstruction, onPair, onStart, busy = false, error = "" }) => {
+export const ModelRoutingView: React.FC<ModelRoutingViewProps> = ({ state, job, compareError, starting, instruction, pair, post, onReload, onInstruction, onPair, onStart, busy: localBusy = false, error = "", switching = null, aiLocked = false }) => {
+  const busy = localBusy || aiLocked || !!switching;
   const [showCompare, setShowCompare] = useState(!!job);
   const postMessage = post;
   const load = onReload;
@@ -122,7 +150,7 @@ export const ModelRoutingView: React.FC<ModelRoutingViewProps> = ({ state, job, 
   const { routing, costs } = state;
   const choices = compareChoices(routing);
   const running = job?.status === "running";
-  const canStart = !running && !starting && instruction.trim().length > 0 && pair[0] && pair[1] && pair[0] !== pair[1];
+  const canStart = !busy && !running && !starting && instruction.trim().length > 0 && pair[0] && pair[1] && pair[0] !== pair[1];
   const rows = job ? compareRows(job) : [];
   const qualityModel = state.settings.qualityModel || routing.choices.find(c => c.spec === "quality")?.model || routing.quality.model;
   const fastModel = state.settings.fastModel || routing.choices.find(c => c.spec === "fast")?.model || qualityModel;
@@ -141,8 +169,24 @@ export const ModelRoutingView: React.FC<ModelRoutingViewProps> = ({ state, job, 
       <section style={card} aria-label="모델">
         <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
           <h2 style={{ ...h, margin: 0 }}>모델</h2>
-          <span style={{ marginLeft: "auto", color: C.muted, fontSize: 12 }}>{providerName(routing.quality.provider)} · {checked ? `${checked} 확인` : "확인 전"}</span>
+          <span style={{ marginLeft: "auto", color: C.muted, fontSize: 12 }}>{checked ? `${checked} 확인` : "확인 전"}</span>
           <button style={btn(false, !busy)} disabled={busy} onClick={() => postMessage("models.check")}>{busy ? "적용 중…" : "모델 확인"}</button>
+        </div>
+        <style>{AI_CSS}{PROVIDER_CSS}</style>
+        <div className="rc-mr-prov" role="radiogroup" aria-label="AI">
+          {AI_IDS.map((id: AiId) => {
+            const on = routing.quality.provider === id;
+            const connected = !!state.keys?.[id];
+            return <button key={id} type="button" role="radio" aria-checked={on} className="rc-mr-pcard" data-provider={id} disabled={busy || starting || running}
+              onClick={() => { if (on) return; postMessage(connected ? "ai.switch" : "ai.connect", { provider: id }); }}>
+              <AiMark id={id} size={36} />
+              <span className="txt"><b>{AI_NAME[id]}</b><small>{AI_VENDOR[id]}</small></span>
+              {switching === id ? <span className="rc-mr-state on"><span className="rc-ai-spin" aria-hidden="true" />바꾸는 중…</span>
+                : on ? <span className="rc-mr-state on"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m3.5 8.4 2.9 2.8 6.1-6.4" /></svg>사용 중</span>
+                : connected ? <span className="rc-mr-state">연결됨</span>
+                : <span className="rc-ai-key">키 연결</span>}
+            </button>;
+          })}
         </div>
         {(["quality", "fast"] as const).map(tier => <div key={tier} data-tier={tier} style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "8px 14px", marginTop: 14 }}>
           <label htmlFor={`rc-model-${tier}`} style={{ width: 92, fontSize: 13.5, fontWeight: 600 }}>{tier === "quality" ? "복잡한 작업" : "간단한 작업"}</label>

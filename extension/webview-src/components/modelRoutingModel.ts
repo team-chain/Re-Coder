@@ -1,3 +1,4 @@
+import type { AiActivity } from "../hooks/useAiSwitch";
 /**
  * 작업별 AI 공급자(2.0.36) — 화면이 쓰는 형태와 순수 계산(포맷·비교 표). React 없이 테스트한다.
  */
@@ -21,8 +22,10 @@ export interface CompareMetrics {
 }
 export interface CompareSide { spec: string; provider: string; model: string; status: "waiting" | "running" | "succeeded" | "failed"; metrics: CompareMetrics | null; error: string; seconds: number | null }
 export interface CompareJob { id: string; status: "running" | "finished"; started_at: number; finished_at: number | null; sides: CompareSide[]; verdict: Record<string, string | null> | null }
-export interface ModelsState { routing: ModelRouting; costs: ModelCosts; compare: CompareJob | null; keys: Record<string, boolean> | null; settings: { economyProvider: string; compatibleBaseUrl: string; qualityModel?: string; fastModel?: string;
-  autoRecommend?: boolean; lockSensitive?: boolean; retryWithComplex?: boolean; prices?: Record<string, { input: number; output: number }> } }
+export interface ModelsState { activity?: AiActivity; routing: ModelRouting; costs: ModelCosts; compare: CompareJob | null; keys: Record<string, boolean> | null; settings: { economyProvider: string; compatibleBaseUrl: string; qualityModel?: string; fastModel?: string;
+  autoRecommend?: boolean; lockSensitive?: boolean; retryWithComplex?: boolean; prices?: Record<string, { input: number; output: number }>;
+  /** 공급자별 복잡 · 간단 모델(설정값, 비면 Core 기본값) — 작성창 AI 메뉴가 쓴다. */
+  providers?: Record<string, { model: string; fastModel: string }> } }
 
 export const PROVIDER_LABEL: Record<string, string> = {
   bedrock: "AWS Bedrock", gateway: "게이트웨이", anthropic: "Claude API", openai: "OpenAI API", compatible: "OpenAI 호환", gemini: "Gemini(대체)",
