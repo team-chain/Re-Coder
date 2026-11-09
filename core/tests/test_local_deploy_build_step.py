@@ -28,7 +28,7 @@ class _Proc:
 def test_Dockerfile_있으면_워크스페이스에서_docker_build_를_돈다(monkeypatch, tmp_path):
     (tmp_path / "Dockerfile").write_text("FROM alpine\n", encoding="utf-8")
     calls = []
-    monkeypatch.setattr(d.subprocess, "run", lambda cmd, **kw: calls.append((cmd, kw)) or _Proc(0))
+    monkeypatch.setattr(d._proc_tools(), "run", lambda cmd, **kw: calls.append((cmd, kw)) or _Proc(0))
 
     assert asyncio.run(d._build_local_image(_plan(), str(tmp_path))) is None
     cmd, kw = calls[0]
@@ -38,7 +38,7 @@ def test_Dockerfile_있으면_워크스페이스에서_docker_build_를_돈다(m
 
 def test_빌드_실패는_stderr_와_함께_실패로_끝난다_컨테이너는_안_건드림(monkeypatch, tmp_path):
     (tmp_path / "Dockerfile").write_text("FROM alpine\n", encoding="utf-8")
-    monkeypatch.setattr(d.subprocess, "run", lambda cmd, **kw: _Proc(1, err="npm ERR! missing script"))
+    monkeypatch.setattr(d._proc_tools(), "run", lambda cmd, **kw: _Proc(1, err="npm ERR! missing script"))
 
     r = asyncio.run(d._build_local_image(_plan(), str(tmp_path)))
 
@@ -69,7 +69,7 @@ def test_빌드_타임아웃은_예외_없이_실패_응답(monkeypatch, tmp_pat
     (tmp_path / "Dockerfile").write_text("FROM alpine\n", encoding="utf-8")
     def boom(cmd, **kw):
         raise subprocess.TimeoutExpired(cmd, 1)
-    monkeypatch.setattr(d.subprocess, "run", boom)
+    monkeypatch.setattr(d._proc_tools(), "run", boom)
     r = asyncio.run(d._build_local_image(_plan(), str(tmp_path)))
     assert r["status"] == "failed" and "끝나지 않았습니다" in r["message"]
 

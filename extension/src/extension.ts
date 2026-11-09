@@ -33,6 +33,8 @@ import { bridgeEnabled } from './bridge/bridgeEnabled';
 import { BridgeClient } from './bridge/BridgeClient';
 import { runEnrollCommand } from './gateway/enroll';
 import { DiscordController } from './discord/DiscordController';
+import { managedPermissions } from './cloud/managedPermissions';
+import { initializePortableTools, recoverPortableTools } from './runtime/portableTools';
 
 // ---------------------------------------------------------------------------
 // Activate
@@ -42,6 +44,11 @@ export function activate(context: vscode.ExtensionContext): void {
     console.log('[ReCoder] Extension activating…');
     //: 배포·보안 화면의 대상 폴더(멀티 루트에서 새로 추가한 프로젝트를 따라간다).
     initActiveProject(context);
+    initializePortableTools(context.globalStorageUri.fsPath,message=>{void vscode.window.setStatusBarMessage('ReCoder · '+message,15000);});
+    context.subscriptions.push(vscode.commands.registerCommand('recoder.repairTools',async()=>{
+        try{await recoverPortableTools();vscode.window.showInformationMessage('실행 도구 준비 상태를 복구했습니다. ReCoder Core를 다시 시작하면 공식 도구를 다시 준비합니다.');}
+        catch(e){vscode.window.showErrorMessage(e instanceof Error?e.message:'실행 도구 복구 실패');}
+    }));
 
     // ── Core service instances ──────────────────────────────────────────────
     const coreManager = CoreManager.getInstance(context);
@@ -109,6 +116,7 @@ export function activate(context: vscode.ExtensionContext): void {
         //: 그 재시작을 넘겨야 하는 요청을 globalState 로 인계한다.
         context.globalState,
         context.secrets,
+        context.globalStorageUri,
     );
 
     context.subscriptions.push(
@@ -361,6 +369,39 @@ export function activate(context: vscode.ExtensionContext): void {
             sidebarProvider.triggerDiagnostics();
         })
     );
+
+    context.subscriptions.push(vscode.commands.registerCommand('recoder.managedAwsPermissions',async()=>{
+        try{
+            const metadata=(await coreManager.getManagedAwsConnection())?.metadata;
+            const status=metadata?null:await apiClient.getAwsStatus().catch(()=>null);
+            const account=metadata?.account||status?.identity?.account||await vscode.window.showInputBox({title:'AWS 권한 정책 · 계정 번호',prompt:'AWS 콘솔의 12자리 계정 번호. 액세스 키가 아닙니다.',validateInput:v=>/^\d{12}$/.test(v)?null:'12자리 계정 번호를 입력하세요.'});
+            if(!account)return;
+            const region=metadata?.region||status?.region||await vscode.window.showInputBox({title:'AWS 권한 정책 · 리전',value:'us-east-1'});if(!region)return;
+            const policies=managedPermissions(account,region);
+            const choice=await vscode.window.showQuickPick([{label:'실행용 정책',description:'설치 후 계속 사용',key:'runtime'},{label:'최초 설치용 정책',description:'관리자 설치 또는 일시 부여 후 제거',key:'bootstrap'}],{title:`관리형 AWS 권한 · ${account} · ${region}`});if(!choice)return;
+            await vscode.window.showTextDocument(await vscode.workspace.openTextDocument({language:'json',content:JSON.stringify(policies[choice.key as 'runtime'|'bootstrap'],null,2)}),{preview:true});
+            vscode.window.showInformationMessage('기존 AWS 연결을 그대로 사용합니다. IAM 관리자가 필요한 권한만 추가하면 됩니다. 최초 설치용 정책은 환경 설치 완료 후 제거하세요.');
+        }catch(e){vscode.window.showErrorMessage(e instanceof Error?e.message:'AWS 권한 정책을 만들지 못했습니다.');}
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('recoder.awsBrowserLogin', async () => {
+        const currentRegion=await apiClient.getAwsStatus().then(s=>s.region||'').catch(()=>'');
+        const region = await vscode.window.showInputBox({title:'AWS 계정 연결',prompt:'로그인과 관리형 작업에 사용할 AWS 리전',value:currentRegion,placeHolder:'예: ap-northeast-2',ignoreFocusOut:true,
+            validateInput:v=>/^(?:af|ap|ca|eu|il|me|mx|sa|us)-(?!gov|iso)[a-z]+-\d$/.test(v)?null:'예: ap-northeast-2'});
+        if(!region)return false;
+        try {
+            return await vscode.window.withProgress({location:vscode.ProgressLocation.Notification,title:'브라우저에서 AWS 로그인',cancellable:true},async(_progress,cancellation)=>{
+                const abort=new AbortController();const subscription=cancellation.onCancellationRequested(()=>abort.abort());
+                try {
+                    await coreManager.getBrowserAwsSession().login(region,url=>vscode.env.openExternal(vscode.Uri.parse(url)),abort.signal);
+                    await ensureCoreRunning(coreManager,sidebarProvider);
+                    const env=await coreManager.browserAwsEnvironment();
+                    await apiClient.connectAwsBrowser({endpoint:env.AWS_CONTAINER_CREDENTIALS_FULL_URI,token:env.AWS_CONTAINER_AUTHORIZATION_TOKEN,region,account:env.RECODER_AWS_ACCOUNT_ID});
+                    await coreManager.enableBrowserAwsLogin();sidebarProvider.triggerDiagnostics();
+                    vscode.window.showInformationMessage('AWS 계정이 연결되었습니다. 임시 자격증명은 자동 갱신됩니다.');return true;
+                }finally{subscription.dispose();}
+            });
+        }catch(error){vscode.window.showErrorMessage(`AWS 로그인 실패: ${error instanceof Error?error.message:'다시 시도하세요.'}`);return false;}
+    }));
 
     // ── Command: AWS Credentials Configure (native input boxes) ─────────────
     // showInputBox 3단계로 자격증명 수집 → Core 가 STS GetCallerIdentity 로 검증.

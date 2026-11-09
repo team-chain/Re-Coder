@@ -26,6 +26,7 @@ from typing import Callable, Optional
 
 from core.agents.preflight_agent import PreflightAgent
 from core.agents import ecs_build
+from core import managed_build
 from core.agents.ecs_health import configure_health_check, python_http_health_check
 from core.agents import ecs_runtime
 from core.agents.ecs_progress import initialize_progress, advance_progress, finish_progress
@@ -170,6 +171,7 @@ class ECSAgent:
         #: 2.0.27 HTTPS 주소(CloudFront)·관리형 DB(RDS) — 비밀번호는 메모리에만, 배포가 끝나면 버린다.
         self._cdn: dict[int, "aws_cdn.CdnResult"] = {}
         self._db: dict[int, "aws_rds.DbHandle"] = {}
+        self._managed: dict[int, managed_build.VerifiedBuild] = {}
 
     @staticmethod
     def _plan_shield(request: ECSDeployRequest) -> "shield_mod.ShieldDecision":
@@ -231,6 +233,8 @@ class ECSAgent:
         return {
             "ecs": session.client("ecs"),
             "ecr": session.client("ecr"),
+            "codebuild": session.client("codebuild"),
+            "s3": session.client("s3"),
             "ec2": session.client("ec2"),
             "logs": session.client("logs"),
             "sts": session.client("sts"),
@@ -386,6 +390,28 @@ class ECSAgent:
                     if request.edge == "alb_waf" else "만") + " (비용 확인함)")
             clients = self._clients(request.region)
 
+            if request.managed_build is not None:
+                if not request.run_security_scan or not request.generate_sbom:
+                    raise InfraError("관리형 이미지 배포에서는 보안 검사와 SBOM을 끌 수 없습니다.")
+                if request.dockerfile != "Dockerfile":
+                    raise InfraError("관리형 이미지 배포는 프로젝트 루트의 Dockerfile을 사용합니다.")
+                record.provisioned["managed_build"] = "AWS 이미지·검사 결과 검증 중"
+                try:
+                    verified = await asyncio.get_running_loop().run_in_executor(
+                        None, managed_build.verify_build, request.managed_build,
+                        request.workspace_path or "", request.region, clients,
+                    )
+                except Exception as exc:
+                    raise InfraError(
+                        "관리형 이미지 검증 실패 — " + (str(exc) if isinstance(exc, ValueError) else type(exc).__name__),
+                        remedy="AWS 실행용 권한과 소스 변경 여부를 확인하고 이미지를 다시 준비하세요. 기존 서비스는 변경하지 않았습니다.",
+                    ) from exc
+                self._managed[id(request)] = verified
+                request.image = verified.report["image"]
+                request.ecr_repo = managed_build.REPOSITORY
+                request.image_tag = request.managed_build.run_id
+                record.provisioned["managed_build"] = request.managed_build.build_id
+
             # 1. Preflight
             if request.run_preflight:
                 record = await self._step_preflight(request, record)
@@ -465,6 +491,13 @@ class ECSAgent:
             await self._step_database_ready(request, record, clients)
 
             # 6. Task Definition 생성 + 등록
+            if id(request) in self._managed:
+                try:
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, self._managed[id(request)].assert_sources, request.workspace_path or "",
+                    )
+                except ValueError as exc:
+                    raise InfraError(str(exc), remedy="소스를 저장하고 이미지를 다시 준비하세요. 새 태스크는 등록하지 않았습니다.") from exc
             task_def_arn, prev_arn = await self._step_register_task_definition(
                 request, clients, image_uri
             )
@@ -661,6 +694,7 @@ class ECSAgent:
             self._edge.pop(id(request), None)
             self._cdn.pop(id(request), None)
             self._db.pop(id(request), None)
+            self._managed.pop(id(request), None)
 
     # ------------------------------------------------------------------
     # 단계별 구현
@@ -1206,6 +1240,11 @@ class ECSAgent:
         `workspace_path` 가 없으면 빌드를 건너뛰고 요청에 담긴 `image` 를
         그대로 쓴다 — 이미 ECR 에 있는 이미지를 재배포하는 경우다.
         """
+        if id(req) in self._managed:
+            result = self._managed[id(req)].report
+            rec.image_uri = rec.image = req.image = result["image"]
+            rec.image_digest = result["imageDigest"]
+            return result["image"]
         if not req.workspace_path:
             if not req.image:
                 raise InfraError(
@@ -1326,6 +1365,11 @@ class ECSAgent:
         상태가 된다. 로그만 남기는 것으로는 부족하다 — 사이드바는 로그가
         아니라 `provisioned` 의 경고를 읽는다.
         """
+        if id(req) in self._managed:
+            rec.scan_result = self._managed[id(req)].scan_result()
+            rec.scan_result.repo_path = req.workspace_path
+            rec.scan_result.dockerfile_path = str(Path(req.workspace_path or "") / req.dockerfile)
+            return rec
         if not req.workspace_path:
             self._add_scan_gaps(
                 rec, ["작업 폴더 없음 — 시크릿·Dockerfile 검사 불가"]
@@ -1413,6 +1457,9 @@ class ECSAgent:
         # 소스·Dockerfile 은 빌드 **전에** 이미 봤다(`_step_scan_sources`).
         # 여기서 또 돌리면 같은 검사를 두 번 하고, 결과 객체를 덮어써서
         # 앞 단계에서 찾은 것이 사라진다.
+        if id(req) in self._managed:
+            rec.scan_result = self._managed[id(req)].scan_result()
+            return rec
         previous = rec.scan_result
         rec.scan_result = await security_scanner.scan_all(
             image=image, dockerfile_path=None, repo_path=None
@@ -1462,7 +1509,8 @@ class ECSAgent:
         사용자가 SBOM 을 원하지 않으면 `generate_sbom=False` 로 끄면 된다.
         켜 놓고 조용히 실패하는 경우를 없앤다.
         """
-        sbom = await sbom_generator.generate(image)
+        sbom = (await asyncio.get_running_loop().run_in_executor(None, self._managed[id(req)].save_sbom)
+                if id(req) in self._managed else await sbom_generator.generate(image))
         rec.sbom = sbom
         rec.sbom_path = sbom.sbom_path
 

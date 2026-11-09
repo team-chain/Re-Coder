@@ -140,6 +140,18 @@ def test_파일_수_상한():
     assert str(s3_byo.MAX_FILES) in str(exc.value)
 
 
+def test_production_chunked_site_is_not_truncated():
+    files = [{"path": "index.html", "content": "<h1>site</h1>"}]
+    files += [{"path": f"assets/chunk-{i}.js", "content": "export default 1"} for i in range(120)]
+    assert len(s3_byo.plan_upload(files).items) == 121
+
+
+def test_total_decoded_size_is_bounded(monkeypatch):
+    monkeypatch.setattr(s3_byo, "MAX_TOTAL_BYTES", 20)
+    with pytest.raises(s3_byo.S3DeployError, match="전체 크기"):
+        s3_byo.plan_upload([{"path": "index.html", "content": "x" * 11}, {"path": "app.js", "content": "x" * 11}])
+
+
 def test_파일_크기_상한():
     big = "a" * (s3_byo.MAX_BYTES_PER_FILE + 1)
     with pytest.raises(s3_byo.S3DeployError) as exc:

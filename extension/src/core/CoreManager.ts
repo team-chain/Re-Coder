@@ -19,6 +19,10 @@ import { CoreClient } from '../api/coreClient';
 import { isOlderBundledCore, shouldReuseRunningCore } from './coreReuse';
 import { CoreProcessLog } from './CoreProcessLog';
 import { TimeoutError, withFallback, withTimeout } from './timeouts';
+import { AwsConsoleSession, BROWSER_LOGIN_STATE } from '../cloud/awsConsoleLogin';
+import { CredentialBridge, removeAmbientAwsCredentials } from '../cloud/credentialBridge';
+import { preparePortableEnvironment, toolEnvironment } from '../runtime/portableTools';
+import type {ConnectedManagedAws} from '../cloud/connectedAws';
 
 export interface RuntimeConfig {
     port: number;
@@ -74,6 +78,8 @@ export class CoreManager {
     /** 방금 띄운 Core 가 준비 전에 끝났는지와 마지막 stderr 몇 줄 — 준비 대기가 60초를 헛돌지 않게. */
     private spawnWatch: { exited: boolean; code: number | null; tail: string[]; lockHeld?: boolean } | null = null;
     private extensionContext: vscode.ExtensionContext;
+    private browserSession?: AwsConsoleSession;
+    private credentialBridge?: CredentialBridge;
 
     // CoreClient 인스턴스 (외부에서 사용)
     private _client: CoreClient | null = null;
@@ -116,9 +122,14 @@ export class CoreManager {
         if (this.ensurePromise) {
             return this.ensurePromise;
         }
-        const attempt = withTimeout(this._ensureRunning(), ENSURE_RUNNING_TIMEOUT_MS,
+        const attempt = (async () => {
+            // Initial tool downloads have their own bounded timeouts, independently
+            // of the Core startup deadline. Keep this inside the singleton promise.
+            await preparePortableEnvironment();
+            return withTimeout(this._ensureRunning(), ENSURE_RUNNING_TIMEOUT_MS,
             `ReCoder Core 를 ${ENSURE_RUNNING_TIMEOUT_MS / 1000}초 안에 준비하지 못했습니다. `
             + '명령 팔레트에서 "ReCoder: Restart Core" 를 실행하거나 창을 다시 불러오세요. 자세한 내용은 ~/.recoder/core.log 에 있습니다.');
+        })();
         this.ensurePromise = attempt;
         try {
             return await attempt;
@@ -293,6 +304,8 @@ export class CoreManager {
      * 파일이나 workspace 설정에는 키를 쓰지 않는다.
      */
     private async _awsEnv(): Promise<Record<string, string>> {
+        // Explicit browser mode must fail closed; expired login must not select another account.
+        if (this.isBrowserAwsLogin()) return this.browserAwsEnvironment();
         try {
             const [accessKeyId, secretAccessKey, storedRegion, sessionToken] = await Promise.all([
                 this.secret(AWS_ACCESS_KEY_SECRET),
@@ -344,6 +357,7 @@ export class CoreManager {
         | { kind: 'profile'; profile: string; region: string }
         | null
     > {
+        if (this.isBrowserAwsLogin()) return null;
         try {
             const [accessKeyId, secretAccessKey, storedRegion, sessionToken] = await Promise.all([
                 this.secret(AWS_ACCESS_KEY_SECRET),
@@ -376,6 +390,7 @@ export class CoreManager {
 
     /** STS 검증이 끝난 자격증명만 VS Code SecretStorage에 보관한다. */
     async storeAwsCredentials(credentials: AwsSecretCredentials): Promise<void> {
+        await this.disableBrowserAwsLogin();
         await this.extensionContext.secrets.store(AWS_ACCESS_KEY_SECRET, credentials.accessKeyId);
         await this.extensionContext.secrets.store(AWS_SECRET_KEY_SECRET, credentials.secretAccessKey);
         await this.extensionContext.secrets.store(AWS_REGION_SECRET, credentials.region || 'ap-northeast-2');
@@ -393,8 +408,49 @@ export class CoreManager {
         await this.extensionContext.globalState.update(AWS_ROLE_ARN_STATE, undefined);
     }
 
+    isBrowserAwsLogin(): boolean {
+        return this.extensionContext.globalState.get<boolean>(BROWSER_LOGIN_STATE, false);
+    }
+
+    async getManagedAwsConnection():Promise<ConnectedManagedAws|undefined>{
+        const {connectedManagedAws}=await import('../cloud/connectedAws');
+        return connectedManagedAws(this);
+    }
+
+    getBrowserAwsSession(): AwsConsoleSession {
+        if (!this.browserSession) this.browserSession = new AwsConsoleSession(this.extensionContext.secrets);
+        return this.browserSession;
+    }
+
+    async browserAwsEnvironment(): Promise<Record<string, string>> {
+        const session = this.getBrowserAwsSession();
+        const {region, account} = await withTimeout(session.metadata(), SECRET_READ_TIMEOUT_MS, 'AWS 로그인 정보 읽기 시간 초과');
+        if (!this.credentialBridge) {
+            this.credentialBridge = new CredentialBridge(() => session.credentials());
+            this.extensionContext.subscriptions?.push(this.credentialBridge);
+        }
+        return {...await this.credentialBridge.start(), AWS_REGION: region, AWS_DEFAULT_REGION: region,
+            AWS_SHARED_CREDENTIALS_FILE: process.platform === 'win32' ? 'NUL' : '/dev/null',
+            AWS_CONFIG_FILE: process.platform === 'win32' ? 'NUL' : '/dev/null',
+            RECODER_AWS_BROWSER_LOGIN: '1', RECODER_AWS_ACCOUNT_ID: account};
+    }
+
+    async enableBrowserAwsLogin(): Promise<void> {
+        await this.extensionContext.globalState.update(BROWSER_LOGIN_STATE, true);
+        await this.extensionContext.globalState.update(AWS_ROLE_ARN_STATE, undefined);
+    }
+
+    private async disableBrowserAwsLogin(): Promise<void> {
+        if (!this.isBrowserAwsLogin() && !this.browserSession) return;
+        await this.extensionContext.globalState.update(BROWSER_LOGIN_STATE, undefined);
+        this.credentialBridge?.dispose();
+        this.credentialBridge = undefined;
+        await this.getBrowserAwsSession().logout();
+    }
+
     /** 프로필 연결 상태를 보관한다 — 이름뿐, 비밀 값은 저장하지 않는다. */
     async storeAwsProfile(profile: string, region: string): Promise<void> {
+        await this.disableBrowserAwsLogin();
         await this.extensionContext.globalState.update(AWS_PROFILE_STATE, profile);
         await this.extensionContext.globalState.update(AWS_PROFILE_REGION_STATE, region || '');
         //: 반대 방향도 지운다 — 남은 키가 AWS_PROFILE 을 이기면 화면은
@@ -423,6 +479,7 @@ export class CoreManager {
 
     /** SecretStorage의 AWS 자격증명(및 프로필·역할 연결 상태)을 제거한다. */
     async clearAwsCredentials(): Promise<void> {
+        await this.disableBrowserAwsLogin();
         await Promise.all([
             this.extensionContext.secrets.delete(AWS_ACCESS_KEY_SECRET),
             this.extensionContext.secrets.delete(AWS_SECRET_KEY_SECRET),
@@ -638,8 +695,9 @@ export class CoreManager {
 
             //: 확장 호스트 전용 변수(ELECTRON_RUN_AS_NODE 등)는 코어에 넘기지 않는다 — 코어가
             //: 띄우는 Docker Desktop(Electron)이 그걸 물려받으면 GUI 없이 즉시 종료한다(실기기).
-            const hostEnv: NodeJS.ProcessEnv = { ...process.env };
+            const hostEnv: NodeJS.ProcessEnv = toolEnvironment();
             for (const k of ['ELECTRON_RUN_AS_NODE', 'ELECTRON_NO_ATTACH_CONSOLE', 'NODE_OPTIONS']) { delete hostEnv[k]; }
+            if (awsEnv.RECODER_AWS_BROWSER_LOGIN === '1') removeAmbientAwsCredentials(hostEnv);
             //: 키로 AWS 에 연결했으면 셸에서 물려받은 AWS_PROFILE 을 넘기지 않는다 — 남아 있으면
             //: Bedrock 요청이 화면에 보이는 계정이 아닌 그 프로필 계정으로 나간다.
             if (awsEnv.AWS_ACCESS_KEY_ID) { delete hostEnv.AWS_PROFILE; delete hostEnv.AWS_DEFAULT_PROFILE; }

@@ -4,14 +4,15 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { createHash } from 'crypto';
 import { isSensitiveFile } from '../deploy/staticSite';
+import { ensurePortableTool,toolEnvironment } from '../runtime/portableTools';
 
 const exec = promisify(execFile);
 export interface CommitFile { path: string; status: string; blocked: string }
 export interface CommitPreview { files: CommitFile[]; fingerprint: string; name: string; email: string }
 async function git(root: string, args: string[]) {
-  return (await exec('git', ['-C', root, '--literal-pathspecs', ...args], {
+  return (await exec(await ensurePortableTool('git'), ['-C', root, '--literal-pathspecs', ...args], {
     windowsHide: true, timeout: 30000, maxBuffer: 4 * 1024 * 1024,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    env: { ...toolEnvironment(), GIT_TERMINAL_PROMPT: '0' },
   })).stdout;
 }
 export function blockedFile(root: string, file: string): string {

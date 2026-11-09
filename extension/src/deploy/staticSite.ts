@@ -248,9 +248,11 @@ export class StaticAssetReadError extends Error {
 }
 
 /** 코어가 거부하기 전에 확장에서 먼저 잡는 상한. core/s3_byo.py 와 같은 값. */
-export const MAX_FILES = 30;
+export const MAX_FILES = 2000;
 /** 파일을 읽기·base64 변환하기 전에 막을 바이트 상한. core/s3_byo.py 와 같다. */
-export const MAX_BYTES_PER_FILE = 3_000_000;
+export const MAX_BYTES_PER_FILE = 5 * 1024 * 1024;
+/** Bound the whole request as well as individual assets (matches managed frontend output). */
+export const MAX_TOTAL_BYTES = 32 * 1024 * 1024;
 
 /**
  * 파일 수 상한을 넘었을 때 **무엇을 고치면 되는지** 말해 준다.
@@ -382,7 +384,8 @@ export function collectStaticFiles(
         throw new TooManyFilesError(paths.length, dirLabel);
     }
 
-    const files: StaticFile[] = [];
+    // Check all sizes before reading any file; a many-chunk bundle must not exhaust the host.
+    const sizes = new Map<string,number>();let totalBytes = 0;
     for (const { rel, full } of paths) {
         let size: number;
         try {
@@ -395,6 +398,11 @@ export function collectStaticFiles(
         if (!Number.isFinite(size) || size < 0 || size > MAX_BYTES_PER_FILE) {
             throw new StaticAssetTooLargeError(rel, size);
         }
+        sizes.set(full,size);totalBytes+=size;
+        if(totalBytes>MAX_TOTAL_BYTES)throw new Error('정적 사이트 전체 크기가 32MB를 초과합니다. 큰 미디어는 별도 CDN에 올려 주세요.');
+    }
+    const files: StaticFile[] = [];
+    for (const { rel, full } of paths) {
         let buffer: Buffer;
         try {
             buffer = fsImpl.readFileSync(full);
@@ -402,6 +410,7 @@ export function collectStaticFiles(
             // 자산 하나라도 빠진 "성공"은 깨진 사이트를 만들 뿐이다.
             throw new StaticAssetReadError(rel, 'file');
         }
+        if(buffer.length!==sizes.get(full))throw new Error(`${rel}: 수집 중 파일 크기가 바뀌었습니다. 빌드가 끝난 뒤 다시 배포하세요.`);
         const binary = isBinaryAsset(rel);
         if (/\.html?$/i.test(rel)) {
             const html = buffer.toString('utf-8');

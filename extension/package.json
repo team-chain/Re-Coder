@@ -2,7 +2,7 @@
   "name": "recoder",
   "displayName": "ReCoder — AI DevOps Agent",
   "description": "From Error to Operation: AI-powered DevOps agent for VSCode. Error analysis, code patching, Dockerfile generation, docker build/run, and ops response — all with approval-based safety.",
-  "version": "3.0.4",
+  "version": "3.0.9",
   "publisher": "recoder-team",
   "license": "MIT",
   "preview": true,
@@ -124,6 +124,19 @@
         "icon": "$(sign-out)"
       },
       {
+        "command": "recoder.repairTools",
+        "title": "ReCoder: 실행 도구 복구"
+      },
+      {
+        "command": "recoder.managedAwsPermissions",
+        "title": "ReCoder: 관리형 AWS 권한 보기"
+      },
+      {
+        "command": "recoder.awsBrowserLogin",
+        "title": "AWS 계정 연결 (브라우저 로그인)",
+        "category": "ReCoder"
+      },
+      {
         "command": "recoder.awsConfigure",
         "title": "ReCoder: Configure AWS Credentials",
         "icon": "$(cloud)"
@@ -195,8 +208,7 @@
         "command": "recoder.generateInFolder",
         "title": "ReCoder: 이 폴더에 코드 생성",
         "icon": "$(sparkle)"
-      }
-,
+      },
       {
         "command": "recoder.quickAccess.wheel",
         "title": "ReCoder: 빠른 이동 휠 (Alt+Q)",
@@ -397,6 +409,12 @@
     "configuration": {
       "title": "ReCoder",
       "properties": {
+        "recoder.experimental.managedExecution": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "markdownDescription": "S3/ECS 준비 단계에서 AWS 원격 빌드를 선택할 수 있게 합니다. 기본값은 기존 로컬 빌드입니다. 원격 빌드는 별도 실행 환경과 사용료가 발생하며 실계정 통합 검증 전인 선택 기능입니다. 기존 AWS 연결을 재사용합니다."
+        },
         "recoder.quickAccess": {
           "type": "object",
           "markdownDescription": "**빠른 이동** — `Alt+Q` 로 휠을 띄우고 방향키 하나로 기능을 엽니다. 적지 않은 칸은 기본값(↑ 코드 생성 · → 아키텍처 · ↓ 배포 캔버스 · ← 에러 분석)을 쓰고, `\"\"` 로 두면 그 칸을 비웁니다. `shift+…` 칸(휠에서 Shift+방향키)은 원하는 기능을 더 넣는 자리입니다. 휠의 **편집** 에서도 바꿀 수 있고, 휠을 여는 키는 VS Code 단축키 설정(`recoder.quickAccess.wheel`)에서 바꿀 수 있습니다.",
@@ -831,8 +849,20 @@
         },
         "recoder.ai.economyProvider": {
           "type": "string",
-          "enum": ["", "fast", "anthropic", "openai", "compatible"],
-          "enumDescriptions": ["품질과 같은 공급자(기존 동작)", "품질 공급자의 빠른 모델", "Claude API", "OpenAI API", "OpenAI 호환 API (DeepSeek 등)"],
+          "enum": [
+            "",
+            "fast",
+            "anthropic",
+            "openai",
+            "compatible"
+          ],
+          "enumDescriptions": [
+            "품질과 같은 공급자(기존 동작)",
+            "품질 공급자의 빠른 모델",
+            "Claude API",
+            "OpenAI API",
+            "OpenAI 호환 API (DeepSeek 등)"
+          ],
           "default": "",
           "description": "절약 등급 작업(설계 질문 주제·요약·오류 분류·원인 후보·테스트 초안)을 보낼 AI 공급자. 코드 생성·보안 수정·교정은 언제나 기본(품질) 공급자가 합니다. 다른 공급자로 나가는 문맥은 비밀값을 가립니다."
         },
@@ -847,10 +877,21 @@
           "additionalProperties": {
             "type": "object",
             "properties": {
-              "input": { "type": "number", "minimum": 0, "description": "입력 100만 토큰당 달러" },
-              "output": { "type": "number", "minimum": 0, "description": "출력 100만 토큰당 달러" }
+              "input": {
+                "type": "number",
+                "minimum": 0,
+                "description": "입력 100만 토큰당 달러"
+              },
+              "output": {
+                "type": "number",
+                "minimum": 0,
+                "description": "출력 100만 토큰당 달러"
+              }
             },
-            "required": ["input", "output"]
+            "required": [
+              "input",
+              "output"
+            ]
           },
           "markdownDescription": "모델별 단가(100만 토큰당 달러) — 비용 원장·공급자 비교에 씁니다. 예: `{\"deepseek-chat\": {\"input\": 0.5, \"output\": 1.5}}`(예시 숫자). 값은 공급자 가격표에서 확인하세요. 단가를 모르는 모델은 0 달러로 적지 않고 '단가 미설정'으로 보여 줍니다."
         },
@@ -898,12 +939,12 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run build && npm run verify:package",
-    "compile": "node scripts/prune-host-output.js && tsc -p tsconfig.json",
+    "compile": "node scripts/prune-host-output.js && node scripts/sync-security-assets.js && tsc -p tsconfig.json",
     "watch": "tsc -watch -p tsconfig.json",
     "build": "npm run compile && npm run build:webview",
     "build:webview": "cd webview-src && npx webpack --config webpack.config.js --mode production",
     "watch:webview": "cd webview-src && npx webpack --config webpack.config.js --mode development --watch",
-    "package": "vsce package",
+    "package": "npm run verify:release && vsce package",
     "lint": "tsc -p tsconfig.json --noEmit && tsc -p webview-src/tsconfig.json --noEmit",
     "pretest": "npm run compile",
     "test": "tsc -p webview-src/tsconfig.test.json && node --test out/test/coreClient.smoke.js webview-tests/*.test.js",
@@ -939,7 +980,8 @@
     "webpack-cli": "^5.1.0"
   },
   "dependencies": {
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "yauzl": "3.4.0"
   },
   "overrides": {
     "@azure/msal-node": "^7.1.1",

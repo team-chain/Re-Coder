@@ -16,6 +16,7 @@
 import * as cp from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import { ensurePortableTool,toolEnvironment } from '../runtime/portableTools';
 
 export interface FrontendProject {
     /** 워크스페이스 기준 프로젝트 폴더('' 은 루트). */
@@ -162,7 +163,7 @@ export function needsBuild(workspace: string, project: FrontendProject): boolean
     return Math.max(0, ...sources) > built;
 }
 
-export interface BuildOutcome { ok: boolean; via: 'npm' | 'docker'; output: string }
+export interface BuildOutcome { ok: boolean; via: 'npm' | 'docker' | 'managed'; output: string; outDir?:string }
 
 /** 문자열은 셸로(npm 처럼 PATH·.cmd 를 찾아야 하는 고정 명령), 배열은 셸 없이(사용자 경로가 들어가는 명령) 실행한다. */
 type Runner = (command: string | string[], cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number) => Promise<{ code: number | null; output: string }>;
@@ -206,7 +207,9 @@ export async function buildFrontend(
     runner: Runner = run,
 ): Promise<BuildOutcome> {
     const cwd = path.join(workspace, project.projectDir);
-    const env: NodeJS.ProcessEnv = { ...process.env, GENERATE_SOURCEMAP: 'false', CI: 'false', BROWSER: 'none' };
+    // Existing Node installations retain precedence; only missing tools are prepared automatically.
+    if(runner===run)await ensurePortableTool('node');
+    const env: NodeJS.ProcessEnv = { ...toolEnvironment(), GENERATE_SOURCEMAP: 'false', CI: 'false', BROWSER: 'none' };
     delete env.NODE_ENV; // NODE_ENV=production 이면 devDependencies(빌드 도구)가 설치되지 않는다
     const hasLock = fs.existsSync(path.join(cwd, 'package-lock.json'));
     const where = project.projectDir || '프로젝트 루트';

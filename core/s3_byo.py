@@ -20,10 +20,11 @@ import os
 import re
 from dataclasses import dataclass, field
 
-#: 게이트웨이 경로와 같은 상한. 정적 사이트 초안을 올리는 용도라 넉넉할 필요가 없고,
-#: 실수로 node_modules 를 통째로 올리는 사고를 여기서 막는다.
-MAX_FILES = 30
-MAX_BYTES_PER_FILE = 3_000_000
+#: Managed frontend output and the extension collector share these bounds.
+#: Support chunked production sites while bounding decoded request memory.
+MAX_FILES = 2000
+MAX_BYTES_PER_FILE = 5 * 1024 * 1024
+MAX_TOTAL_BYTES = 32 * 1024 * 1024
 
 #: 버킷 이름 접두사. aws_policy.py 의 RESOURCE_PREFIX 와 같아야 한다 —
 #: 최소권한 정책이 `arn:aws:s3:::recoder-*` 로 범위를 좁히기 때문이다.
@@ -324,6 +325,7 @@ def plan_upload(files: list[dict]) -> UploadPlan:
     plan = UploadPlan()
     seen: set[str] = set()
     html_keys: list[str] = []
+    total_bytes = 0
 
     for entry in files:
         raw_path = (entry or {}).get("path") or (entry or {}).get("filename") or ""
@@ -349,6 +351,10 @@ def plan_upload(files: list[dict]) -> UploadPlan:
                 f"{key}: 알 수 없는 encoding '{encoding}'. "
                 f"{TEXT_ENCODING} 또는 {BASE64_ENCODING} 만 씁니다."
             )
+        # Reject oversized encoded data before allocating another decoded copy.
+        encoded_limit = 4 * ((MAX_BYTES_PER_FILE + 2) // 3) if encoding == BASE64_ENCODING else MAX_BYTES_PER_FILE
+        if len(content) > encoded_limit:
+            raise S3DeployError(f"{key}: 파일이 너무 큽니다 (상한 {MAX_BYTES_PER_FILE:,} 바이트).")
         if encoding == BASE64_ENCODING:
             import base64 as _b64
             import binascii
@@ -365,6 +371,9 @@ def plan_upload(files: list[dict]) -> UploadPlan:
                 f"{key}: 파일이 너무 큽니다 ({len(data):,} 바이트, 상한 "
                 f"{MAX_BYTES_PER_FILE:,})."
             )
+        total_bytes += len(data)
+        if total_bytes > MAX_TOTAL_BYTES:
+            raise S3DeployError("정적 사이트 전체 크기가 32MB를 초과합니다. 큰 미디어는 별도 CDN에 올려 주세요.")
 
         #: 이름 검사는 `config.js` 안에 하드코딩된 액세스 키를 못 잡는다.
         #: 저장소에 이미 있는 시크릿 스캐너를 **공개 배포 직전**에 돌린다 —

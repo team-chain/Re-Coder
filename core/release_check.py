@@ -9,7 +9,7 @@ import sys
 
 RUNTIME_IMPORTS = (
     'api.routes.canvas', 'github_agent', 'static_frontend', 'deployment_inputs', 'code_agent', 'adr', 'aws_onboarding',
-    'agents.ecs_agent', 's3_byo', 'security_scan', 'local_deploy_agent',
+    'agents.ecs_agent', 'managed_build', 'managed_aws', 's3_byo', 'security_scan', 'local_deploy_agent',
     'llm.bedrock_provider', 'llm.gemini_provider', 'llm.provider_router', 'llm.api_key_provider',
     'commerce_starter', 'generated_validation', 'build_readiness', 'screen_check', 'build_failure', 'vuln_advice', 'npm_registry', 'local_services', 'scan_process',
     'preflight.contract_loader', 'persistence', 'nacl.public',
@@ -52,7 +52,7 @@ RUNTIME_IMPORTS = (
 #: 때마다 임시 폴더에 풀고 백신이 하나하나 검사해 Windows 에서 Core 시작이 12~50초 걸렸다.
 BUNDLED_AWS_SERVICES = (
     'sts', 'ecs', 'ecr', 's3', 'iam', 'elbv2', 'budgets', 'bedrock-runtime', 'bedrock',
-    'logs', 'ec2', 'dynamodb', 'cloudformation', 'sso', 'sso-oidc', 'signin',
+    'logs', 'ec2', 'dynamodb', 'cloudformation', 'codebuild', 'sso', 'sso-oidc', 'signin',
     #: 2.0.25 공격·장애 감지 알림(지표·경보·메일)
     'cloudwatch', 'sns',
     #: 2.0.26 대규모 방패(WAF)

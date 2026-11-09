@@ -1,0 +1,83 @@
+ReCoder 보안 기능 통합 검증 — 2026-11-09
+
+현재 판정
+자동 검사와 Mac 설치·로컬 Docker 배포는 통과했다.
+실제 GPT 감사는 끝났지만 의도적으로 넣은 SQL 인젝션을 확정하지 못했다.
+AWS 관리형 실행과 실제 모델을 사용하는 PentAGI 전체 검사는 미완료다.
+따라서 전체 기능 합격 또는 운영 출시 준비 완료로 판정하지 않는다.
+
+통합 기준
+- develop: 70626bc1c9e5b6f89121a55cbd077aa38e596769
+- codex/security-overview-redteam: d51fc915927b46a53559dfac0e7cb7ed1081eee5
+- 통합 후보 버전: 3.0.9 (Unreleased)
+- 검사한 코드 tree: 5d38a65cfdff9d654ee695037db03bbc478a12b0
+  해당 검사 이후에는 이 검증 문서와 CHANGELOG의 검증 상태만 추가했다.
+- 보관 브랜치: codex/security-overview-integration
+  이 브랜치의 생성은 원격 develop/main 병합을 의미하지 않는다.
+
+충돌 해결
+- core/version.py: Core 버전을 3.0.9로 통일.
+- extension/package.json, extension/package-lock.json: 확장 버전을 3.0.9로
+  통일하고 develop의 의존성 보안 패치 및 새 보안 명령·설정을 유지.
+- extension/CHANGELOG.md: 두 분기의 변경 이력을 보존.
+- extension/THIRD_PARTY_NOTICES.txt: 실제 통합 Mac 빌드 의존성으로 재생성.
+- extension/src/sidebar/SidebarProvider.ts: 공급자 전환과 새 보안·관리형
+  실행 호스트를 함께 유지하고 중복 import를 정리.
+- 추가 수정: 새 Core 테스트 두 파일의 write_text 5곳에 UTF-8 명시.
+- develop에 있던 GPT 도구 호출 호환, 공급자 전환 보호, TLS 패키징,
+  배포 보안 및 의존성 수정은 보존했다. 미해결 Git 충돌은 없다.
+
+통합 후보에서 통과한 검사
+- Core 전체: 3,536 통과 / 0 실패 / 2 건너뜀 (로컬 Python 3.14).
+- 확장 전체: 835 통과 / 0 실패 / 0 건너뜀.
+- TypeScript 호스트·웹뷰 검사 및 웹뷰 production build.
+- Promptfoo 보안 회귀: 19 통과 / 0 실패 / 0 오류 (오프라인 fixture).
+  로컬 Node 22.20.0은 평가 패키지 권장 엔진 22.22+보다 낮으므로
+  CI의 Node 24 환경에서도 별도 확인이 필요하다.
+- npm audit: 확장(개발 의존성 포함) 및 보안 평가 도구 각각 0건.
+- pip-audit: Mac/Linux/Windows 배포 잠금 파일 각각 0건.
+  이는 검사 시점의 알려진 의존성 취약점 검사 결과다.
+- Mac arm64 네이티브 VSIX 빌드·내장 Core self-check·패키지 파일 확인.
+- Python 없는 PATH에서 설치본 시작·인증·재시작·중단 스모크.
+- 실제 웹뷰와 호스트의 UI fixture: 기본 검사 연결, 결과 표시, 레드팀
+  선택, 프로젝트 전환 시 이전 응답 무시, 작은 화면 레이아웃.
+  해당 fixture의 AI와 레드팀 응답은 모의 데이터다.
+- 실제 Docker 배포: 보안 gate, build, image scan, start, health,
+  진행 이벤트, HTTP 응답 확인, 생성한 테스트 컨테이너·이미지 정리.
+- 기존 GPT 연결의 개발 설계 요청 HTTP 200 (gpt-6-sol).
+  이는 설계 단계 확인이며 장시간 대규모 코드 생성 전체 검증은 아니다.
+- 기존 AWS 연결 재사용 및 관리형 요청의 범위 밖 테이블 접근 차단.
+
+실제 GPT 감사: 실행 완료, 정확도 기준 미달
+- 설치본 3.0.9와 gpt-6-sol로 합성 app.js를 실제 감사했다.
+- 13회 API 호출 후 완료했고 검사 중 소스 변경은 없었다.
+- 확정 결과 0건, 추가 검증 필요 후보 3건이었다.
+- 세 후보는 같은 SQL 문자열 결합 취약점을 서로 다르게 표현했다.
+- live harness의 기준인 SQL 인젝션 1건 확정을 만족하지 못했다.
+- 후보 중복 제거, 검토자의 거절 이유 보존 및 명확한 양성·음성 사례를
+  보완하고 실제 모델로 재검증해야 한다. 미확인을 확정으로 바꾸거나
+  합격 기준을 낮추는 수정은 하지 않았다.
+
+추가로 확인한 범위 (원래 보안 브랜치)
+- 실제 Hadolint, Gitleaks, Trivy 실행 및 OPA 정책 23/23 통과.
+- OSV의 알려진 취약점 조회, 이력 저장, 재검사 알림 중복 방지.
+- PentAGI Docker 초기화·API 인증·중첩 워커의 테스트 앱 접근·작업
+  생성/조회/취소·정리. 유료 모델을 통한 전체 공격 검사는 아니다.
+
+미완료 항목
+1. 위 GPT 감사의 정확도·중복 후보 문제 및 gpt-5-mini 단계 시간 초과.
+2. 실제 모델을 사용하는 PentAGI 전체 실행, 공격 증거와 최종 보고서 품질.
+3. AWS 관리형 CloudFormation/CodeBuild 전체 실행 및 격리 검증.
+   DescribeStacks에서 ValidationError가 있었고 신규 AWS 리소스는
+   만들지 않았다. IAM 변경이나 계정 유료 플랜 전환도 하지 않았다.
+4. 유효한 Claude 키를 사용한 실제 모델 호출.
+5. 이 통합 후보의 원격 OS/Python CI와 Windows/Linux 설치본 실행.
+   원래 보안 브랜치의 원격 CI는 7 성공 / 6 실패였으며 해당 결과를
+   통합 후보의 CI 성공으로 대체하지 않는다.
+   https://github.com/team-chain/Re-Coder/actions/runs/42608802594
+
+검증 환경 정리
+기존 VS Code ReCoder 3.0.4와 사용자 작업 창을 복원했다.
+사용자 전역 AI 설정과 저장된 키를 유지했고 테스트 서버·컨테이너를
+정리했다. 실제 자격증명·사용자 프로젝트 소스·로컬 원시 실행 로그는
+이 검증 문서에 포함하지 않았다.

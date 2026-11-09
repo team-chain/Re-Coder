@@ -1454,6 +1454,14 @@ def _default_ecs_region() -> str:
     return "us-east-1"
 
 
+class ManagedBuildReference(BaseModel):
+    """Reference only: scan assertions and arbitrary image URLs are never accepted from callers."""
+    model_config = {"extra": "forbid"}
+    run_id: str = Field(pattern=r"^rc-rt-[a-f0-9]{24}$")
+    build_id: str = Field(pattern=r"^recoder-container-v1:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$")
+    source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class ECSDeployRequest(BaseModel):
     """
     Q3 ECS Rolling Update 요청. ecs_agent.deploy() 의 입력.
@@ -1467,6 +1475,7 @@ class ECSDeployRequest(BaseModel):
     #: 이미 ECR 에 있는 이미지를 그대로 쓸 때 지정. `workspace_path` 를
     #: 주면 여기에 빌드 결과가 채워지므로 비워도 된다.
     image:                   str = ""
+    managed_build: Optional[ManagedBuildReference] = None
     #: 기본 리전. 환경변수 AWS_REGION 을 먼저 보고, 없으면 us-east-1.
     #:
     #: 원래 기본값은 ap-northeast-2(서울)였다. 그런데 개발·검증 환경인

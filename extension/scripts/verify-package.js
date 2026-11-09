@@ -8,10 +8,21 @@ function validatePackageFiles(files, { requireCore = false, target = `${process.
     'out/sidebar/ReCoderPanel.js', 'out/sidebar/WorkbenchSidebarProvider.js',
     'out/sidebar/workbenchHost.js', 'out/sidebar/workbenchHtml.js',
     'out/sidebar/canvasHost.js', 'out/sidebar/homeChanges.js', 'out/codemap/analysisJob.js',
+    'out/security/pentagiClient.js', 'out/security/redTeamHost.js',
+    'out/security/localPentagi.js', 'out/security/localPentagiHost.js', 'out/security/localPentagiWorker.js',
+    'out/security/managedBundle.js', 'out/security/managedJobs.js', 'out/security/managedTemplate.js',
+    'out/security/managedSecurityHost.js', 'out/security/managedPentagiWorker.js', 'out/cloud/managedAwsClient.js', 'out/cloud/connectedAws.js',
+    'out/security/managedAudit.js', 'out/security/sourceAuditHost.js', 'media/security-audit/SKILL.md', 'media/security-audit/LICENSE', 'media/security-audit/REVISION',
+    'out/security/managedScans.js', 'out/security/managedReport.js', 'media/security-audit/deploy.rego',
+    'out/security/managedFrontendWorker.js', 'out/deploy/managedFrontend.js', 'out/cloud/managedPermissions.js',
+    'out/security/managedContainerWorker.js', 'out/security/managedContainerContract.js', 'out/deploy/managedContainer.js',
+    'out/cloud/awsConsoleLogin.js', 'out/cloud/awsTransport.js', 'out/cloud/credentialBridge.js',
     'out/codemap/analysisWorker.js', 'out/codemap/analyzer.js',
     'out/webview/webview.js', 'media/icon.png', 'media/recoder-icon.svg',
     'media/fonts/PretendardVariable.woff2', 'media/fonts/Pretendard-OFL.txt',
     'node_modules/ws/index.js', 'node_modules/ws/lib/websocket.js',
+    'out/runtime/portableTools.js', 'node_modules/yauzl/index.js',
+    'node_modules/yauzl/crc32.js', 'node_modules/yauzl/fd-slicer.js', 'node_modules/pend/index.js',
   ];
   const problems = required.filter(file => !names.has(file)).map(file => `Missing runtime file: ${file}`);
   for (const file of names) {

@@ -36,6 +36,7 @@ async function main() {
     await require('@vscode/vsce').createVSIX({ cwd: root, target,
       packagePath: path.join(root, 'dist', `recoder-${version}-${target}.vsix`) });
     await verifyPackage({ requireCore: true, target });
+    await require('./verify-built-vsix').verifyBuiltVsix(path.join(root,'dist',`recoder-${version}-${target}.vsix`),target);
   } finally {
     if (staged && fs.existsSync(path.join(bin, binary))) fs.unlinkSync(path.join(bin, binary));
     for (const name of saved) {
