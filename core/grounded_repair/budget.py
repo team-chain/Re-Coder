@@ -3,6 +3,7 @@ import json
 import math
 import sqlite3
 import uuid
+from contextlib import closing
 from pathlib import Path
 
 
@@ -16,13 +17,16 @@ class Budget:
             raise ValueError("Provide a positive experiment budget in USD")
         path.parent.mkdir(parents=True,exist_ok=True)
         self.path,self.limit=path,limit
-        with sqlite3.connect(path) as db:
+        # Connection.__exit__ commits/rolls back but does not close the handle.
+        # Serialize schema creation with reservations, with the same busy wait.
+        with closing(sqlite3.connect(path,timeout=30)) as db, db:
+            db.execute('BEGIN IMMEDIATE')
             db.execute('CREATE TABLE IF NOT EXISTS reservations (id TEXT PRIMARY KEY, reserved REAL, actual REAL, status TEXT)')
 
     def reserve(self, amount:float)->str:
         if not math.isfinite(amount) or amount < 0:
             raise ValueError('Reservation must be finite and non-negative')
-        with sqlite3.connect(self.path,timeout=30) as db:
+        with closing(sqlite3.connect(self.path,timeout=30)) as db, db:
             db.execute('BEGIN IMMEDIATE')
             used=db.execute('SELECT COALESCE(SUM(COALESCE(actual,reserved)),0) FROM reservations').fetchone()[0]
             if used+amount>self.limit:
@@ -34,11 +38,11 @@ class Budget:
     def settle(self,key:str,amount:float|None):
         if amount is not None and (not math.isfinite(amount) or amount < 0):
             raise ValueError('Measured cost must be finite and non-negative')
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path,timeout=30)) as db, db:
             db.execute('UPDATE reservations SET actual=?,status=? WHERE id=?',(amount,'measured' if amount is not None else 'unknown',key))
 
     def summary(self):
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path,timeout=30)) as db, db:
             row=db.execute('SELECT COUNT(*),COALESCE(SUM(actual),0),COALESCE(SUM(COALESCE(actual,reserved)),0) FROM reservations').fetchone()
         return {'limit_usd':self.limit,'calls_reserved':row[0],'measured_usd':row[1],'worst_case_used_usd':row[2]}
 

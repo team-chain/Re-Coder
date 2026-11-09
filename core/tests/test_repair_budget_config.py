@@ -3,6 +3,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 import json
+import sqlite3
+from threading import Event
+from contextlib import closing
 import pytest
 from grounded_repair.budget import Budget,BudgetExceeded,BudgetedRouter
 from grounded_repair.knowledge import KnowledgeIndex,Passage
@@ -35,6 +38,45 @@ def test_unknown_bill_keeps_worst_case_reservation(tmp_path):
     with pytest.raises(TimeoutError):asyncio.run(r.call_repair(LLMRequest(prompt='hello',system='',max_tokens=20),tier='fast',run_id='r'))
     assert b.summary()['measured_usd']==0
     assert b.summary()['worst_case_used_usd']>0
+
+
+def test_budget_initialization_waits_for_an_active_writer(tmp_path):
+    path=tmp_path/'budget.db'
+    started=Event()
+    def initialize():
+        started.set()
+        return Budget(path,1)
+    with closing(sqlite3.connect(path)) as writer:
+        writer.execute('BEGIN IMMEDIATE')
+        writer.execute('CREATE TABLE competing_schema (id INTEGER)')
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future=pool.submit(initialize)
+            assert started.wait(5)
+            try:
+                # Schema creation used to fail after sqlite3's default 5s wait.
+                with pytest.raises(TimeoutError):future.result(timeout=5.3)
+            finally:
+                writer.commit()
+            budget=future.result(timeout=10)
+    assert budget.reserve(.3)
+    assert budget.summary()['worst_case_used_usd']==pytest.approx(.3)
+
+
+def test_budget_closes_handles_on_success_and_budget_rejection(tmp_path,monkeypatch):
+    connect=sqlite3.connect
+    connections=[]
+    def tracked(*args,**kwargs):
+        db=connect(*args,**kwargs)
+        connections.append(db)
+        return db
+    monkeypatch.setattr(sqlite3,'connect',tracked)
+    budget=Budget(tmp_path/'budget.db',1)
+    key=budget.reserve(.8)
+    with pytest.raises(BudgetExceeded):budget.reserve(.3)
+    budget.settle(key,.7)
+    assert budget.summary()['worst_case_used_usd']==pytest.approx(.7)
+    for db in connections:
+        with pytest.raises(sqlite3.ProgrammingError):db.execute('SELECT 1')
 
 
 def test_exact_error_code_beats_generic_dense_and_lexical_match():
