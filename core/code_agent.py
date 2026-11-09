@@ -1560,14 +1560,14 @@ def generate_plan(
     existing = _list_project_files(root)
     from commerce_starter import matches as commerce_matches, decision as commerce_decision
     from commerce_starter import followups as commerce_followups
-    if not existing and commerce_matches(instruction) and after_starter != "custom":
+    import payment_contract
+    if not existing and commerce_matches(instruction) and payment_contract.wants_payment(instruction) and after_starter != "custom":
         #: 시작 방식 하나만 묻고 끝나면 고를 이유가 없다 — 고른 쪽에 따라 이어서 물을 결정을 함께 알려 준다.
         return {"decisions": [commerce_decision()], "followups": commerce_followups(),
                 "model": "reviewed-commerce-v1", "provider": "starter"}
-    import payment_contract
     #: 결제가 들어가는 새 앱이면 "결제 시작 방식(모의 결제 / 실제 키)" 을 함께 묻는다 — 고른 값이 첫 로컬 배포를 정한다.
     #: AI 가 처음부터 만드는 앱도 쇼핑몰 기반과 같은 모의 결제 약속을 지키게 해, 키가 없어도 배포까지 이어진다.
-    ask_payment = not existing and (after_starter == "custom" or payment_contract.applies(instruction))
+    ask_payment = not existing and payment_contract.applies(instruction)
     if after_starter == "custom":
         instruction = (instruction + "\n\n[이어서 묻는 결정] 사용자는 ReCoder 제공 쇼핑몰 기반 대신 AI 자유 생성을 골랐습니다. "
                        "이 앱의 기술 구성·기능 규칙 중 사용자가 직접 골라야 할 결정을 제시하세요. "

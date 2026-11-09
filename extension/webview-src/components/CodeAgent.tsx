@@ -221,9 +221,9 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
   const loadModels = useCallback(() => postMessage("models.load"), [postMessage]);
   //: 위치 칩에 보일 프로젝트 이름(확장이 알려 줌).
   const [projectName, setProjectName] = useState("");
-  //: 처음 한 번 — 프로젝트 이름과 모델 목록을 묻는다(팀 창을 열 때도 모델 목록은 새로 받는다).
+  //: Core가 늦게 시작하면 최초 모델 조회가 실패할 수 있어 연결이 준비될 때 다시 읽는다.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { postMessage("code.project"); postMessage("models.load"); }, []);
+  useEffect(() => { postMessage("code.project"); postMessage("models.load"); }, [isActive, connectionPending]);
   const [turns, setTurns] = useState<Turn[]>([]);
   const turnsRef = React.useRef<Turn[]>(turns);
   turnsRef.current = turns;

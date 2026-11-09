@@ -59,6 +59,28 @@ if(process.env.HARNESS_DEPLOY==='1') {
   vscode.window.showInputBox=async()=> 'https://discord.com/api/webhooks/123456789012345678/'+'a'.repeat(60);
 }
 const provider = new SidebarProvider(vscode.Uri.file(path.join(__dirname,'..')),api,core,polling,undefined,memento,secrets);
+// Claude picker verification: production host/UI, synthetic keys, no paid API calls.
+if(process.env.HARNESS_AI_PICKER==='1') {
+  saved['recoder.ai.provider']='anthropic';
+  secretValues.set('recoder.ai.anthropicKey','sk-ant-fixture-only-not-a-real-key');
+  if(process.env.HARNESS_AI_MISSING!=='1') secretValues.set('recoder.ai.openaiKey','sk-fixture-only-not-a-real-key');
+  const defaults={anthropic:{model:'claude-sonnet-5-5',fast_model:'claude-haiku-5-5'},openai:{model:'gpt-6-sol',fast_model:'gpt-6-sol'}};
+  api.getModelRouting=async()=>{
+    const p=saved['recoder.ai.provider'],models=defaults[p];
+    return {quality:{provider:p,model:models.model},economy:{spec:'fast',provider:p,model:models.fast_model,separate:true,scrubbed:false,note:''},
+      choices:[{spec:'quality',label:'복잡한 작업',ready:true,provider:p,model:models.model},{spec:'fast',label:'간단한 작업',ready:true,provider:p,model:models.fast_model}],
+      provider_defaults:defaults,configurable:true,catalog:[...new Set(Object.values(models))].map(model=>({model,ready:true,checked:true})),checked_at:Date.now()};
+  };
+  api.checkModels=api.getModelRouting;
+  api.getModelCosts=async()=>({calls:0,total_cost_usd:0,unknown_cost_calls:0,economy_saved_usd:0,groups:[],days:30,persisted:true});
+  api.getModelCompare=async()=>null;
+  let restarts=0;
+  vscode.commands.executeCommand=async(name,p)=>{
+    if(name==='recoder.ai.connect') return provider.changeAiProvider(p,true);
+    if(name==='recoder.ai.switch') return provider.changeAiProvider(p);
+    if(name==='recoder.restartCore') {await new Promise(resolve=>setTimeout(resolve,1800));return !(process.env.HARNESS_AI_FAIL==='1'&&++restarts===1);}
+  };
+}
 if(process.env.HARNESS_PROGRESS==='1') {
   // Real ApiClient SSE parsing + host/webview wiring. No Docker/AWS side effects.
   const aws={ready:true,region:'ap-northeast-2',account:'123456789012',identity:{account:'123456789012'}};
@@ -86,7 +108,7 @@ let receiver, queue = [];
 const webview = {postMessage:async m=>{queue.push(m);return true;},onDidReceiveMessage(fn){receiver=fn;return{dispose(){}};}};
 provider.attachWorkspacePanel(webview);
 const html = `<!doctype html><html lang="ko" data-recoder-layout="workspace" data-recoder-logo="/logo.png"><meta charset="utf-8"><title>ReCoder production flow fixture</title><style>@font-face{font-family:Pretendard;src:url(/font.woff2) format("woff2");font-weight:100 900}body{margin:0;background:#181818;color:#ddd;font-family:Segoe UI,sans-serif}button{cursor:pointer}</style><body class="${process.env.HARNESS_LIGHT ? "vscode-light" : "vscode-dark"}"><div id="root"></div><script>
-window.acquireVsCodeApi=()=>({postMessage:message=>{if(new URLSearchParams(location.search).has('dropGraph')&&message.type==='canvas.graph')return;return fetch('/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(message)});},getState:()=>null,setState:()=>{}});
+window.acquireVsCodeApi=()=>({postMessage:message=>{if(new URLSearchParams(location.search).has('dropGraph')&&message.type==='canvas.graph')return;return fetch('/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(message)});},getState:()=>(${process.env.HARNESS_AI_PICKER==='1'?JSON.stringify({view:'code'}):'null'}),setState:()=>{}});
 setInterval(async()=>{for(const m of await(await fetch('/events')).json())window.dispatchEvent(new MessageEvent('message',{data:m}));},30);
 </script><script src="/webview.js"></script></html>`;
 http.createServer(async(req,res)=>{

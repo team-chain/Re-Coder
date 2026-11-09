@@ -20,6 +20,16 @@ WEBHOOK_PATH = "/api/webhooks/stripe"
 
 #: 결제가 들어가는 요청인가.
 _WANTS = re.compile(r"(결제|payment|checkout|체크아웃|stripe|스트라이프|쇼핑몰|e-?commerce|shopping\s*(mall|store)|온라인\s*(스토어|상점)|online\s*store)", re.I)
+_PAYMENT_FEATURE = r"(?:결제|payment|checkout|체크아웃|stripe|스트라이프)"
+# An explicit exclusion is not a request to add a payment integration. Keep other
+# positive clauses so "no Stripe; add offline payment" still describes payments.
+_EXCLUDED_PAYMENT = re.compile(
+    rf"{_PAYMENT_FEATURE}(?:\s*(?:외부\s*연동|연동|기능|처리|통합))?\s*(?:은|는|이|가|을|를)?\s*"
+    r"(?:불필요|필요\s*없[\w]*|없[이음는][\w]*|제외[\w]*|빼[\w]*|넣지\s*마[\w]*|추가하지\s*마[\w]*)"
+    rf"|\b(?:no|without|exclude|omit)\s+(?:external\s+)?{_PAYMENT_FEATURE}(?:\s+integration)?\b"
+    rf"|\b{_PAYMENT_FEATURE}(?:\s+integration)?\s+(?:(?:is|are)\s+)?(?:not\s+(?:needed|required)|unnecessary|excluded)\b",
+    re.I,
+)
 #: 다른 결제사를 콕 집었으면 Stripe 기준 모의 결제를 강요하지 않는다(사용자의 선택이 우선).
 _OTHER_PROVIDER = re.compile(r"(토스|toss|카카오\s*페이|kakao\s*pay|네이버\s*페이|naver\s*pay|포트원|portone|아임포트|iamport|"
                              r"페이팔|paypal|이니시스|inicis|나이스\s*페이|nicepay|paddle|razorpay|braintree|square)", re.I)
@@ -28,7 +38,10 @@ _SKIP_DIRS = ("node_modules/", "dist/", "build/", "client/", "frontend/", "web/"
 
 
 def wants_payment(instruction: str) -> bool:
-    return bool(_WANTS.search(instruction or ""))
+    text, excluded = _EXCLUDED_PAYMENT.subn("", instruction or "")
+    # A store can be a catalog without checkout. Explicit positive payment
+    # requirements still win when a different payment feature was excluded.
+    return bool(re.search(_PAYMENT_FEATURE, text, re.I) if excluded else _WANTS.search(text))
 
 
 def other_provider(instruction: str) -> bool:

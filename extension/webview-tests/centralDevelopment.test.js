@@ -462,3 +462,11 @@ test('composer follows remote provider switch, hides chip for non-API routing, a
  assert.equal(ui.button('보내기').props.disabled,true);
  ui.emit('models.state',model('bedrock'));assert.ok(!ui.find(n=>n.props.onPick&&n.props.current));
 });
+
+test('composer reloads model metadata when a cold Core becomes ready',()=>{
+ const props={isActive:false,connectionPending:true};const ui=mount(props);
+ const count=()=>ui.startup.filter(m=>m.type==='models.load').length;
+ const initial=count();props.isActive=true;props.connectionPending=false;ui.render();
+ assert.equal(count(),initial+1);
+ ui.render();assert.equal(count(),initial+1);
+});

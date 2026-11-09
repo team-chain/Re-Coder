@@ -32,6 +32,27 @@ def test_결제가_들어가는_요청만_결제_시작_방식을_묻는다():
     assert not pc.applies("토스페이먼츠로 결제되는 쇼핑몰")
 
 
+@pytest.mark.parametrize("instruction", [
+    "재고 예약 서비스를 만들어줘. 장바구니나 결제 외부연동은 불필요.",
+    "결제 없이 운영 가능한 쇼핑몰 만들어줘",
+    "결제 기능은 필요 없어. 상품 목록만 만들어줘",
+    "Build a production shopping store without payment integration",
+    "Build an inventory app. Payment is not required.",
+])
+def test_explicit_payment_exclusion_does_not_inject_payment_decisions(instruction, tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(ca, "get_router", lambda: _plan_router([_decision(1)], seen))
+    assert not pc.applies(instruction)
+    for after_starter in ("", "custom"):
+        plan = ca.generate_plan(instruction, project_root=str(tmp_path), after_starter=after_starter)
+        assert [d["id"] for d in plan["decisions"]] == ["d1"]
+    assert all("결제 시작 방식을 따로 묻습니다" not in prompt for prompt in seen)
+
+
+def test_excluding_one_feature_keeps_an_explicit_payment_request():
+    assert pc.wants_payment("No Stripe integration; add offline payment tracking")
+
+
 def test_AI_자유_생성_뒤에도_결제_시작_방식을_마지막에_묻는다(tmp_path, monkeypatch):
     seen = []
     monkeypatch.setattr(ca, "get_router", lambda: _plan_router([_decision(1), _decision(2, "로그인 방식", ("JWT", "세션"))], seen))
