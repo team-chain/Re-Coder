@@ -16,6 +16,15 @@ async function publishProgress(bucket:string,id:string):Promise<void> {
         p.on('error',()=>{clearTimeout(timer);reject(new Error('진행 저장 실패'));});p.on('close',code=>{clearTimeout(timer);code?reject(new Error('진행 저장 실패')):resolve();});
     });
 }
+export function progressPublisher(publish:()=>Promise<void>,now:()=>number=Date.now) {
+    let lastPublished=0,lastStage='',lastStatus='';
+    return async(stage:string,status:string)=>{
+        // A new stage may start a long pull/build immediately. Never throttle
+        // that transition just because the previous stage was less than 5s ago.
+        if(stage===lastStage&&status===lastStatus&&now()-lastPublished<5000)return;
+        await publish();lastPublished=now();lastStage=stage;lastStatus=status;
+    };
+}
 const MODELS=/^(?:(?:global|us|eu|apac)\.)?anthropic\.claude-[a-z0-9.:-]+$/;
 export function validateManagedInput(x:any):{id:string;mode:'audit'|'redteam'|'scans';port:number;model:string} {
     if(!x||!/^rc-rt-[a-f0-9]{24}$/.test(x.id)||(x.mode!==undefined&&!['audit','redteam','scans'].includes(x.mode))||(!['audit','scans'].includes(x.mode)&&(!Number.isInteger(x.port)||x.port<1||x.port>65535))||(x.mode!=='scans'&&(typeof x.model!=='string'||!MODELS.test(x.model))))throw new Error('검사 요청 형식이 올바르지 않습니다.');
@@ -35,11 +44,12 @@ export async function runManagedWorker():Promise<void> {
     const input=validateManagedInput(JSON.parse(await fs.readFile(path.join(__dirname,'request.json'),'utf8')));
     if(input.id!==process.env.RECODER_RUN_ID||!process.env.RECODER_SOURCE_SHA256)throw new Error('작업 요청과 업로드 정보가 일치하지 않습니다.');
     const report:any={schema:1,runId:input.id,sourceSha256:process.env.RECODER_SOURCE_SHA256,mode:input.mode,status:'preparing',stage:'작업 준비',createdAt:new Date().toISOString(),tasks:[]};
-    const secrets:string[]=[];let connection:{server:string;token:string}|undefined, client:PentagiClient|undefined, flowId:string|undefined,lastPublished=0;
+    const secrets:string[]=[];let connection:{server:string;token:string}|undefined, client:PentagiClient|undefined, flowId:string|undefined;
+    const publish=progressPublisher(()=>publishProgress(process.env.RECODER_REPORT_BUCKET!,input.id));
     const persist=async()=>{
         let json=JSON.stringify({...report,updatedAt:new Date().toISOString()});for(const s of secrets)if(s)json=json.split(s).join('[REDACTED]');
         await fs.writeFile('report.json',json);console.log(JSON.stringify({stage:report.stage,status:report.status}));
-        if(Date.now()-lastPublished>=5000&&process.env.RECODER_REPORT_BUCKET){lastPublished=Date.now();await publishProgress(process.env.RECODER_REPORT_BUCKET,input.id).catch(()=>{});}
+        if(process.env.RECODER_REPORT_BUCKET)await publish(report.stage,report.status).catch(()=>{});
     };
     const controller=new AbortController();const deadline=setTimeout(()=>controller.abort(),50*60*1000);
     process.once('SIGTERM',()=>controller.abort());process.once('SIGINT',()=>controller.abort());
