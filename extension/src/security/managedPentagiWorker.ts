@@ -53,7 +53,7 @@ export async function runManagedWorker():Promise<void> {
         try {
             report.status='running';report.audit=await runManagedAudit(input,async change=>{Object.assign(report,change);await persist();},controller.signal);
             report.status='completed';report.stage='소스 감사 완료 · 실행 검증 전';
-        }catch{report.status=controller.signal.aborted?'cancelled':'failed';report.error='코드 감사를 완료하지 못했습니다. Bedrock 모델 권한·지역 및 결과 형식을 확인하세요.';}
+        }catch(error){report.status=controller.signal.aborted?'cancelled':'failed';report.error=error instanceof Error&&error.message.startsWith('Bedrock ')?error.message:'코드 감사를 완료하지 못했습니다. Bedrock 모델 권한·지역 및 결과 형식을 확인하세요.';}
         finally{clearTimeout(deadline);await persist();}
         if(report.status!=='completed')process.exitCode=1;return;
     }
@@ -72,8 +72,9 @@ export async function runManagedWorker():Promise<void> {
                 // Dependency installation has internet access but cannot reach local/private/metadata addresses.
                 for(const cidr of ['10.0.0.0/8','172.16.0.0/12','192.168.0.0/16','169.254.0.0/16','127.0.0.0/8'])
                     await run(['exec',engine,'iptables','-I','DOCKER-USER','-i','docker0','-d',cidr,'-j','REJECT']);
-                report.stage='프로젝트 사본 빌드';await persist();await run(['cp',path.resolve('source')+path.sep+'.',`${engine}:/tmp/recoder-source`]);
-                await inner(['build','--network=bridge','-t','recoder-test-app','/tmp/recoder-source'],15*60*1000);
+                // Keep the transfer outside DinD's private /tmp mount namespace.
+                report.stage='프로젝트 사본 빌드';await persist();await run(['cp',path.resolve('source')+path.sep+'.',`${engine}:/recoder-source`]);
+                await inner(['build','--network=default','-t','recoder-test-app','/recoder-source'],15*60*1000);
                 // Isolated gateway mode leaves no host bridge address reachable from workload containers.
                 await inner(['network','create','--internal','--subnet','172.30.0.0/24','-o','com.docker.network.bridge.gateway_mode_ipv4=isolated','recoder-isolated']);
                 await inner(['run','-d','--name','recoder-test-app','--network','recoder-isolated','--ip','172.30.0.10','--cap-drop=ALL','--security-opt=no-new-privileges',

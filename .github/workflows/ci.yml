@@ -200,6 +200,34 @@ jobs:
           npm run build
           npm run verify:package
 
+  managed-scanners:
+    name: 관리형 스캐너 실제 Docker 통합
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+      - name: 확장 호스트 준비
+        working-directory: extension
+        run: npm ci && npm run compile
+      - name: 합성 앱 스캐너·빌드·SBOM·정책 검증
+        working-directory: extension
+        env:
+          RECODER_MANAGED_SCANNERS_CHECK: '1'
+        run: node scripts/check-managed-scanners.js
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: managed-scanners-live
+          path: extension/.test-artifacts/managed-scanners-live.json
+          if-no-files-found: warn
+
   # ── Watchdog 감시 로직 ─────────────────────────────────────────────────
   # 왜 필요한가: 이상 판정은 **틀려도 예외가 안 난다.** 너무 민감하면 멀쩡한
   # 배포마다 롤백을 권해 사람이 경고를 무시하게 되고, 너무 둔감하면 죽은 앱을

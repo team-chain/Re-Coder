@@ -79,3 +79,22 @@ test('Anthropic preparation injects only the selected provider secret',async t=>
  assert.ok(app.args.includes('ANTHROPIC_API_KEY'));assert.equal(app.options.env.ANTHROPIC_API_KEY,'ANTHROPIC_PRIVATE_KEY');
  assert.equal(app.options.env.OPEN_AI_KEY,undefined);assert.ok(!JSON.stringify(calls.map(c=>c.args)).includes('ANTHROPIC_PRIVATE_KEY'));
 });
+test('a waiting flow saves partial evidence and cleans immediately instead of idling to timeout',async t=>{
+ const {executeLocalTest}=require('../out/security/localPentagi');
+ const {PentagiClient}=require('../out/security/pentagiClient');
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'recoder-waiting-test-'));
+ let finished=0,cleaned=0,snapshots=0;
+ t.mock.method(LocalPentagiRuntime.prototype,'prepare',async()=>({server:'http://127.0.0.1:8443',token:'TOKEN'}));
+ t.mock.method(LocalPentagiRuntime.prototype,'cleanup',async()=>{cleaned++;});
+ t.mock.method(PentagiClient.prototype,'providers',async()=>['openai']);
+ t.mock.method(PentagiClient.prototype,'start',async()=>({id:'1',title:'check',status:'running',createdAt:''}));
+ t.mock.method(PentagiClient.prototype,'snapshot',async()=>{snapshots++;return {flow:{id:'1',title:'check',status:finished?'finished':'waiting',createdAt:''},tasks:[{id:'1',title:'partial',status:'finished',result:'Only one route tested'}]};});
+ t.mock.method(PentagiClient.prototype,'finish',async()=>{finished++;});
+ try{
+  await executeLocalTest({root,session:id,workspace:'test',target:'http://localhost:3000/',apiKey:'PRIVATE',provider:'openai'});
+  const report=await readReport(root,id);
+  assert.equal(report.outcome,'needs_input');assert.equal(report.phase,'removed');
+  assert.equal(report.tasks[0].result,'Only one route tested');
+  assert.equal(finished,1);assert.equal(cleaned,1);assert.equal(snapshots,2);
+ }finally{await fs.rm(root,{recursive:true,force:true});}
+});

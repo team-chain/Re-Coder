@@ -27,6 +27,7 @@ function validatePackageFiles(files, { requireCore = false, target = `${process.
   const problems = required.filter(file => !names.has(file)).map(file => `Missing runtime file: ${file}`);
   for (const file of names) {
     if (/^(?:harness|scripts|src|webview-src|webview-tests|bin-dist|dist)\//.test(file)
+        || /(?:^|\/)(?:\.test-artifacts|\.canvas-qa|\.recoder|\.aws|\.ssh|\.venv)\//.test(file)
         || /^out\/(?:test|webview-test|ui|collectors)\//.test(file)
         || /(?:^|\/)(?:\.env(?:\.[^/]*)?|[^/]*\.(?:map|ts|tsx|log|bundle|vsix|pyc))$/.test(file)
         || /^(?:media\/(?:sidebar|workbench)\.js|out\/sidebar\/WorkbenchPanel\.js)$/.test(file)) {

@@ -18,6 +18,9 @@ export function scannerSummary(tool:string,data:any,maxFindings=200):ScanSummary
         if(!Array.isArray(data)||data.some(f=>!f||typeof f.code!=='string'||typeof f.message!=='string'||!['error','warning','info','style'].includes(f.level)))throw new Error('hadolint 응답 오류');
         for(const f of data)findings.push({title:`${f.code}: ${f.message}`,severity:f.level==='error'?'high':'medium',file:'Dockerfile',line:Number(f.line)||undefined});
     }else{
+        // Trivy omits Results when no supported packages are present. A valid
+        // artifact header distinguishes that case from a missing/broken report.
+        if(data&&data.Results===undefined&&data.SchemaVersion===2&&typeof data.ArtifactName==='string'&&data.ArtifactName&&['filesystem','container_image'].includes(data.ArtifactType))data={...data,Results:[]};
         if(!data||!Array.isArray(data.Results))throw new Error('Trivy가 검사 대상을 확인하지 못했습니다.');
         if(!data.Results.length)return {tool,status:'not_applicable',findings:[],message:'분석 가능한 패키지 목록이 없습니다. 취약점 검사 통과를 의미하지 않습니다.'};
         for(const r of data.Results)for(const f of r.Vulnerabilities||[])findings.push({title:`${f.VulnerabilityID} · ${f.PkgName} ${f.InstalledVersion}`,severity:String(f.Severity||'unknown').toLowerCase(),file:String(r.Target||''),fix:f.FixedVersion?`수정 버전: ${f.FixedVersion}`:'수정 버전 미확인'});
@@ -41,7 +44,7 @@ export async function runManagedScans(id:string,progress:(stage:string)=>Promise
             return scannerSummary('gitleaks',JSON.parse(await fs.readFile(path.join(scratch,'secrets.json'),'utf8')));
         });
         const hasDockerfile=!!await fs.stat(path.join(source,'Dockerfile')).catch(()=>null);
-        if(hasDockerfile)await checked('hadolint',async()=>scannerSummary('hadolint',JSON.parse(await run([...base,...mount(source,'/source'),SCANNER_IMAGES.hadolint,'--format','json','--no-fail','/source/Dockerfile']))));
+        if(hasDockerfile)await checked('hadolint',async()=>scannerSummary('hadolint',JSON.parse(await run([...base,...mount(source,'/source'),SCANNER_IMAGES.hadolint,'hadolint','--format','json','--no-fail','/source/Dockerfile']))));
         else checks.push({tool:'hadolint',status:'not_applicable',findings:[],message:'Dockerfile 없음'});
         // The deploy builder must stop before executing project code on source scan failure.
         if(exportImage&&(!hasDockerfile||checks.some(c=>c.status!=='completed'||(c.blockingCount??1)>0)))throw new Error('시크릿·Dockerfile 검사를 통과하지 못해 이미지 빌드를 중단했습니다.');
@@ -59,10 +62,13 @@ export async function runManagedScans(id:string,progress:(stage:string)=>Promise
             let ready=false;for(let i=0;i<30;i++){try{await run(['exec',engine,'docker','info'],{timeout:5000});ready=true;break;}catch{await new Promise(r=>setTimeout(r,2000));}}if(!ready)throw new Error('검사 엔진 시작 실패');
             for(const cidr of ['10.0.0.0/8','172.16.0.0/12','192.168.0.0/16','169.254.0.0/16','127.0.0.0/8'])await run(['exec',engine,'iptables','-I','DOCKER-USER','-i','docker0','-d',cidr,'-j','REJECT']);
             await run(['cp',source+path.sep+'.',engine+':/source']);
-            await run(['exec',engine,'docker','build','--platform=linux/amd64','--network=bridge','-t','recoder-scan','/source'],{timeout:900000});
-            await run(['exec',engine,'docker','save','-o','/tmp/image.tar','recoder-scan'],{timeout:180000});
-            const size=Number(await run(['exec',engine,'stat','-c','%s','/tmp/image.tar']));if(!Number.isFinite(size)||size>1024**3)throw new Error('검사 이미지가 1GB를 초과합니다.');
-            await run(['cp',engine+':/tmp/image.tar',path.join(scratch,'image.tar')],{timeout:180000});
+            await run(['exec',engine,'docker','build','--platform=linux/amd64','--network=default','-t','recoder-scan','/source'],{timeout:900000});
+            // DinD remounts /tmp inside its own mount namespace. docker cp from
+            // the outer engine cannot see files written there by docker exec.
+            const archive='/var/lib/docker/recoder-image.tar';
+            await run(['exec',engine,'docker','save','-o',archive,'recoder-scan'],{timeout:180000});
+            const size=Number(await run(['exec',engine,'stat','-c','%s',archive]));if(!Number.isFinite(size)||size<=0||size>1024**3)throw new Error('검사 이미지 크기가 올바르지 않거나 1GB를 초과합니다.');
+            await run(['cp',engine+':'+archive,path.join(scratch,'image.tar')],{timeout:180000});
             imageReport=JSON.parse(await run([...trivy,'image',...flags,'--input','/results/image.tar'],{timeout:600000}));
             await run([...trivy,'image','--cache-dir','/cache','--skip-db-update','--skip-java-db-update','--offline-scan','--format','cyclonedx','--output','/results/sbom.json','--input','/results/image.tar'],{timeout:600000});
             const sbom=JSON.parse(await fs.readFile(path.join(scratch,'sbom.json'),'utf8'));
@@ -73,9 +79,15 @@ export async function runManagedScans(id:string,progress:(stage:string)=>Promise
         // Evaluate the shipped deployment policy against this exact scan, never production metadata guesses.
         const input={environment:'security-preview',sbom:{present:sbomPresent},trivy:{critical_count:(imageReport?.Results||[]).flatMap((r:any)=>r.Vulnerabilities||[]).filter((f:any)=>f.Severity==='CRITICAL').length},
             gitleaks:{passed:checks.some(c=>c.tool==='gitleaks'&&c.status==='completed'&&c.count===0)},hadolint:{passed:checks.some(c=>c.tool==='hadolint'&&c.status==='completed'&&c.blockingCount===0)}};
-        await fs.writeFile(path.join(scratch,'policy-input.json'),JSON.stringify(input));
+        const policyInput=path.join(scratch,'policy-input.json'),policyFile=path.join(scratch,'policy.rego');
+        await fs.writeFile(policyInput,JSON.stringify(input));
+        await fs.copyFile(path.join(__dirname,'policy.rego'),policyFile);
+        // CodeBuild creates root-owned private directories; OPA runs as UID 1000.
+        // Mount only these non-secret files, readable inside the sandbox, instead
+        // of exposing the private scratch directory or changing its permissions.
+        await fs.chmod(policyInput,0o444);await fs.chmod(policyFile,0o444);
         await progress('OPA 정책 평가');
-        const policy=JSON.parse(await run([...base,...mount(path.join(__dirname,'policy.rego'),'/policy.rego'),...mount(scratch,'/results'),SCANNER_IMAGES.opa,'eval','--format','json','--data','/policy.rego','--input','/results/policy-input.json','data.recoder.deploy.allow']));
+        const policy=JSON.parse(await run([...base,...mount(policyFile,'/policy.rego'),...mount(policyInput,'/policy-input.json'),SCANNER_IMAGES.opa,'eval','--format','json','--data','/policy.rego','--input','/policy-input.json','data.recoder.deploy.allow']));
         const value=policy.result?.[0]?.expressions?.[0]?.value;if(!['allow','deny'].includes(value?.decision))throw new Error('정책 평가 결과 오류');
         if(exportImage){
             if(value.decision!=='allow'||!sbomPresent||checks.some(c=>c.status==='failed')||!checks.some(c=>c.tool==='image'&&c.status==='completed'&&c.criticalCount===0))throw new Error('이미지 검사·SBOM·정책을 통과하지 못해 업로드하지 않습니다.');

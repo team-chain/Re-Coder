@@ -16,7 +16,7 @@ test('package validation detects omitted analysis worker and runtime websocket d
 });
 
 test('package validation rejects fixtures, secrets, source maps and obsolete compiled screens', () => {
-  for (const file of ['harness/fixture-core.py', '.env', '.env.production', 'out/extension.js.map', 'out/sidebar/WorkbenchPanel.js']) {
+  for (const file of ['harness/fixture-core.py', '.env', '.env.production', '.test-artifacts/live/result.json', '.canvas-qa/check.json', '.recoder/runtime.json', '.aws/credentials', '.ssh/id_rsa', '.venv/bin/python', 'nested/.test-artifacts/result.json', 'out/extension.js.map', 'out/sidebar/WorkbenchPanel.js']) {
     assert.throws(() => validatePackageFiles([file]), error => error.message.includes(`Development or obsolete file in VSIX: ${file}`));
   }
   assert.throws(() => validatePackageFiles(['bin/recoder-core'], { requireCore: true, target: 'win32-x64' }), /requires only bin\/recoder-core.exe/);

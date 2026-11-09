@@ -36,6 +36,12 @@ out/webview-test/**
 out/test/**
 harness/**
 scripts/**
+**/.test-artifacts/**
+**/.canvas-qa/**
+**/.recoder/**
+**/.aws/**
+**/.ssh/**
+**/.venv/**
 
 # ── 빌드 · 개발 설정 ────────────────────────────────────────────────────
 tsconfig.json

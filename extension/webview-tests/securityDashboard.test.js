@@ -59,3 +59,16 @@ test('official PentAGI numeric GraphQL IDs normalize for creation and snapshots'
  assert.equal((await client.start('http://host.docker.internal:3000','openai')).id,'17');
  const snapshot=await client.snapshot('17');assert.equal(snapshot.flow.id,'17');assert.equal(snapshot.tasks[0].id,'23');
 });
+test('PentAGI scope includes app routes but keeps explicit path boundaries and untrusted content limits',async()=>{
+ const prompts=[];
+ const client=new PentagiClient('http://127.0.0.1:8443','TOKEN',async(url,options)=>{
+  prompts.push(JSON.parse(options.body).variables.input);
+  return Response.json({data:{createFlow:{id:'1',title:'check',status:'created'}}});
+ });
+ await client.start('http://127.0.0.1:3000/','openai');
+ await client.start('http://127.0.0.1:3000/my-app','openai');
+ assert.match(prompts[0],/All application paths on origin http:\/\/127.0.0.1:3000/);
+ assert.match(prompts[1],/exact path \/my-app and descendants under \/my-app\//);
+ assert.match(prompts[1],/Sibling paths are out of scope/);
+ for(const input of prompts){assert.match(input,/untrusted evidence/);assert.match(input,/Do not follow redirects or links to other hosts/);}
+});

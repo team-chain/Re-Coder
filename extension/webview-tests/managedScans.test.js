@@ -14,3 +14,8 @@ test('managed scanners are pinned; packaged OPA policy equals existing deploy po
  for(const image of Object.values(SCANNER_IMAGES))assert.match(image,/@sha256:[a-f0-9]{64}$/);
  assert.equal(fs.readFileSync(path.resolve('media/security-audit/deploy.rego'),'utf8'),fs.readFileSync(path.resolve('../policies/recoder/deploy.rego'),'utf8'));
 });
+test('Trivy omits Results for a valid package-free artifact without implying a clean scan',()=>{
+ const result=scannerSummary('dependencies',{SchemaVersion:2,ArtifactName:'/source',ArtifactType:'filesystem'});
+ assert.equal(result.status,'not_applicable');assert.equal(result.count,undefined);
+ for(const invalid of [{},{SchemaVersion:2},{SchemaVersion:2,ArtifactName:'/source'},{SchemaVersion:2,ArtifactName:'/source',ArtifactType:'filesystem',Results:null}])assert.throws(()=>scannerSummary('dependencies',invalid));
+});

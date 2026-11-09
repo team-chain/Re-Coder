@@ -4,7 +4,11 @@ const assert=require('node:assert/strict'),fs=require('node:fs/promises'),path=r
 async function main(){
  if(process.env.RECODER_LIVE_AUDIT!=='1')throw Error('Set RECODER_LIVE_AUDIT=1 to allow the bounded live-model verification.');
  const root=path.resolve(process.env.RECODER_LIVE_FIXTURE);
- const source="import express from 'express';\nimport mysql from 'mysql2/promise';\nconst app = express();\nconst db = await mysql.createConnection(process.env.DATABASE_URL);\napp.get('/search', async (req, res) => {\n  const [rows] = await db.query(\"SELECT id, title FROM posts WHERE title = '\" + req.query.q + \"'\");\n  res.json(rows);\n});\napp.listen(3000);\n";
+ let source="import express from 'express';\nimport mysql from 'mysql2/promise';\nconst app = express();\nconst db = await mysql.createConnection(process.env.DATABASE_URL);\napp.get('/search', async (req, res) => {\n  const [rows] = await db.query(\"SELECT id, title FROM posts WHERE title = '\" + req.query.q + \"'\");\n  res.json(rows);\n});\napp.listen(3000);\n";
+ const scenario=process.env.RECODER_LIVE_SCENARIO||'vulnerable';
+ assert.ok(['vulnerable','parameterized','unknown-caller'].includes(scenario),'unsupported audit fixture');
+ if(scenario==='parameterized')source=source.replace("db.query(\"SELECT id, title FROM posts WHERE title = '\" + req.query.q + \"'\")","db.execute('SELECT id, title FROM posts WHERE title = ?', [req.query.q])");
+ if(scenario==='unknown-caller')source="export async function search(db, value) { return db.query(\"SELECT id FROM posts WHERE title='\" + value + \"'\"); }\n";
  await fs.mkdir(root,{recursive:true});await fs.writeFile(path.join(root,'app.js'),source);
  const vscode={workspace:{isTrusted:true},window:{showInformationMessage:async()=> '검토한 파일 감사'}};
  const original=Module._load;Module._load=function(name,...args){return name==='vscode'?vscode:original.call(this,name,...args);};
@@ -28,9 +32,13 @@ async function main(){
  assert.equal(state.phase,'completed',state.error||state.stage);
  assert.equal(state.stale,false);assert.ok(state.calls>=7&&state.calls<=20);
  const sql=state.report.findings.filter(f=>f.file==='app.js'&&f.line<=6&&f.endLine>=6&&/sql|prepared|매개변수화/i.test(f.title+' '+f.fix));
- assert.equal(sql.length,1,'synthetic SQL injection must be confirmed once, not duplicated');
+ if(scenario==='vulnerable'){
+  assert.equal(sql.length,1,'synthetic SQL injection must be confirmed once, not duplicated');
+  assert.equal(state.report.findings.length,1,'fixture has one demonstrated vulnerability');
+  assert.equal(state.report.needsValidation.length,0,'duplicate unconfirmed copies must not remain');
+ }else assert.equal(state.report.findings.length,0,'safe binding or missing attacker provenance cannot be a confirmed vulnerability');
  assert.equal(await fs.readFile(path.join(root,'app.js'),'utf8'),source);
  assert.deepEqual((await new SourceAuditHost(api,memory,path.resolve(__dirname,'../media/security-audit')).handle('status',root)).report,state.report);
- console.log(JSON.stringify({live:true,provider:state.provider,model:state.model,calls:state.calls,findings:state.report.findings.length,inputTokens:state.report.inputTokens,outputTokens:state.report.outputTokens,sourceUnchanged:true,persistedResult:true}));
+ console.log(JSON.stringify({live:true,scenario,provider:state.provider,model:state.model,calls:state.calls,findings:state.report.findings.length,inputTokens:state.report.inputTokens,outputTokens:state.report.outputTokens,sourceUnchanged:true,persistedResult:true}));
 }
 main().catch(e=>{console.error(e.message);process.exitCode=1;});

@@ -20,7 +20,7 @@ export type LocalPhase = 'preparing'|'running'|'saving'|'cleaning'|'removed'|'cl
 export interface LocalReport {
     session: string; workspace: string; target: string; createdAt: string; updatedAt: string;
     phase: LocalPhase; step: string; pid?: number; server?: string; provider?: LocalProvider;
-    outcome?: 'finished'|'failed'|'cancelled'|'timed_out'|'interrupted'; error?: string;
+    outcome?: 'finished'|'failed'|'cancelled'|'timed_out'|'interrupted'|'needs_input'; error?: string;
     flow?: PentagiFlow; tasks?: PentagiTask[];
 }
 export interface DockerOptions {env?: Record<string,string>; input?: string; timeout?: number; signal?: AbortSignal;}
@@ -221,6 +221,9 @@ export async function executeLocalTest(request: LocalRequest): Promise<void> {
             const snapshot = await client.snapshot(report.flow.id);
             report.flow=snapshot.flow; report.tasks=snapshot.tasks; report.step=snapshot.flow.status==='created'?'검사 도구 준비':snapshot.flow.status==='waiting'?'입력 대기':'검사 중';
             await persist(); lastSaved=Date.now();
+            // No interactive reply channel is exposed here. Retain the partial
+            // evidence and release paid resources instead of idling for 30 min.
+            if (snapshot.flow.status==='waiting') {report.outcome='needs_input';break;}
             if (['finished','failed'].includes(snapshot.flow.status)) {
                 report.outcome=snapshot.flow.status as 'finished'|'failed';
                 if(report.outcome==='failed')report.error='PentAGI가 검사를 완료하지 못했습니다. 저장된 결과와 API 키·모델 사용 가능 여부를 확인하세요.';
