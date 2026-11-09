@@ -3,7 +3,7 @@ const {ManagedAwsClient,signedManagedRequest,AwsRequestError}=require('../out/cl
 const {ManagedJobs}=require('../out/security/managedJobs');
 const {managedTemplate}=require('../out/security/managedTemplate');
 const {projectBundle}=require('../out/security/managedBundle');
-const {validateManagedInput}=require('../out/security/managedPentagiWorker');
+const {validateManagedInput,managedBedrockConfig}=require('../out/security/managedPentagiWorker');
 const credentials={accessKeyId:'AKIATEST',secretAccessKey:'SECRET_NOT_FOR_LOGS',sessionToken:'SESSION_SECRET',expiration:'2030-01-01'};
 const run={id:'rc-rt-'+ 'a'.repeat(24),createdAt:'2026-11-02T00:00:00Z',digest:'hash',files:1,bytes:10,status:'SUBMITTING',uncertain:true};
 const bucket='recoder-security-123456789012-ap-northeast-2';
@@ -53,6 +53,17 @@ test('snapshot excludes credentials and dependencies and preserves UTF-8 names i
 test('worker input forbids external targets, invalid ports and model configuration injection',()=>{
  for(const x of [{id:run.id,port:0,model:'anthropic.claude-test'},{id:'../x',port:3000,model:'anthropic.claude-test'},{id:run.id,port:3000,model:'anthropic.claude-test\nmalicious: true'}])assert.throws(()=>validateManagedInput(x));
  assert.equal(validateManagedInput({id:run.id,port:3000,model:'global.anthropic.claude-haiku-4-5-20251001-v1:0'}).port,3000);
+});
+test('managed tool-producing roles have room for complete long arguments after the live 4096-token truncation regression',()=>{
+ const model='global.anthropic.claude-sonnet-4-6',config=JSON.parse(managedBedrockConfig(model));
+ for(const role of ['primary_agent','assistant','generator','refiner','adviser','coder','pentester']){
+  assert.ok(config[role].max_tokens>=16384,role+' must not silently truncate long commands/reports');
+ }
+ for(const value of Object.values(config)){
+  assert.equal(value.model,model);assert.ok(value.max_tokens<=16384);assert.ok(value.max_tokens>4096);
+ }
+ assert.equal(config.simple_json.json,true);
+ assert.throws(()=>managedBedrockConfig(model+'\nextra: value'));
 });
 test('snapshot preserves complete source when filesystem reads return short chunks',async t=>{
  const root=await fs.mkdtemp(path.join(os.tmpdir(),'recoder-short-read-'));

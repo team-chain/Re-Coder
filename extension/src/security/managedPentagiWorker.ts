@@ -35,6 +35,18 @@ export async function finalizeManagedRuntime(report:any,persist:()=>Promise<void
     report.stage='결과 저장';await persist();
 }
 const MODELS=/^(?:(?:global|us|eu|apac)\.)?anthropic\.claude-[a-z0-9.:-]+$/;
+export function managedBedrockConfig(model:string):string {
+    if(!MODELS.test(model))throw new Error('검사 모델 형식이 올바르지 않습니다.');
+    // A real Converse response at 4096 output tokens returned an empty tool
+    // input after truncating a long command. Match upstream's larger budgets
+    // for command/report-producing roles instead of retrying incomplete calls.
+    const limits:Record<string,number>={simple:8192,simple_json:8192,primary_agent:16384,
+        assistant:16384,generator:16384,refiner:16384,adviser:16384,reflector:8192,
+        searcher:8192,enricher:8192,coder:16384,installer:8192,pentester:16384};
+    // JSON is valid YAML and keeps model values data even if validation changes.
+    return JSON.stringify(Object.fromEntries(Object.entries(limits).map(([role,max_tokens])=>
+        [role,{model,temperature:1.0,max_tokens,...(role==='simple_json'?{json:true}:{})}])));
+}
 export function validateManagedInput(x:any):{id:string;mode:'audit'|'redteam'|'scans';port:number;model:string} {
     if(!x||!/^rc-rt-[a-f0-9]{24}$/.test(x.id)||(x.mode!==undefined&&!['audit','redteam','scans'].includes(x.mode))||(!['audit','scans'].includes(x.mode)&&(!Number.isInteger(x.port)||x.port<1||x.port>65535))||(x.mode!=='scans'&&(typeof x.model!=='string'||!MODELS.test(x.model))))throw new Error('검사 요청 형식이 올바르지 않습니다.');
     return {id:x.id,mode:x.mode||'redteam',port:['audit','scans'].includes(x.mode)?3000:x.port,model:x.mode==='scans'?'':x.model};
@@ -81,8 +93,7 @@ export async function runManagedWorker():Promise<void> {
     try {
         await persist();const role=await credentials();secrets.push(role.AccessKeyId,role.SecretAccessKey,role.SessionToken);
         const configPath=path.resolve('recoder-bedrock.yml');
-        const roles=['simple','simple_json','primary_agent','assistant','generator','refiner','adviser','reflector','searcher','enricher','coder','installer','pentester'];
-        await fs.writeFile(configPath,roles.map(r=>`${r}:\n  model: ${input.model}\n  temperature: 1.0\n  max_tokens: 4096\n${r==='simple_json'?'  json: true\n':''}`).join(''),{mode:0o600});
+        await fs.writeFile(configPath,managedBedrockConfig(input.model),{mode:0o600});
         connection=await runtime.prepare('', 'bedrock',async stage=>{report.stage=stage;await persist();},{configPath,workerImage:WORKER_IMAGE,
             bedrockEnv:{BEDROCK_REGION:process.env.AWS_REGION||process.env.AWS_DEFAULT_REGION||'',BEDROCK_ACCESS_KEY_ID:role.AccessKeyId,BEDROCK_SECRET_ACCESS_KEY:role.SecretAccessKey,BEDROCK_SESSION_TOKEN:role.SessionToken},
             prepareTarget:async engine=>{
