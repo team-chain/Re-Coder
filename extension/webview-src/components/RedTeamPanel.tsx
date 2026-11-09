@@ -1,7 +1,7 @@
 import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {useVSCodeApi} from '../hooks/useVSCodeApi';
 import {ManagedRedTeamPanel} from './ManagedRedTeamPanel';
-interface LocalReport {session:string;target:string;createdAt:string;phase:string;step:string;provider?:string;outcome?:string;error?:string;flow?:{status:string};tasks?:Array<{id:string;title:string;status:string;result:string}>}
+interface LocalReport {session:string;target:string;createdAt:string;phase:string;step:string;provider?:string;outcome?:string;error?:string;flow?:{status:string};tasks?:Array<{id:string;title:string;status:string;result:string}>;evidence?:Array<{id:string;type:string;message:string;result:string}>}
 interface State {localMode?:boolean;local?:LocalReport;localHistory?:LocalReport[];configured?: boolean; server?: string; runs?: Array<{id?: string; target: string; createdAt: string; uncertain?: boolean; stopped?: boolean; terminal?: boolean}>; flow?: {id: string; title: string; status: string}; tasks?: Array<{id: string; title: string; status: string; result: string}>}
 const STATUS: Record<string,string> = {created:'실행 준비',running:'검사 중',waiting:'입력 대기 또는 중단',finished:'실행 완료 · 결과 검토 필요',failed:'실행 실패'};
 const OUTCOME:Record<string,string>={finished:'검사 완료',failed:'검사 실패',cancelled:'검사 중단',timed_out:'30분 제한으로 중단',interrupted:'작업 종료 확인 필요',needs_input:'추가 입력 필요 · 전체 검사 미완료'};
@@ -34,6 +34,7 @@ const LegacyRedTeamPanel: React.FC = () => {
   {local?.phase==='removed'&&<p>검사 컨테이너·DB·볼륨·네트워크를 삭제했습니다. 아래 결과와 재사용할 이미지 캐시는 남아 있습니다.</p>}
   {local?.flow?.status==='waiting'&&localActive&&<p>검사 도구가 입력을 기다리고 있습니다. 필요한 경우 중단한 뒤 대상을 다시 확인하세요.</p>}
   {local?.tasks?.map(t=><details key={t.id}><summary>{t.title} · {STATUS[t.status]||t.status}</summary><pre>{t.result||'아직 결과가 없습니다.'}</pre></details>)}
+  {local?.evidence?.map(m=><details key={m.id}><summary>{m.type==='ask'?'추가 확인 요청':'상세 보고서'}</summary><pre>{m.message}{m.result?'\n'+m.result:''}</pre></details>)}
   {!!state.localHistory?.length&&<details><summary>이전 검사 {state.localHistory.length}개</summary>{state.localHistory.map(r=><details key={r.session}><summary>{new Date(r.createdAt).toLocaleString()} · {OUTCOME[r.outcome||'']||r.step}</summary><p>{r.target} · {r.step}</p>{r.tasks?.map(t=><pre key={t.id}>{t.title}{'\n'}{t.result}</pre>)}</details>)}</details>}
   <details><summary>실행 조건 · 연결 설정</summary><p>Docker Desktop Linux 엔진과 OpenAI 또는 Anthropic 키를 사용합니다. 환경 준비는 최대 60분, 검사는 최대 30분입니다. 모델 사용료가 발생할 수 있습니다. 결과는 검토할 근거이며 안전 보증이 아닙니다.</p><p>대상 입력은 로컬 주소만 허용하지만 PentAGI 에이전트의 외부 네트워크 접근을 방화벽으로 차단하지 않습니다. 운영·공유망이나 민감 정보가 있는 환경에서 실행하지 마세요.</p><p>VS Code를 닫아도 검사와 정리가 이어집니다. PC나 Docker가 종료되면 다시 켠 후 환경 정리를 재시도할 수 있습니다.</p><div className="rc-security-actions"><button className="rc-btn" disabled={busy} onClick={()=>send('localKey')}>모델 키 변경</button><button className="rc-btn" disabled={busy||localActive} onClick={()=>{setState({});setLocalMode(false);}}>별도 PentAGI 서버 연결</button></div></details>
  </div>;

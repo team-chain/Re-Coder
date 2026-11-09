@@ -1,6 +1,14 @@
 /** PentAGI GraphQL adapter. No token or raw upstream error is returned to a webview. */
 export interface PentagiFlow { id: string; title: string; status: string; createdAt: string; }
 export interface PentagiTask { id: string; title: string; status: string; result: string; }
+export interface PentagiEvidence { id:string; type:'report'|'done'|'ask'; message:string; result:string; }
+/** Upstream leaves a flow waiting even after its last task succeeds or fails. */
+export function pentagiOutcome(snapshot:{flow:PentagiFlow;tasks:PentagiTask[]}):'finished'|'failed'|'needs_input'|undefined {
+    if(snapshot.flow.status==='failed'||snapshot.tasks.some(t=>t.status==='failed'))return 'failed';
+    if(!['finished','waiting'].includes(snapshot.flow.status))return;
+    if(snapshot.tasks.length>0&&snapshot.tasks.every(t=>t.status==='finished'&&t.result.trim()))return 'finished';
+    return 'needs_input';
+}
 export class PentagiRejectedRequest extends Error {}
 function normalizeId(value: unknown): string {
     if(typeof value==='number' && Number.isSafeInteger(value) && value>0) return String(value);
@@ -85,6 +93,17 @@ export class PentagiClient {
     async stop(id: string): Promise<void> {
         const r = await this.query<{stopFlow: string}>('mutation($id: ID!) { stopFlow(flowId: $id) }', {id});
         if (r.stopFlow !== 'success') throw new Error('PentAGI가 중단을 확인하지 않았습니다. 서버에서 상태를 확인하세요.');
+    }
+    async evidence(id:string):Promise<PentagiEvidence[]> {
+        const response=await this.query<{messageLogs:any[]}>('query($id: ID!) { messageLogs(flowId: $id) { id type message result } }',{id});
+        if(!Array.isArray(response.messageLogs))throw new Error('PentAGI 상세 보고서 형식이 올바르지 않습니다.');
+        // Preserve the final write-up and outstanding questions before deleting the
+        // temporary database. Internal thoughts and tool transcripts are not exported.
+        return response.messageLogs.filter(m=>['report','done','ask'].includes(m?.type)).slice(-50).map(m=>{
+            const normalized=normalizeId(m.id);
+            if(!normalized||typeof m.message!=='string'||typeof m.result!=='string'||m.message.length>100000||m.result.length>100000)throw new Error('PentAGI 상세 보고서 형식이 올바르지 않습니다.');
+            return {id:normalized,type:m.type,message:m.message,result:m.result};
+        });
     }
     async finish(id: string): Promise<void> {
         // A newly-created flow has no loaded worker yet; stopFlow rejects that state.

@@ -75,7 +75,7 @@ test('Bedrock diagnostics expose only an allowlisted error category, never raw C
 test('Bedrock audit accepts one data-only tool result and fails closed on prose, truncation or executable tools',()=>{
  const {bedrockAuditRequest,bedrockAuditResult}=require('../out/security/managedAudit');
  const request=bedrockAuditRequest('model','Do not execute code, use tools, emit secrets.',{files:[]});
- assert.equal(request.toolConfig.tools.length,1);assert.deepEqual(request.toolConfig.toolChoice,{auto:{}});
+ assert.equal(request.toolConfig.tools.length,1);assert.deepEqual(request.toolConfig.toolChoice,{any:{}});
  assert.match(request.system[0].text,/invoke executable tools/);
  const data={files:[{path:'app.py',text:'first\nsecond'}]};
  const numbered=JSON.parse(bedrockAuditRequest('model','audit',data).messages[0].content[0].text);

@@ -19,6 +19,7 @@ export function managedReport(raw:unknown,expected:{id:string;digest:string;mode
         status:choice(v.status,['preparing','running','completed','incomplete','finalizing','cancelled','failed','needs_input','timed_out','cleanup_failed']),stage:text(v.stage,300),
         tasks:list(v.tasks,500).map(t=>{object(t);return {id:text(t.id,200),title:text(t.title,2000),status:text(t.status,100),result:text(t.result,100000)};})};
     if(v.error!==undefined)result.error=text(v.error);
+    if(v.evidence!==undefined)result.evidence=list(v.evidence,50).map(m=>{object(m);return {id:text(m.id,128),type:choice(m.type,['report','done','ask']),message:text(m.message,100000),result:text(m.result,100000)};});
     for(const key of ['cleaned','isolationVerified'] as const)if(v[key]!==undefined){if(typeof v[key]!=='boolean')fail();result[key]=v[key];}
     if(v.scans!==undefined){
         if(v.mode!=='scans')fail();object(v.scans);const seen=new Set<string>();
@@ -37,6 +38,6 @@ export function managedReport(raw:unknown,expected:{id:string;digest:string;mode
             findings:list(a.findings,6).map(f=>{const found=finding(f);if(!found.file||!found.line||!files.includes(relative(found.file)))fail();return {...found,file:found.file!,line:found.line!,impact:text(f.impact),verification:text(f.verification)};}),
             needsValidation:list(a.needsValidation,100).map(c=>({title:text(object(c).title,1000),reason:text(c.reason)}))};
     }
-    if(v.status==='completed'&&((v.mode==='scans'&&!result.scans)||(v.mode==='audit'&&!result.audit)||(v.mode==='redteam'&&(!result.cleaned||!result.isolationVerified))))fail();
+    if(v.status==='completed'&&((v.mode==='scans'&&!result.scans)||(v.mode==='audit'&&!result.audit)||(v.mode==='redteam'&&(!result.cleaned||!result.isolationVerified||!result.tasks.length||result.tasks.some(t=>t.status!=='finished'||!t.result.trim())))))fail();
     return result;
 }

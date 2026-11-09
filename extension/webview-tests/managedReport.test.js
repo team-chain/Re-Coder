@@ -20,5 +20,8 @@ test('audit navigation accepts only reviewed relative source files; runtime clai
  for(const file of ['../outside','C:/secret','/etc/passwd','file://secret','src/missing.ts'])assert.throws(()=>managedReport({...audit,audit:{...audit.audit,findings:[{...audit.audit.findings[0],file}]}},{...expected,mode:'audit'}));
  const redteam={...base(),mode:'redteam',scans:undefined};
  assert.throws(()=>managedReport(redteam,{...expected,mode:'redteam'}));
- assert.equal(managedReport({...redteam,isolationVerified:true,cleaned:true},{...expected,mode:'redteam'}).status,'completed');
+ const completed={...redteam,isolationVerified:true,cleaned:true,tasks:[{id:'1',title:'Assessment',status:'finished',result:'SQL differential and coverage gaps'}],evidence:[{id:'2',type:'report',message:'Detailed proof',result:'GET /search'}]};
+ assert.equal(managedReport(completed,{...expected,mode:'redteam'}).evidence[0].result,'GET /search');
+ for(const tasks of [[],[{...completed.tasks[0],result:''}],[{...completed.tasks[0],status:'failed'}],[{...completed.tasks[0],status:'waiting'}]])assert.throws(()=>managedReport({...completed,tasks},{...expected,mode:'redteam'}));
+ assert.throws(()=>managedReport({...completed,evidence:[{...completed.evidence[0],type:'thoughts'}]},{...expected,mode:'redteam'}));
 });

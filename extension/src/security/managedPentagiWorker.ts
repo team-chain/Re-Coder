@@ -3,7 +3,7 @@ import {promises as fs} from 'fs';
 import * as path from 'path';
 import {spawn} from 'child_process';
 import {LocalPentagiRuntime, docker} from './localPentagi';
-import {PentagiClient} from './pentagiClient';
+import {PentagiClient,pentagiOutcome} from './pentagiClient';
 import {runManagedAudit} from './managedAudit';
 import {runManagedScans} from './managedScans';
 
@@ -101,13 +101,19 @@ export async function runManagedWorker():Promise<void> {
         const until=Date.now()+20*60*1000;
         while(!controller.signal.aborted&&Date.now()<until){
             const snapshot=await client.snapshot(flowId);report.tasks=snapshot.tasks;report.flow=snapshot.flow;await persist();
-            if(['finished','failed','waiting'].includes(snapshot.flow.status)){report.status=snapshot.flow.status==='finished'?'completed':snapshot.flow.status==='waiting'?'needs_input':'failed';break;}
+            const outcome=pentagiOutcome(snapshot);
+            if(outcome){report.status=outcome==='finished'?'completed':outcome;break;}
             await new Promise(r=>setTimeout(r,5000));
         }
         if(report.status==='running')report.status=controller.signal.aborted?'cancelled':'timed_out';
     } catch {report.status=controller.signal.aborted?'cancelled':'failed';report.error=`${report.stage} 단계에서 완료하지 못했습니다. AWS 모델 권한·앱 시작 조건·검사 환경을 확인하세요.`;}
     finally {
-        clearTimeout(deadline);if(client&&flowId)await client.finish(flowId).catch(()=>{});
+        clearTimeout(deadline);
+        if(client&&flowId){
+            try {report.evidence=await client.evidence(flowId);}
+            catch {report.error='상세 보고서를 가져오지 못했습니다. 마지막 저장된 작업 결과만 보관합니다.';if(report.status==='completed')report.status='incomplete';}
+            await client.finish(flowId).catch(()=>{});
+        }
         report.stage='환경 정리';await persist();
         try {await new LocalPentagiRuntime(input.id).cleanup();report.cleaned=true;}catch{report.cleaned=false;report.status='cleanup_failed';}
         report.stage='결과 저장';await persist();

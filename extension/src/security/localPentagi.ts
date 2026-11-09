@@ -2,7 +2,7 @@ import {spawn} from 'child_process';
 import {randomBytes} from 'crypto';
 import {promises as fs} from 'fs';
 import * as path from 'path';
-import {PentagiClient, PentagiFlow, PentagiTask, testTarget} from './pentagiClient';
+import {PentagiClient, PentagiFlow, PentagiTask, PentagiEvidence, pentagiOutcome, testTarget} from './pentagiClient';
 
 // Official Docker Hub index digests; updates require an integration check against the upstream release.
 export const PENTAGI_IMAGES = {
@@ -21,7 +21,7 @@ export interface LocalReport {
     session: string; workspace: string; target: string; createdAt: string; updatedAt: string;
     phase: LocalPhase; step: string; pid?: number; server?: string; provider?: LocalProvider;
     outcome?: 'finished'|'failed'|'cancelled'|'timed_out'|'interrupted'|'needs_input'; error?: string;
-    flow?: PentagiFlow; tasks?: PentagiTask[];
+    flow?: PentagiFlow; tasks?: PentagiTask[]; evidence?:PentagiEvidence[];
 }
 export interface DockerOptions {env?: Record<string,string>; input?: string; timeout?: number; signal?: AbortSignal;}
 export type DockerRun = (args: string[], options?: DockerOptions) => Promise<string>;
@@ -223,9 +223,9 @@ export async function executeLocalTest(request: LocalRequest): Promise<void> {
             await persist(); lastSaved=Date.now();
             // No interactive reply channel is exposed here. Retain the partial
             // evidence and release paid resources instead of idling for 30 min.
-            if (snapshot.flow.status==='waiting') {report.outcome='needs_input';break;}
-            if (['finished','failed'].includes(snapshot.flow.status)) {
-                report.outcome=snapshot.flow.status as 'finished'|'failed';
+            const outcome=pentagiOutcome(snapshot);
+            if (outcome) {
+                report.outcome=outcome;
                 if(report.outcome==='failed')report.error='PentAGI가 검사를 완료하지 못했습니다. 저장된 결과와 API 키·모델 사용 가능 여부를 확인하세요.';
                 break;
             }
@@ -237,6 +237,10 @@ export async function executeLocalTest(request: LocalRequest): Promise<void> {
         if(report.outcome==='failed') report.error = error instanceof Error && /^(Docker|로컬|검사|PentAGI)/.test(error.message) ? error.message : `${report.step} 단계에서 완료하지 못했습니다. Docker 상태와 선택한 모델 공급자 사용 가능 여부를 확인하세요.`;
     } finally {
         clearInterval(stopWatcher);
+        if(client&&report.flow) {
+            try {report.evidence=await client.evidence(report.flow.id);}
+            catch {report.error='상세 보고서를 가져오지 못했습니다. 마지막 저장된 작업 결과만 보관합니다.';}
+        }
         if (client && report.flow && !['finished','failed'].includes(report.flow.status)) {
             await client.finish(report.flow.id).catch(()=>{});
             try {const snapshot = await client.snapshot(report.flow.id); report.flow=snapshot.flow; report.tasks=snapshot.tasks;} catch {if (lastSaved) report.step='마지막으로 저장한 결과';}

@@ -88,13 +88,15 @@ test('a waiting flow saves partial evidence and cleans immediately instead of id
  t.mock.method(LocalPentagiRuntime.prototype,'cleanup',async()=>{cleaned++;});
  t.mock.method(PentagiClient.prototype,'providers',async()=>['openai']);
  t.mock.method(PentagiClient.prototype,'start',async()=>({id:'1',title:'check',status:'running',createdAt:''}));
- t.mock.method(PentagiClient.prototype,'snapshot',async()=>{snapshots++;return {flow:{id:'1',title:'check',status:finished?'finished':'waiting',createdAt:''},tasks:[{id:'1',title:'partial',status:'finished',result:'Only one route tested'}]};});
+ t.mock.method(PentagiClient.prototype,'snapshot',async()=>{snapshots++;return {flow:{id:'1',title:'check',status:finished?'finished':'waiting',createdAt:''},tasks:[{id:'1',title:'partial',status:'waiting',result:'Only one route tested'}]};});
+ t.mock.method(PentagiClient.prototype,'evidence',async()=>[{id:'1',type:'ask',message:'Confirm app route',result:''}]);
  t.mock.method(PentagiClient.prototype,'finish',async()=>{finished++;});
  try{
   await executeLocalTest({root,session:id,workspace:'test',target:'http://localhost:3000/',apiKey:'PRIVATE',provider:'openai'});
   const report=await readReport(root,id);
   assert.equal(report.outcome,'needs_input');assert.equal(report.phase,'removed');
   assert.equal(report.tasks[0].result,'Only one route tested');
+  assert.equal(report.evidence[0].message,'Confirm app route');
   assert.equal(finished,1);assert.equal(cleaned,1);assert.equal(snapshots,2);
  }finally{await fs.rm(root,{recursive:true,force:true});}
 });
