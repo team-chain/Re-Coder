@@ -51,6 +51,22 @@ test('the palette flow stores the key and asks the caller to restart the Core',a
 });
 
 const {aiKeyEnv: routingEnv}=require('../out/ai/aiKeyEnv');
+test('cancelling key input finishes even while the issuance notification remains unanswered',async()=>{
+ const c=context(),input=vscode.window.showInputBox,info=vscode.window.showInformationMessage;
+ let dismiss,finished=false,pending;
+ vscode.window.showInputBox=async()=>undefined;
+ vscode.window.showInformationMessage=()=>new Promise(resolve=>{dismiss=resolve;});
+ try {
+  pending=ai.runAiConnectCommand(c,'anthropic').then(result=>{finished=true;return result;});
+  await new Promise(setImmediate);
+  assert.equal(finished,true,'a passive notification must not hold the switch lock');
+  assert.equal(await pending,false);
+  assert.equal(c.secrets_.size,0);
+ } finally {
+  dismiss?.();await pending;
+  vscode.window.showInputBox=input;vscode.window.showInformationMessage=info;
+ }
+});
 for (const provider of ['openai','anthropic','compatible']) {
  test(`${provider}: separate fast model and implicit economy routing`,async()=>{
   const c=context(); await ai.storeAiKey(c,provider,'test-key-for-routing');

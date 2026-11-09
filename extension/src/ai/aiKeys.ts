@@ -117,8 +117,11 @@ async function askKey(context: Ctx, target: AiKeyProvider, makeDefault: boolean)
         validateInput: (value) => validateApiKey(target, value),
     });
     if (key === undefined) {
-        const open = await vscode.window.showInformationMessage('API 키가 없으면 발급 페이지에서 만들 수 있습니다.', '키 발급 페이지 열기');
-        if (open) { await vscode.env.openExternal(vscode.Uri.parse(KEY_PAGE[target])); }
+        // A notification may stay unanswered after it disappears. Cancellation
+        // must release the provider switch immediately, independently of it.
+        void vscode.window.showInformationMessage('API 키가 없으면 발급 페이지에서 만들 수 있습니다.', '키 발급 페이지 열기').then(open => {
+            if (open) { void vscode.env.openExternal(vscode.Uri.parse(KEY_PAGE[target])).then(undefined, () => undefined); }
+        }, () => undefined);
         return false;
     }
     await storeAiKey(context, target, key, makeDefault);
