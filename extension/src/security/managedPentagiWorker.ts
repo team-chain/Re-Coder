@@ -25,6 +25,15 @@ export function progressPublisher(publish:()=>Promise<void>,now:()=>number=Date.
         await publish();lastPublished=now();lastStage=stage;lastStatus=status;
     };
 }
+export async function finalizeManagedRuntime(report:any,persist:()=>Promise<void>,cleanup:()=>Promise<void>):Promise<void> {
+    const outcome=report.status;
+    // Completion requires cleanup. Publish a valid intermediate report while
+    // Docker teardown is still running, then restore the assessment outcome.
+    report.status='finalizing';report.stage='환경 정리';await persist();
+    try {await cleanup();report.cleaned=true;report.status=outcome;}
+    catch {report.cleaned=false;report.status='cleanup_failed';}
+    report.stage='결과 저장';await persist();
+}
 const MODELS=/^(?:(?:global|us|eu|apac)\.)?anthropic\.claude-[a-z0-9.:-]+$/;
 export function validateManagedInput(x:any):{id:string;mode:'audit'|'redteam'|'scans';port:number;model:string} {
     if(!x||!/^rc-rt-[a-f0-9]{24}$/.test(x.id)||(x.mode!==undefined&&!['audit','redteam','scans'].includes(x.mode))||(!['audit','scans'].includes(x.mode)&&(!Number.isInteger(x.port)||x.port<1||x.port>65535))||(x.mode!=='scans'&&(typeof x.model!=='string'||!MODELS.test(x.model))))throw new Error('검사 요청 형식이 올바르지 않습니다.');
@@ -114,9 +123,7 @@ export async function runManagedWorker():Promise<void> {
             catch {report.error='상세 보고서를 가져오지 못했습니다. 마지막 저장된 작업 결과만 보관합니다.';if(report.status==='completed')report.status='incomplete';}
             await client.finish(flowId).catch(()=>{});
         }
-        report.stage='환경 정리';await persist();
-        try {await new LocalPentagiRuntime(input.id).cleanup();report.cleaned=true;}catch{report.cleaned=false;report.status='cleanup_failed';}
-        report.stage='결과 저장';await persist();
+        await finalizeManagedRuntime(report,persist,()=>new LocalPentagiRuntime(input.id).cleanup());
     }
     if(report.status!=='completed')process.exitCode=1;
 }
