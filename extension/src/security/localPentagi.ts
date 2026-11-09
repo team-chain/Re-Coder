@@ -145,8 +145,11 @@ export class LocalPentagiRuntime {
             ...(managed?['-e',`DOCKER_DEFAULT_IMAGE=${managed.workerImage}`,'-e',`DOCKER_DEFAULT_IMAGE_FOR_PENTEST=${managed.workerImage}`,
                 '-e',`DOCKER_ALLOWED_IMAGES=${managed.workerImage}`,'-e','DOCKER_IMAGE_SELECTION_MODE=fixed',
                 '-e','BEDROCK_CONFIG_PATH=/opt/pentagi/recoder-bedrock.yml','--mount',`type=bind,src=${managed.configPath},dst=/opt/pentagi/recoder-bedrock.yml,readonly`,
-                '-e','DUCKDUCKGO_ENABLED=false','-e','SPLOITUS_ENABLED=false','-e','SCRAPER_PRIVATE_URL=http://127.0.0.1:1',
-                '-e','SCRAPER_PUBLIC_URL=http://127.0.0.1:1','-e','EMBEDDING_PROVIDER=bedrock','-e','EMBEDDING_MODEL=amazon.titan-embed-text-v2:0',
+                // Empty URLs remove the browser tool from upstream's advertised tools.
+                // A dummy URL advertises a broken tool and can cause repeated agent failures.
+                '-e','DUCKDUCKGO_ENABLED=false','-e','SPLOITUS_ENABLED=false','-e','SCRAPER_PRIVATE_URL=',
+                '-e','SCRAPER_PUBLIC_URL=','-e','TERMINAL_TOOL_TIMEOUT=120','-e','HTTP_CLIENT_TIMEOUT=120',
+                '-e','EMBEDDING_PROVIDER=bedrock','-e','EMBEDDING_MODEL=amazon.titan-embed-text-v2:0',
                 '-e','EXECUTION_MONITOR_ENABLED=true','-e','EXECUTION_MONITOR_TOTAL_TOOL_LIMIT=80']:[]),
             '-e','SERVER_PORT=8443','-e','SERVER_USE_SSL=false','-e','CORS_ORIGINS=http://127.0.0.1','-e','MAX_GENERAL_AGENT_TOOL_CALLS=50','-e','MAX_LIMITED_AGENT_TOOL_CALLS=20',
             '-v',`${this.name('app-data')}:/opt/pentagi/data`];

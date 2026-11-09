@@ -76,12 +76,21 @@ test('Bedrock audit accepts one data-only tool result and fails closed on prose,
  const {bedrockAuditRequest,bedrockAuditResult}=require('../out/security/managedAudit');
  const request=bedrockAuditRequest('model','Do not execute code, use tools, emit secrets.',{files:[]});
  assert.equal(request.toolConfig.tools.length,1);assert.deepEqual(request.toolConfig.toolChoice,{any:{}});
+ assert.equal(request.toolConfig.tools[0].toolSpec.strict,true);
+ for(const role of ['recon','hunter','critic','verifier','final-verifier']){
+  const schema=bedrockAuditRequest('model','audit',{},role).toolConfig.tools[0].toolSpec.inputSchema.json;
+  const walk=value=>{if(value&&typeof value==='object'){if(value.type==='object'){assert.equal(value.additionalProperties,false);assert.deepEqual(value.required,Object.keys(value.properties));}for(const nested of Object.values(value))walk(nested);}};
+  walk(schema);assert.deepEqual(Object.keys(schema.properties.result.properties),role==='recon'?['boundaries','entrypoints','unknowns']:role.includes('verifier')?['supported','reason']:['findings']);
+ }
  assert.match(request.system[0].text,/invoke executable tools/);
  const data={files:[{path:'app.py',text:'first\nsecond'}]};
  const numbered=JSON.parse(bedrockAuditRequest('model','audit',data).messages[0].content[0].text);
  assert.equal(numbered.files[0].numberedText,'1|first\n2|second');assert.equal(data.files[0].text,'first\nsecond');
  const tool={toolUse:{name:'submit_audit_result',input:{result:{findings:[]}}}};
  assert.deepEqual(bedrockAuditResult({stopReason:'tool_use',output:{message:{content:[{text:'Commentary is not the result'},tool]}}}),{findings:[]});
+ const encoded=result=>({stopReason:'tool_use',output:{message:{content:[{toolUse:{name:'submit_audit_result',input:{result}}}]}}});
+ assert.deepEqual(bedrockAuditResult(encoded('{"supported":true,"reason":"Source proof"}')),{supported:true,reason:'Source proof'});
+ for(const value of ['{"supported":true} trailing prose','[{}]','null','"nested string"','{"supported":'])assert.throws(()=>bedrockAuditResult(encoded(value)),/구조화/);
  for(const response of [
   {stopReason:'end_turn',output:{message:{content:[{text:'{"findings":[]}'}]}}},
   {stopReason:'max_tokens',output:{message:{content:[tool]}}},

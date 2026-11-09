@@ -100,3 +100,27 @@ test('a waiting flow saves partial evidence and cleans immediately instead of id
   assert.equal(finished,1);assert.equal(cleaned,1);assert.equal(snapshots,2);
  }finally{await fs.rm(root,{recursive:true,force:true});}
 });
+test('managed runtime keeps model credentials outside worker arguments and removes unavailable browser tooling',async t=>{
+ const calls=[];let targetPrepared=false;
+ t.mock.method(global,'fetch',async url=>url.endsWith('/info')?new Response('{}'):url.endsWith('/auth/login')?new Response('{}',{headers:{'set-cookie':'auth=session; HttpOnly'}}):Response.json({data:{token:'temporary-token'}}));
+ const runtime=new LocalPentagiRuntime(id,async(args,options={})=>{
+  calls.push({args,options});
+  if(args[0]==='context')return 'unix:///var/run/docker.sock';
+  if(args[0]==='info')return 'linux|8589934592|4';
+  if(args.includes('psql')&&options.input.startsWith('SELECT'))return '1';
+  if(args[0]==='port')return '127.0.0.1:49152';
+  if(args[0]==='create'&&args.includes(id+'-app'))assert.equal(targetPrepared,true);
+  return '';
+ });
+ const worker='vxcontrol/kali-linux@sha256:'+'1'.repeat(64);
+ await runtime.prepare('','bedrock',async()=>{},{configPath:'/tmp/recoder-bedrock.yml',workerImage:worker,bedrockEnv:{BEDROCK_SECRET_ACCESS_KEY:'PRIVATE_AWS_SECRET'},prepareTarget:async engine=>{assert.equal(engine,id+'-engine');targetPrepared=true;}});
+ const app=calls.find(c=>c.args[0]==='create'&&c.args.includes(id+'-app'));
+ const vars=Object.fromEntries(app.args.filter((_,i,a)=>a[i-1]==='-e'&&a[i].includes('=')).map(v=>{const n=v.indexOf('=');return [v.slice(0,n),v.slice(n+1)];}));
+ assert.equal(vars.DOCKER_NETWORK,'recoder-isolated');assert.equal(vars.DOCKER_ALLOWED_IMAGES,worker);
+ // Pinned upstream browser.IsAvailable uses nonempty URLs as its availability flag.
+ assert.equal(Boolean(vars.SCRAPER_PRIVATE_URL||vars.SCRAPER_PUBLIC_URL),false);
+ assert.equal(Number(vars.TERMINAL_TOOL_TIMEOUT),120);assert.equal(Number(vars.HTTP_CLIENT_TIMEOUT),120);
+ assert.equal(app.options.env.BEDROCK_SECRET_ACCESS_KEY,'PRIVATE_AWS_SECRET');
+ assert.ok(!JSON.stringify(calls.map(c=>c.args)).includes('PRIVATE_AWS_SECRET'));
+ assert.ok(!app.args.some(x=>x.includes('/var/run/docker.sock:')));
+});
