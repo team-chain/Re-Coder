@@ -1,0 +1,289 @@
+ReCoder 보안 기능 실환경 후속 검증 — 2026-11-09~10 KST
+
+검증 대상
+codex/security-overview-integration에서 분기한
+codex/security-verified-sebin1103-20261110의 3.0.9 검증 후보.
+기존 develop/main을 변경하거나 운영 출시를 승인한 기록이 아니다.
+이전 결과: docs/security-integration-verification-20261109.txt
+
+최종 판정 (2026-11-10 02:25 KST)
+- 실행·정리 경로 검증 완료: GPT 코드 감사, AWS 기본 검사/Bedrock 감사,
+  AWS 및 로컬 PentAGI의 작업 종료·증거 보존·환경 삭제, 최신 VSIX 실제 실행.
+- 최신 코드 7ab529d의 CI 14개 전체 통과. 전체 보안 정확도 합격은 아니다.
+- 로컬 OpenAI PentAGI는 의도한 SQL 취약점을 놓쳤다(미탐). AWS PentAGI는
+  SQL 주입을 찾았으나 CVSS 산술 오류와 보지 않은 구현을 단정하는 설명이
+  남았다. Haiku 감사의 오탐도 미통과다. 각 실패를 성공으로 재분류하지 않는다.
+- 개발·운영 전 범위 무결함, 모든 AI 모델의 정확도, 실제 결제사 승인,
+  장기간 고가용성·대규모 부하·재해복구 보증은 이번 검증의 결론이 아니다.
+- 테스트 자원은 정리했고 원래 VS Code 3.0.4와 작업 공간을 복원했다.
+- 요청에 따라 새 브랜치만 게시하며 develop/main에는 병합하지 않는다.
+
+확인된 결과
+1. GPT 소스 감사 정확도
+- 기존 연결의 gpt-6-sol을 실제 호출했다.
+- 실제 SourceAuditHost로 3개 합성 사례를 검사했다.
+  HTTP 입력이 SQL 문자열에 연결되는 사례: 9회 호출, 확정 1, 미확정 0.
+  매개변수 바인딩 대조군: 7회 호출, 확정 0, 미확정 0.
+  외부 호출자를 제공하지 않은 헬퍼: 7회 호출, 확정 0, 미확정 0.
+- 검사 중 소스가 변하지 않았고 저장 결과를 다시 읽을 수 있었다.
+- SQL 구문 경계와 별도 인증 경계를 혼동하던 지침을 수정했다.
+  호출자를 임의로 가정하지 않도록 하고 두 독립 검토는 유지했다.
+- 같은 SQL 호출 위치의 중복 후보를 합치고 검토 거절 이유를 보존한다.
+- 제한된 합성 회귀 사례의 결과다. 전체 취약점 탐지율을 뜻하지 않는다.
+- 최종 SQLite API 제약 수정 뒤 실제 GPT로 같은 Python 소스를 추가
+  검사했다: 9회 호출, 확정 1, 미확정 0. 단일 SELECT의 UNION을 통한
+  합성 메모 조회만 보고했고 DDL/DML·실제 사용자 데이터 접근을 과장하지
+  않았다. 소스 불변·저장 결과 재조회도 통과했다.
+- 제안한 매개변수 바인딩 수정도 HTTP 대조로 검증했다. 원본과 수정
+  사본에서 각 10회 요청을 수행해 정상 검색 보존, UNION/불리언 주입
+  차단, 안전한 대조 경로와 연속 SQL 실행 차단을 확인했다. 원본 파일은
+  변경하지 않았고 두 임시 서버를 종료했다.
+
+2. AWS 관리형 기본 검사
+- 기존 AWS 연결을 재사용해 실제 CloudFormation 생성, CodeBuild 실행,
+  S3 진행/결과 조회, 소스 사본 삭제와 자원 정리를 검사했다.
+- 최종 기본 검사 CodeBuild 성공, 보고서 completed.
+- Gitleaks/Hadolint 정상 완료, 패키지 없는 소스의 의존성은 해당 없음.
+- 이미지 빌드/Trivy 정상 완료: 합성 Python 이미지에서 7건을 보고했다.
+  이 결과는 취약점 0건을 의미하지 않는다.
+- CycloneDX SBOM과 OPA 평가가 생성됐다. 정책 allow는 해당 정책의
+  기준 충족이며 실제 운영 배포 승인 또는 모든 취약점 부재가 아니다.
+- 실제 DynamoDB 조건부 잠금은 동시에 다른 검사가 점유하는 것을 거절했다.
+- 별도 실제 DinD 양성/음성 대조에서 빌드 컨테이너의 사설망 canary
+  접근은 방화벽 전에는 가능하고 적용 후에는 차단됐다.
+- 발견/수정: Hadolint 실행 파일 누락, BuildKit의 지원되지 않는 네트워크
+  옵션, Trivy의 Results 생략 처리, OPA 비루트 권한, DinD /tmp 마운트
+  네임스페이스 때문에 실패하던 이미지 및 소스 복사.
+
+3. AWS Bedrock 소스 감사
+- Claude Haiku 4.5 global inference profile 실호출 연결을 확인했다.
+- 자유 텍스트 JSON 뒤에 설명을 붙여 중단되던 문제를 재현했다.
+- Converse의 데이터 전용 도구 결과로 받도록 바꾸고 단일 결과,
+  도구 이름, 객체 타입, 종료 사유를 검사한다. 도구 실행은 하지 않는다.
+- 소스에 정확한 줄 번호를 제공하고 원시 CLI 오류 대신 제한된 오류
+  분류만 표시한다.
+- 실제 CodeBuild 감사가 11회 호출 후 SUCCEEDED/completed로 끝났다.
+  확정 2건과 추가 검증 1건이며, 확정 결과에는 SQL 인젝션과 연관된
+  초기화 문제가 겹친다. Haiku의 인용·중복·영향 과장 품질은 아직
+  합격으로 판정하지 않는다. 다른 로컬 반복에서도 결과 변동이 있었다.
+
+- 후속 회귀: Haiku 4.5는 취약 JS 1건, 매개변수 바인딩 0건, 취약
+  SQLite 1건으로 판정했으나 호출자 없는 헬퍼를 critical로 잘못 확정했다.
+  안전한 코드에도 미확정 후보 2건이 남았다. Haiku 감사 품질은 미통과다.
+- 필수 데이터 도구 응답(any)으로 일반 텍스트 응답을 방지하고, JSON을
+  문자열로 한 번 더 직렬화한 결과도 엄격한 단일 JSON 파싱으로 처리한다.
+  잘린 JSON, 설명이 붙은 JSON, 배열, 중복 도구는 계속 거절한다.
+- AWS CLI의 standard 재시도를 최대 3 attempts로 제한하고 응답
+  시간 제한을 유지한다. UI의 20개 분석 요청과 요청별 재시도를 구분했다.
+- 최종 역할별 strict JSON 스키마를 AWS가 강제하도록 했다. 첫 스키마
+  준비를 위해 CLI 읽기 제한 120초, 전체 응답 제한 180초를 적용한다.
+- 같은 4개 비교에서 Sonnet 4.6은 취약 JS 1건, SQLite 1건, 안전한 코드
+  0건, 호출자 없는 헬퍼 0건을 확정했다. 헬퍼 1건/안전한 코드 7건은
+  미확정 후보로 남았으므로 탐지 정확도 전체를 보증하지 않는다.
+- Haiku 4.5는 strict 방식에서도 헬퍼를 잘못 확정했다. AWS 코드 감사
+  기본 모델을 Sonnet 4.6으로 변경했다. Haiku 품질 회귀는 미통과다.
+- Sonnet의 실제 CodeBuild 감사는 9회 요청 후 SUCCEEDED/completed로
+  완료됐지만, SQLite execute()가 DDL/DML 연속 실행을 허용한다는 잘못된
+  영향 설명이 있었다. 직접 sqlite3 재현에서 UNION 조회만 성공하고
+  연속 명령은 ProgrammingError로 차단되는 것을 확인했다. API 계약을
+  감사 지침에 추가한 후 같은 소스의 Bedrock 재검사에서는 높은 위험의
+  UNION 조회 문제 1건과 실제 수정안을 정확히 보고했다. 이 후속 재검사는
+  로컬에서 같은 Bedrock API로 수행했다. 이후 최종 지침을 실제 CodeBuild로
+  다시 검사해 9회 호출·확정 1건·미확정 0건으로 완료됐다. UNION 조회만 가능하며
+  DDL/DML 연속 실행은 불가능하다는 정확한 영향 설명을 보존했다.
+
+4. PentAGI
+- EULA/범위 동의 후 실제 OpenAI 연결로 로컬 합성 앱을 검사했다.
+- 첫 실행은 첫 화면만 검사해 SQL 취약점을 놓쳤다. 완료한 작업 뒤
+  입력 대기 상태로 환경을 유지했다. 결과를 보존하고 환경을 정리했다.
+- 앱 루트 주소는 같은 origin의 하위 경로를 포함하도록 지침을 수정했다.
+  명시한 하위 경로가 있으면 해당 경로 및 자식만 허용하며 다른 origin,
+  형제 경로와 응답 내 범위 확장 지시는 계속 거절한다.
+- pinned PentAGI 소스를 확인하니 마지막 task의 성공·실패 모두 상위
+  flow는 waiting으로 돌아간다. flow 이름만으로 완료를 판단하던 처리를
+  고쳤다. 모든 task가 finished이고 결과가 있어야 실행 완료로 인정한다.
+  실패 task, 빈 task 목록, 실제 입력 대기는 완료로 처리하지 않는다.
+- 상세 report/done/ask 메시지를 임시 DB 삭제 전에 보존한다. 내부 사고
+  기록과 도구 전체 로그는 보고서로 내보내지 않고, 알려진 비밀값을 가린다.
+- 로컬 재실행은 8회 GET으로 /, /search, /safe를 검사해 /search의 불리언
+  응답 차이와 /safe의 음성 대조를 보고했다. task는 성공했으며 이전
+  어댑터가 needs_input으로 기록한 원인은 위 waiting 해석 문제였다.
+  이 기록을 사후에 성공으로 덮어쓰지 않고 원본과 수정 근거를 보존한다.
+- AWS Haiku 실행은 격리 확인 후 실제 주입 검사를 수행했으나, 잘못된
+  도구 호출과 같은 작업 반복으로 20분 제한에 도달했다. timed_out으로
+  실패 기록을 보존했으며 Docker 자원, CloudFormation과 S3를 정리했다.
+- 실제 로그와 pinned upstream 코드를 확인해 사용 불가능한 scraper URL을
+  채우면 browser 도구가 활성화되는 문제를 찾았다. 빈 URL로 비활성화하고
+  터미널·HTTP 기본 대기를 120초로 설정했다.
+- Sonnet 재실행은 약 19분 뒤 task 완료 판정까지 도달했다. 그러나
+  Docker 정리가 끝나기 전에 completed를 저장하면서 cleaned 검증을
+  통과하지 못해 전체 실행은 중단됐다. 이 실행을 합격으로 적지 않는다.
+  정리 중에는 finalizing을 저장하고 정리 성공 후 원래 판정을 복원하도록
+  수정했으며, 실제 보고서 검증기를 통과하는 상태 전이 회귀를 추가했다.
+  AWS 기본 모델을 Sonnet 4.6으로 맞추고 전체 실행을 다시 검사한다.
+- 다음 Sonnet 실행도 미완료였다. 실제 모델 비용 약 $6.10을 사용했고
+  마지막 작업은 running, 결과는 비어 있었다. 도구 호출 반복 경고와
+  4096토큰 단위의 반복 출력을 확인했다. 일부 탐색 보고서는 보존했지만
+  SQL 증명·대조군·최종 보고서가 모두 완료됐다고 판단하지 않는다.
+  Docker 정리 후 failed/cleaned=true 결과를 정상 조회했으며 테스트
+  CloudFormation 스택과 S3 버킷을 오류 없이 삭제했다.
+- 별도 실제 Bedrock Converse 재현에서 동일한 합성 명령 데이터를
+  4096토큰으로 요청하면 stopReason=max_tokens, 도구 입력은 빈 객체였다.
+  16384토큰에서는 stopReason=tool_use, 12029 출력 토큰으로 29107자 입력을
+  온전히 반환했다. 반환한 명령은 실행하지 않았다. 이 대조의 모델 비용은
+  약 $0.318이었다. 모든 역할에 적용하던 4096 제한을 제거하고 명령·보고서
+  역할은 16384, 보조 역할은 8192로 조정했다. 짧은 명령, 같은 실패의
+  반복 제한, 입력 경로·음성 대조 우선, 최종 결과에 근거 보존 지침도 추가했다.
+  이 수정 뒤 실제 AWS 전체 검사를 다시 실행한다.
+- 출력 한도 수정 후 실제 AWS 실행은 SUCCEEDED/completed로 끝났다.
+  모든 task가 finished/비어 있지 않은 결과였고, 상세 보고서 5개와
+  cleaned=true/isolationVerified=true를 보존했다. 이 실행의 모델 비용은
+  약 $1.74였다. 보고서의 UNION 합성 마커 조회와 /safe의 음성 대조는
+  소스·HTTP 대조와 일치했다. 그러나 SQL의 영향을 별도 인증 취약점으로
+  중복 집계하고 보지 않은 f-string 구현, SQLite GRANT/REVOKE, 근거 없는
+  CVSS를 제시했다. 실행 성공과 보고 정확도를 구분해 원본을 보존했다.
+  블랙박스 근거·독립된 원인·실제 DB 계약에 맞는 수정안만 보고하도록
+  지침을 보완한 7ab529d로 후속 검증을 수행했다.
+- 최종 AWS 실행 rc-rt-87fd467269837cadb016cd2d:
+  CodeBuild cc2a9fac-3edb-4c71-9bcc-4acc8628e9b9가 SUCCEEDED,
+  보고서 completed, 모든 task finished, 상세 증거 5개,
+  cleaned=true/isolationVerified=true였다. SQL UNION 합성 마커 조회와
+  /safe 음성 대조를 보존했다. SQL 영향을 별도 인증 문제로 중복 집계하던
+  부분과 SQLite GRANT/REVOKE 권고는 개선됐다. 그러나 CVSS 3.1 벡터
+  AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N에 9.1을 붙였으며 실제 계산은
+  7.5다. 블랙박스에서 보지 않은 문자열 연결 구현과 전체 DB 읽기 권한도
+  단정했다. 실행 경로 통과와 보고서 정확도 제한을 구분한다.
+- 최종 로컬 OpenAI 실행 rc-rt-9711fa8ca070061fdff69113:
+  실제 VS Code에서 시작해 task finished, outcome finished, phase removed,
+  상세 증거 11개와 화면의 '실행 완료 · 결과 검토 필요'를 확인했다.
+  도구 이미지 다운로드가 약 15분 걸렸지만 이후 실제 모델 호출·HTTP
+  검사·자동 정리가 끝났다. 이 실행은 c111a03의 프롬프트를 사용했다.
+  gpt-5.4-mini/nano와 gpt-5.6-terra가 역할별로 호출됐다.
+  모델은 정상·빈 문자열·고유 문자·중괄호 입력만 9회 요청하고 취약점을
+  찾지 못했다. 이후 사람이 통제하는 별도 HTTP 대조 6회에서 같은 서버의
+  불리언 차이·UNION 합성 마커 조회와 /safe 차단을 확인했다. 모델 탐지는
+  미통과이며 이 6회를 PentAGI가 한 검사로 계산하지 않는다.
+  최신 7ab529d 설치 후 창을 다시 열어 저장된 결과와 삭제 완료 표시도
+  확인했다. 최신 프롬프트의 로컬 탐지 품질 재실행은 하지 않았다.
+- AWS 진행 단계가 5초 내 바뀌면 저장이 생략되던 문제도 발견했다.
+  단계/상태가 바뀌면 즉시 저장하고 같은 단계만 제한하도록 수정했다.
+
+자동 검사와 배포물
+- 출력 잘림 수정 후 확장 전체 852개 통과, 실패·skip 0. localhost 소켓을 차단한 sandbox
+  실행은 환경 오류로 별도 보존하고, 소켓 허용 실행 결과를 사용했다.
+- 호스트/웹뷰 타입 검사, production 웹뷰 빌드, Mac arm64 VSIX 검증 통과.
+- 테스트 자료가 VSIX에 섞이는 것을 발견해 제외 규칙과 거부 검사를 추가.
+  최종 확인한 VSIX 123개 항목에 해당 비밀/검증 디렉터리는 0개였다.
+- 실제 Docker 스캐너 회귀는 로컬에서 통과했고 소유 컨테이너/볼륨이
+  남지 않았다. GitHub CI에도 추가했다. CI는 CodeBuild와 같은 root 소유
+  임시 디렉터리로 실행해야 하며 최초 runner 소유 실행 실패를 보존했다.
+- 현재 통합 소스의 Core 전체를 로컬에서 다시 실행했다: 3538 통과,
+  2 skip. Hadolint 바이너리가 없어 생략된 템플릿 검사는 고정 Docker
+  이미지로 별도 실행해 1개 통과했다. 남은 skip은 macOS에 구현되지 않은
+  프로세스 시작 시각 조회에 의존하는 Windows/Linux용 PID 재사용 검사다.
+- 최종 CI Core: Linux 3.11/3.13 각 3528 통과/12 skip,
+  macOS 3526 통과/14 skip, Windows 3507 통과/33 skip.
+  CI에 없는 선택 도구 검사를 로컬 및 별도 실제 Docker 작업으로 보완했다.
+  테스트 전체 성공을 실제 모델·AWS 실행 성공과 동일시하지 않는다.
+- ccaf76c의 Windows CI는 비용 예약 DB 동시 초기화에서 database is
+  locked로 1건 실패했다. 초기화·정산·조회에도 30초 대기를 적용하고
+  초기화 쓰기를 직렬화하며 연결을 명시적으로 닫았다. 실제 5초 초과
+  잠금 대기와 성공/예산 거절 시 연결 종료를 포함한 회귀 17개가 통과했다.
+  수정된 Core를 포함한 Mac 설치본 재빌드와 실제 실행 검사가 통과했다.
+  세션 인증, 연결 없음 처리, 프로젝트 분석, 배포 계획·취소·SSE,
+  Core 재시작과 자식 프로세스 종료를 실제 패키지에서 확인했다.
+  최종 Windows CI 전체도 통과했다. OS별 skip은 실패 또는 실제 실행
+  성공으로 계산하지 않고 각각의 검사 범위에 남긴다.
+
+별도 보안 알림
+- 조회 시점 npm audit는 확장과 평가 도구 모두 0건이었다.
+- GitHub 기본 브랜치는 44건(높음 9)을 표시했다. 34건은 의도적으로
+  오래된 Vite를 쓰는 repair benchmark fixture, 10건은 평가 도구 잠금
+  파일이다. 평가 도구의 node-forge를 1.4.3, @azure/identity를 4.14.1로
+  갱신해 중첩된 msal-node 6.0.1을 제거하고 7.1.0을 사용하도록 했다.
+  잠금 파일 전체 npm audit 0건, Promptfoo 합성 회귀 19개가 통과했다.
+  기본 브랜치에는 아직 병합하지 않았으므로 GitHub 알림이 닫혔다고
+  주장하지 않는다. 수정 버전이 제시되지 않은 node-forge 알림 1건은
+  자동 해소를 확정할 수 없고 병합 후 GitHub의 재평가가 필요하다.
+- 이들 테스트/평가 디렉터리는 설치 VSIX에 포함되지 않는다.
+
+최종 실행·CI·정리 기록
+- 37525a8 CI 14개 작업 전체 통과:
+  https://github.com/team-chain/Re-Coder/actions/runs/42642413150
+- 1a45d19 CI 14개 작업 전체 통과:
+  https://github.com/team-chain/Re-Coder/actions/runs/42646240972
+- 최신 develop/main은 모두 70626bc1c9e5b6f89121a55cbd077aa38e596769.
+  develop 병합 시뮬레이션은 충돌 없이 성공했다. 실제 병합은 하지 않았다.
+- 최종 코드 a2312e753e8aedec2327b5d6174dcd32b54c77a3의 CI 14개 전체 통과:
+  https://github.com/team-chain/Re-Coder/actions/runs/42654471843
+- 새 브랜치 코드 7ab529d1f6033464d02f6d7423284e72c87f8c39 CI:
+  https://github.com/team-chain/Re-Coder/actions/runs/42661608581
+  14개 작업 전체 성공. 위 OS별 Core 통과/skip 수는 이 실행에서 확인했다.
+- 최종 Mac arm64 VSIX SHA256:
+  ec46b9ea4bd49dcb2e9df212cf256609bb1c1469eb437af7ec7d2f65769a8ef7
+  포함 Core SHA256:
+  610e35dea19d4d4d72924e67bcaa4dd91727d6030eccadfc7a4c348bb2af878c
+  release metadata의 sourceRevision은 7ab529d이며 설치된 어댑터와 실제
+  빌드 파일의 바이트 일치, 실행 Core 3.0.9, 패키지 smoke 모두 확인했다.
+- 최종 AWS 스택·보존 버킷 삭제 true, cleanup errors 0.
+  최종 로컬 세션의 컨테이너·볼륨·네트워크 없음, 합성 서버 49540 종료.
+  이미지 캐시는 제품의 문서화된 동작대로 유지한다.
+- VS Code를 원래 3.0.4와 /Users/sebin/Desktop/Re-Coder로 복원했다.
+  실제 Core health 3.0.4, AI 준비됨/AWS 연결 표시를 확인했다.
+- CLI 실제 재시도 대조: localhost 500 응답 두 번 뒤 세 번째 성공,
+  403 AccessDenied는 재시도 없이 1회 종료. 가짜 자격증명만 사용했다.
+- 로컬 합성 서버 49540 포트는 종료하고 연결 불가를 확인했다.
+- 추가 승인 전 PentAGI 재검증에는 토큰 집계에 보수적 가중치를 적용한 $12 중단
+  장치를 추가했다. 이번 AWS 검증의 승인 한도는 $30이며 실제 청구서는
+  사용량 집계와 구분한다. 사용자 계정 플랜이나 전역 정책은 바꾸지 않았다.
+- 사용자가 제시한 AWS 콘솔의 남은 크레딧은 $114.26, 남은 기간은
+  91일(2027-02-07)이었다. 이는 검증용 $30 예산 잔액과 다른 수치다.
+  2026-11-10 01:48 KST 최근 24시간 모델 비용 추정은 $18.377576이었다.
+  당시 Cost Explorer는 집계 지연으로 $0/Estimated=true였으며 실제
+  청구가 0이라고 해석하지 않았다. CodeBuild·저장·로그 비용은 별도다.
+- 이후 사용자가 현재 사용액에 더해 추가 $20을 승인했다. 위 모델 집계를
+  기준으로 추가 사용량을 따로 기록한다. 새 실행에는 일반 모델 요금의
+  2배로 계산한 $18 감시 한도(표준 모델 비용 약 $9)를 적용해 실행·저장
+  비용과 후속 검증 여유를 남긴다. 계정 전체의 크레딧을 사용 승인한 것으로
+  해석하지 않는다. 테스트의 비용 감시는 제품 전역 한도 설정이 아니다.
+- AWS 공식 Price List API에서 서울 Linux general1.medium OnDemand-EC2
+  단가 $0.01/분을 확인했다(SKU RNYPBDC6T88JXMUN, 2026-08-01 적용).
+  빌드별 제출~종료 시간을 분 단위 올림으로 계산하며 저장·로그·API·세금은
+  별도다. 추가 검증의 로컬 OpenAI 실행은 토큰 수에 $6/$30 per million을
+  적용한 보수적 $5 중단 장치를 별도로 두었다. 이 감시값을 실제 청구
+  금액으로 제시하지 않는다.
+- 추가 $20 승인 이후 마지막 관찰 소계는 약 $4.70:
+  Bedrock $4.258818 + CodeBuild 23분 $0.23 + 로컬 OpenAI 카탈로그 추정
+  $0.21087054. 미집계 비용 전 여유는 약 $15.30이다. 로컬 사용량은 DB
+  삭제 직전 마지막 표본이라 마지막 호출 일부가 더 있을 수 있으며, 저장·
+  로그·API·세금은 별도다. 실제 청구액이나 현재 AWS 크레딧 잔액이 아니다.
+  모든 검증 실행과 소유한 유료 테스트 자원은 종료·삭제했다.
+
+남은 확인·미통과 항목
+- 미통과: 로컬 PentAGI의 SQL 취약점 미탐, AWS PentAGI 설명·CVSS 정확도,
+  Haiku 소스 감사의 오탐. 모델 결과는 사람이 검토해야 한다.
+- 미검증: 최종 프롬프트의 모든 모델·공급자 조합, 임의 프로젝트 전반의
+  탐지율/오탐률, 실제 결제사·운영 도메인/운영 트래픽, 장기 운영·최대 부하.
+- 구조상 제한: 로컬 PentAGI의 프롬프트 범위는 네트워크 강제 격리가 아니다.
+  방화벽 격리 양성/음성 대조는 AWS 관리형 경로에서 확인했다.
+- 병합 후 확인: 기본 브랜치 Dependabot 알림 재평가와 최종 배포 대상의
+  재검사. 이 새 브랜치를 올리는 것으로 기존 운영 상태가 바뀌지는 않는다.
+- 비용: AWS/OpenAI 최종 청구 반영과 계정 크레딧 직접 조회는 미확인이다.
+
+처리 근거
+- PentAGI pinned task 상태 전파:
+  https://github.com/vxcontrol/pentagi/blob/cffed9485aa1cca70762cd08a57ac62a80406258/backend/pkg/controller/task.go
+- Bedrock 필수 도구 응답:
+  https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_ToolChoice.html
+- Bedrock strict JSON 스키마:
+  https://docs.aws.amazon.com/bedrock/latest/userguide/structured-output.html
+- Python SQLite 연결 컨텍스트의 트랜잭션 처리와 명시적 close:
+  https://docs.python.org/3/library/sqlite3.html#how-to-use-the-connection-context-manager
+- AWS CLI 제한된 재시도:
+  https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-retries.html
+- PentAGI 기본 역할별 출력 한도:
+  https://github.com/vxcontrol/pentagi/blob/cffed9485aa1cca70762cd08a57ac62a80406258/backend/pkg/providers/bedrock/config.yml
+- 모델 단가(추정 계산):
+  https://platform.claude.com/docs/en/about-claude/pricing
+- CVSS 3.1 계산 근거:
+  https://www.first.org/cvss/v3.1/specification-document
