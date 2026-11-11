@@ -6,6 +6,7 @@ export interface ManagedReport {
     error?:string;cleaned?:boolean;isolationVerified?:boolean;
     tasks:Array<{id:string;title:string;status:string;result:string}>;
     evidence?:Array<{id:string;type:'report'|'done'|'ask';message:string;result:string}>;
+    assessment?:import('./pentagiAssessmentTypes').PentagiAssessment;
     scans?:{checks:ManagedCheck[];policy?:{decision:'allow'|'deny';reason:string;scope:string}};
     audit?:{scope:string;files:string[];skipped:string[];calls:number;inputTokens:number;outputTokens:number;
         findings:Array<ManagedFinding&{file:string;line:number;impact:string;verification:string}>;

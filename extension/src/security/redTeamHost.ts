@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { createHash } from 'crypto';
-import { PentagiClient, PentagiRejectedRequest, serviceUrl, testTarget } from './pentagiClient';
+import { PentagiClient, PentagiRejectedRequest, pentagiOutcome, serviceUrl, testTarget } from './pentagiClient';
+import {assessPentagi} from './pentagiAssessment';
 import { LocalPentagiHost } from './localPentagiHost';
 
 type Run = { id?: string; target: string; provider: string; server: string; createdAt: string; uncertain?: boolean; stopped?: boolean; terminal?: boolean };
@@ -87,9 +88,12 @@ export class RedTeamHost {
             }
             if (run?.id) {
                 const snapshot = await client.snapshot(run.id);
-                run.terminal = ['finished', 'failed'].includes(snapshot.flow.status) || (run.stopped === true && snapshot.flow.status === 'waiting');
+                const outcome=pentagiOutcome(snapshot);
+                run.terminal = outcome==='finished'||outcome==='failed'||(run.stopped === true && snapshot.flow.status === 'waiting');
                 await this.state.update(key, runs);
-                return {configured: true, server: connection.server, runs, ...snapshot};
+                let evidence,reportError;
+                if(run.terminal){try{evidence=await client.evidence(run.id);}catch{reportError='상세 보고서를 받지 못했습니다. 마지막 작업 결과를 표시합니다. 상태 확인으로 다시 가져올 수 있습니다.';}}
+                return {configured: true, server: connection.server, runs, ...snapshot,evidence,reportError,assessment:run.terminal?assessPentagi(snapshot.tasks,evidence,run.target):undefined};
             }
             return {configured: true, server: connection.server, providers: await client.providers(), runs};
         } finally { this.busy = false; }

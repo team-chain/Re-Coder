@@ -46,7 +46,7 @@ export async function projectBundle(workspace:string, runtimeDir:string, config:
     const {files,bytes}=await bundleSources(workspace);
     if(!['audit','scans'].includes((config as {mode?:string})?.mode||'')&&!files.some(f=>f.name==='source/Dockerfile'))throw new Error('프로젝트 루트에 Dockerfile이 필요합니다. Deploy에서 먼저 Dockerfile을 준비하세요.');
     const names=files.map(f=>f.name.slice(7));
-    for(const name of ['managedPentagiWorker.js','managedAudit.js','managedScans.js','localPentagi.js','pentagiClient.js']) files.push({name:'runtime/'+name,data:await fs.readFile(path.join(runtimeDir,name))});
+    for(const name of ['managedPentagiWorker.js','managedAudit.js','managedScans.js','localPentagi.js','pentagiClient.js','pentagiAssessment.js']) files.push({name:'runtime/'+name,data:await fs.readFile(path.join(runtimeDir,name))});
     files.push({name:'runtime/policy.rego',data:await fs.readFile(path.resolve(runtimeDir,'../../media/security-audit/deploy.rego'))});
     for(const name of ['SKILL.md','RECONNAISSANCE.md','HUNTING.md','ATTACK-CLASSES.md','VALIDATION-AND-REPORTING.md','LICENSE','REVISION']) files.push({name:'runtime/audit/'+name,data:await fs.readFile(path.resolve(runtimeDir,'../../media/security-audit',name))});
     files.push({name:'runtime/request.json',data:Buffer.from(JSON.stringify(config))});

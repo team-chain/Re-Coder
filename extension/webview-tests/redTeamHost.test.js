@@ -32,3 +32,12 @@ test('stop failure does not turn an active flow into a completed flow',async t=>
  await host.handle('start','project');await assert.rejects(()=>host.handle('stop','project'));
  assert.equal((await host.handle('status','project')).runs[0].terminal,false);
 });
+test('remote waiting with completed tasks is terminal but an unstructured report is not a pass',async t=>{
+ const {host}=setup();
+ t.mock.method(PentagiClient.prototype,'providers',async()=>['openai']);t.mock.method(PentagiClient.prototype,'start',async()=>({id:'1',status:'created'}));
+ t.mock.method(PentagiClient.prototype,'snapshot',async()=>({flow:{id:'1',status:'waiting'},tasks:[{id:'1',title:'test',status:'finished',result:'No issues.'}]}));
+ t.mock.method(PentagiClient.prototype,'evidence',async()=>[]);
+ mock.window.showQuickPick=async()=> 'openai';mock.window.showInputBox=async()=> 'http://host.docker.internal:3000';mock.window.showWarningMessage=async()=> '범위를 확인했고 실행';
+ await host.handle('start','project');const result=await host.handle('status','project');
+ assert.equal(result.runs[0].terminal,true);assert.equal(result.assessment.status,'incomplete');assert.equal(result.assessment.checks.filter(c=>c.status==='not_tested').length,5);
+});

@@ -24,7 +24,18 @@ if (process.env.HARNESS_SECURITY === '1') {
   vscode.window.showInformationMessage=async(_title,_options,choice)=>choice;
   api.securityAuditStep=async(role)=>{await new Promise(resolve=>setTimeout(resolve,150));return {result:['hunter','critic'].includes(role)?{findings:[]}:{boundaries:[],entrypoints:[],unknowns:[]},provider:'UI fixture only',model:'no paid model call',inputTokens:0,outputTokens:0};};
   let sampleRun=null;
+  let redteamPolls=0;
   require('../out/security/redTeamHost').RedTeamHost.prototype.handle=async action=>{
+    if(process.env.HARNESS_REDTEAM_PROGRESS==='1'){
+      if(action==='localStart'){redteamPolls=0;sampleRun={session:'ui-fixture',target:'http://localhost:3000/ · UI 예시',createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),phase:'running',step:'UI 예시 · SQL 입력과 대조 응답 검사',tasks:[{id:'1',title:'앱 경로 탐색',status:'finished',result:'UI 예시: /search 입력 확인'},{id:'2',title:'SQL 입력 · 대조 응답 비교',status:'running',result:''}]};}
+      if(action==='localStatus'&&sampleRun&&sampleRun.phase==='running'){
+        redteamPolls++;
+        if(redteamPolls===1)throw Error('UI 예시 · 일시적 연결 끊김');
+        if(redteamPolls>=2){sampleRun.phase='removed';sampleRun.outcome='finished';sampleRun.step='UI 예시 · 검사 환경 삭제 완료';sampleRun.tasks[1]={...sampleRun.tasks[1],status:'finished',result:'UI 예시: 구조화된 근거가 없는 과거 결과'};sampleRun.assessment=require('../out/security/pentagiAssessment').assessPentagi(sampleRun.tasks);}
+      }
+      if(action==='localStop'&&sampleRun){sampleRun.phase='removed';sampleRun.outcome='cancelled';sampleRun.step='UI 예시 · 중단 후 환경 삭제 완료';}
+      return {localMode:true,local:sampleRun,localHistory:[]};
+    }
     if(action==='localStart') sampleRun={session:'ui-fixture',target:'http://host.docker.internal:3000/',createdAt:new Date().toISOString(),phase:'removed',step:'UI 예시 · 검사 환경 삭제 완료',outcome:'finished',tasks:[{id:'1',title:'보안 헤더 점검 · UI 예시',status:'finished',result:'이 결과는 화면 검증용 예시입니다. 실제 Docker·모델·스캐너를 실행하지 않았습니다.'}]};
     return {localMode:true,local:sampleRun,localHistory:[]};
   };

@@ -6,6 +6,7 @@ import {LocalPentagiRuntime, docker} from './localPentagi';
 import {PentagiClient,pentagiOutcome} from './pentagiClient';
 import {runManagedAudit} from './managedAudit';
 import {runManagedScans} from './managedScans';
+import {assessPentagi} from './pentagiAssessment';
 
 export const WORKER_IMAGE='vxcontrol/kali-linux@sha256:7f803e5be80ec33dcf4228d9702ea1264658b43301e9d6bf3bce6cf8b1077399';
 async function publishProgress(bucket:string,id:string):Promise<void> {
@@ -134,6 +135,7 @@ export async function runManagedWorker():Promise<void> {
             catch {report.error='상세 보고서를 가져오지 못했습니다. 마지막 저장된 작업 결과만 보관합니다.';if(report.status==='completed')report.status='incomplete';}
             await client.finish(flowId).catch(()=>{});
         }
+        report.assessment=assessPentagi(report.tasks,report.evidence,`http://172.30.0.10:${input.port}/`);
         await finalizeManagedRuntime(report,persist,()=>new LocalPentagiRuntime(input.id).cleanup());
     }
     if(report.status!=='completed')process.exitCode=1;

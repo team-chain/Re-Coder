@@ -1,6 +1,8 @@
 import React,{useCallback,useEffect,useRef,useState} from 'react';
 import {useVSCodeApi} from '../hooks/useVSCodeApi';
 import type {ManagedMode,ManagedReport} from '../../src/security/managedReportTypes';
+import {RedTeamRunView} from './RedTeamRunView';
+import {redTeamPollDelay,REDTEAM_STATUS_TIMEOUT} from './redTeamPolling';
 interface Run {id:string;mode?:ManagedMode;createdAt:string;status:string;stage?:string;terminal?:boolean;uncertain?:boolean;stopRequested?:boolean;files:number;bytes:number}
 interface State {connected?:boolean;ready?:boolean;account?:string;region?:string;stackStatus?:string;runs?:Run[];activeRun?:Run;report?:ManagedReport;reportError?:string}
 const PHASE:Record<string,string>={SUBMITTED:'실행 요청 수락',QUEUED:'실행 대기',PROVISIONING:'작업 환경 준비',DOWNLOAD_SOURCE:'검사 사본 받는 중',INSTALL:'실행 도구 준비',PRE_BUILD:'실행 준비',BUILD:'빌드·격리 확인·레드팀 검사',POST_BUILD:'검사 마무리',UPLOAD_ARTIFACTS:'결과 보관',FINALIZING:'환경 종료',COMPLETED:'작업 종료'};
@@ -8,15 +10,17 @@ const STATUS:Record<string,string>={SUBMITTING:'실행 여부 확인 중',IN_PRO
 const MODE:Record<ManagedMode,string>={audit:'AI 코드 감사',scans:'기본 보안 검사',redteam:'레드팀 검사'};
 export const ManagedRedTeamPanel:React.FC<{mode?:ManagedMode;onReport?:(report:ManagedReport|undefined)=>void}>=({mode='redteam',onReport})=>{
  const {postMessage,useMessage}=useVSCodeApi();const [state,setState]=useState<State>({}),[error,setError]=useState(''),[busy,setBusy]=useState(false),[tick,setTick]=useState(0);
- const pending=useRef('');const send=useCallback((action:string)=>{if(pending.current)return;const id=`managed-${Date.now()}-${Math.random()}`;pending.current=id;setBusy(true);setError('');postMessage('security.redteam',{action,mode,requestId:id});},[postMessage,mode]);
+ const pending=useRef(''),lastAction=useRef(''),failures=useRef(0);const send=useCallback((action:string)=>{if(pending.current)return;const id=`managed-${Date.now()}-${Math.random()}`;pending.current=id;lastAction.current=action;setBusy(true);if(mode!=='redteam')setError('');postMessage('security.redteam',{action,mode,requestId:id});},[postMessage,mode]);
  useMessage(useCallback(msg=>{if(msg.type==='aws.configure.result'||msg.type==='aws.clear.result'){pending.current='';setState({});send('managedStatus');return;}
   if(msg.type==='canvas.projectChanged'){pending.current='';setBusy(false);setState({});setError('프로젝트가 변경되었습니다. 상태를 다시 확인하세요.');return;}
-  if(msg.type!=='security.redteamResult')return;const p=msg.payload as State&{requestId:string;error?:string;cancelled?:boolean};if(p.requestId!==pending.current)return;pending.current='';setBusy(false);if(p.error)setError(p.error);else if(!p.cancelled)setState(p);setTick(n=>n+1);},[send]));
+  if(msg.type!=='security.redteamResult')return;const p=msg.payload as State&{requestId:string;error?:string;cancelled?:boolean};if(p.requestId!==pending.current)return;pending.current='';setBusy(false);if(p.error){failures.current++;setError(p.error);}else{failures.current=0;setError('');if(!p.cancelled)setState(p);}setTick(n=>n+1);},[send]));
  useEffect(()=>{send('managedStatus');},[send]);
  const run=state.runs?.[0],report=state.report,active=!!state.activeRun;
+ const reportActive=!!report&&state.activeRun?.id===report.runId&&(state.activeRun?.mode||'redteam')===mode;
  const scans=report?.scans;
  useEffect(()=>{onReport?.(report);},[report,onReport]);
- useEffect(()=>{if(busy||error||(!active&&!state.stackStatus?.endsWith('_IN_PROGRESS')))return;const id=setTimeout(()=>{if(document.visibilityState==='visible')send('managedStatus');else setTick(n=>n+1);},5000);return()=>clearTimeout(id);},[busy,error,active,state.stackStatus,send,tick]);
+ useEffect(()=>{if(mode!=='redteam'||!busy||lastAction.current!=='managedStatus')return;const request=pending.current;const id=setTimeout(()=>{if(pending.current!==request)return;pending.current='';failures.current++;setBusy(false);setError('상태 수신이 지연되고 있습니다. 표시된 내용은 마지막 수신 기록입니다.');setTick(n=>n+1);},REDTEAM_STATUS_TIMEOUT);return()=>clearTimeout(id);},[busy,tick,mode]);
+ useEffect(()=>{if(busy)return;const retry=mode==='redteam'&&error?redTeamPollDelay(lastAction.current,failures.current):undefined;if(error&&retry===undefined)return;if(!error&&!active&&!state.stackStatus?.endsWith('_IN_PROGRESS'))return;const id=setTimeout(()=>{if(typeof document==='undefined'||document.visibilityState==='visible')send('managedStatus');else setTick(n=>n+1);},retry??5000);return()=>clearTimeout(id);},[busy,error,active,state.stackStatus,send,tick,mode]);
  return <section className="rc-security-detail" aria-busy={busy}>
   <h3>{mode==='audit'?'AI 코드 감사':mode==='scans'?'관리형 기본 보안 검사':'레드팀 테스트'}</h3><p>{mode==='audit'?'Cloudflare security-audit 기반 · 코드 구조 분석 → 취약점 탐색 → 독립 근거 재검토':'프로젝트 사본을 내 AWS에서 빌드하고 검사합니다. 이 PC에 Docker나 별도 모델 키를 설치할 필요가 없습니다.'}</p>
   <div className="rc-security-actions">
@@ -41,8 +45,8 @@ export const ManagedRedTeamPanel:React.FC<{mode?:ManagedMode;onReport?:(report:M
     {!!report.audit.needsValidation.length&&<details><summary>추가 검증 필요 {report.audit.needsValidation.length}개</summary>{report.audit.needsValidation.map((f,i)=><p key={i}>{f.title} — {f.reason}</p>)}</details>}
     <details><summary>검사 범위 · 모델 사용량</summary><p>호출 {report.audit.calls}회 · 입력 {report.audit.inputTokens} / 출력 {report.audit.outputTokens} 토큰</p><pre>{report.audit.files.join('\n')}</pre><p>제외한 파일</p><pre>{report.audit.skipped.join('\n')||'없음'}</pre></details>
    </>}
-   {report.tasks.map(t=><details key={t.id}><summary>{t.title} · {t.status}</summary><pre>{t.result||'결과 없음'}</pre></details>)}
-   {report.evidence?.map(m=><details key={m.id}><summary>{m.type==='ask'?'추가 확인 요청':'상세 보고서'}</summary><pre>{m.message}{m.result?'\n'+m.result:''}</pre></details>)}</>}
+   {mode==='redteam'?<RedTeamRunView key={report.runId} active={reportActive&&!error&&!state.reportError} phase={report.status} step={error||state.reportError?'연결 확인 중 · 마지막 수신 기록':report.stage} outcome={reportActive?undefined:report.status} tasks={report.tasks} assessment={report.assessment} cleaned={report.cleaned}/>:report.tasks.map(t=><details key={t.id}><summary>{t.title} · {t.status}</summary><pre>{t.result||'결과 없음'}</pre></details>)}
+   {!!report.evidence?.length&&<details><summary>원본 기록 · 검증되지 않은 AI 설명 포함</summary>{report.evidence.map(m=><details key={m.id}><summary>{m.type==='ask'?'추가 확인 요청':'AI 보고 원문'}</summary><pre>{m.message}{m.result?'\n'+m.result:''}</pre></details>)}</details>}</>}
   {run?.terminal&&!report&&<p>작업은 종료됐지만 결과 보고서가 없습니다. 검사를 통과한 것으로 처리하지 않습니다.</p>}
   {!!state.runs?.length&&<details><summary>실행 이력 {state.runs.length}개</summary><button className="rc-btn" disabled={busy} onClick={()=>send('managedReport')}>저장된 보고서 열기</button>{state.runs.map(r=><p key={r.id}>{new Date(r.createdAt).toLocaleString()} · {STATUS[r.status]||r.status} · {r.files}개 파일</p>)}</details>}
   <details><summary>실행 범위 · 비용 · 보관</summary>{mode==='audit'?<p>읽기 전용 소스 감사입니다. Dockerfile·도구 설치가 필요하지 않습니다. 최대 100개 파일·160KB를 모델에 전달하고, 최대 6개 후보를 각각 두 번 재검토합니다. 나머지는 미검증으로 남기며 실행 증명을 대신하지 않습니다.</p>:mode==='scans'?<p>시크릿·의존성·Dockerfile을 검사합니다. Dockerfile이 있으면 격리된 엔진에서 이미지를 빌드해 검사하고 SBOM을 만듭니다. 앱을 실행하거나 AI 모델을 호출하지 않습니다. Dockerfile이 없거나 검사에 실패한 항목은 통과로 표시하지 않습니다.</p>:<><p>프로젝트의 Dockerfile과 앱 포트를 사용합니다. 운영 DB와 .env는 전송하지 않습니다. 별도 DB·외부 서비스가 필수인 앱은 검사 사본이 시작되지 않을 수 있습니다.</p><p>빌드 중에는 의존성을 다운로드합니다. 앱 실행과 검사 전에는 외부 네트워크·메타데이터·Docker API 차단을 확인하며, 확인하지 못하면 검사를 시작하지 않습니다.</p></>}<p>{mode==='scans'?'CodeBuild와 저장·요청':'CodeBuild와 Bedrock'} 비용은 내 AWS 계정에 청구됩니다. 동시 실행 1개, 작업당 최대 60분이며 달러 기준 자동 상한은 없습니다. 소스는 종료 후 삭제를 시도하고 1일 만료, 결과와 로그는 7일 보관합니다.</p></details>

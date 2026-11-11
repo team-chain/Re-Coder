@@ -5,6 +5,7 @@ import {promises as fs} from 'fs';
 import * as path from 'path';
 import {AI_KEY_SECRET} from '../ai/aiKeyEnv';
 import {LocalPentagiRuntime, LocalProvider, LocalReport, localTarget, readReport, saveReport, sessionPaths} from './localPentagi';
+import {assessPentagi,assessmentMarkdown} from './pentagiAssessment';
 
 function alive(pid?:number) {if(!pid) return false; try {process.kill(pid,0);return true;} catch {return false;}}
 const providerOptions: Array<vscode.QuickPickItem & {provider:LocalProvider}> = [
@@ -89,7 +90,9 @@ export class LocalPentagiHost {
                 await saveReport(this.root,current);
             }
         } else if(action==='localOpenReport') {
-            if(current) await vscode.window.showTextDocument(await vscode.workspace.openTextDocument({language:'json',content:JSON.stringify(await readReport(this.root,current.session),null,2)}),{preview:true});
+            if(current) await vscode.window.showTextDocument(await vscode.workspace.openTextDocument({language:'markdown',content:assessmentMarkdown(assessPentagi(current.tasks,current.evidence,current.target),current)}),{preview:true});
+        } else if(action==='localOpenRawReport') {
+            if(current) await vscode.window.showTextDocument(await vscode.workspace.openTextDocument({language:'json',content:JSON.stringify(current,null,2)}),{preview:true});
         }
         reports=await this.reports(workspace);current=reports[0];
         // Abnormal OS termination: cleanup is recoverable on next launch; never claim it was removed.

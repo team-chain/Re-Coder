@@ -3,6 +3,7 @@ import {randomBytes} from 'crypto';
 import {promises as fs} from 'fs';
 import * as path from 'path';
 import {PentagiClient, PentagiFlow, PentagiTask, PentagiEvidence, pentagiOutcome, testTarget} from './pentagiClient';
+import {assessPentagi,PentagiAssessment,redactDiagnostic} from './pentagiAssessment';
 
 // Official Docker Hub index digests; updates require an integration check against the upstream release.
 export const PENTAGI_IMAGES = {
@@ -22,6 +23,7 @@ export interface LocalReport {
     phase: LocalPhase; step: string; pid?: number; server?: string; provider?: LocalProvider;
     outcome?: 'finished'|'failed'|'cancelled'|'timed_out'|'interrupted'|'needs_input'; error?: string;
     flow?: PentagiFlow; tasks?: PentagiTask[]; evidence?:PentagiEvidence[];
+    assessment?:PentagiAssessment;
 }
 export interface DockerOptions {env?: Record<string,string>; input?: string; timeout?: number; signal?: AbortSignal;}
 export type DockerRun = (args: string[], options?: DockerOptions) => Promise<string>;
@@ -70,11 +72,13 @@ export async function readReport(root: string, session: string): Promise<LocalRe
         data = JSON.parse(await fs.readFile(p.report + '.tmp', 'utf8'));
     }
     if (data.session !== session || !['preparing','running','saving','cleaning','removed','cleanup_failed'].includes(data.phase)) throw new Error('검사 기록 형식이 올바르지 않습니다.');
+    // Recompute for historical journals too. Never trust a persisted model's score or verdict.
+    if(data.phase==='removed'||data.phase==='cleanup_failed')data.assessment=assessPentagi(data.tasks,data.evidence,data.target);
     return data;
 }
 export function redactReport(report: LocalReport, secrets: string[]): LocalReport {
     const redact=(value:unknown):unknown=>{
-        if(typeof value==='string') {let cleaned=value;for(const secret of secrets) if(secret)cleaned=cleaned.split(secret).join('[REDACTED]');return cleaned;}
+        if(typeof value==='string') {let cleaned=value;for(const secret of secrets) if(secret)cleaned=cleaned.split(secret).join('[REDACTED]');return redactDiagnostic(cleaned);}
         if(Array.isArray(value))return value.map(redact);
         if(value && typeof value==='object')return Object.fromEntries(Object.entries(value).map(([key,item])=>[key,redact(item)]));
         return value;
@@ -248,6 +252,7 @@ export async function executeLocalTest(request: LocalRequest): Promise<void> {
             await client.finish(report.flow.id).catch(()=>{});
             try {const snapshot = await client.snapshot(report.flow.id); report.flow=snapshot.flow; report.tasks=snapshot.tasks;} catch {if (lastSaved) report.step='마지막으로 저장한 결과';}
         }
+        report.assessment=assessPentagi(report.tasks,report.evidence,target);
         report.phase='saving'; report.step='결과 저장';
         // If the final write fails, keep earlier snapshots; still stop paid work and remove credentials.
         let saved = true;

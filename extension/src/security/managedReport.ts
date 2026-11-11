@@ -1,5 +1,6 @@
 /** Validate untrusted worker output before it can drive status or file navigation. */
 import type {ManagedFinding,ManagedMode,ManagedReport} from './managedReportTypes';
+import {assessPentagi} from './pentagiAssessment';
 export type {ManagedMode,ManagedReport} from './managedReportTypes';
 const fail=():never=>{throw new Error('검사 보고서의 형식 또는 실행 정보가 올바르지 않습니다. 통과로 처리하지 않습니다.');};
 const object=(v:any):any=>v&&typeof v==='object'&&!Array.isArray(v)?v:fail();
@@ -20,6 +21,7 @@ export function managedReport(raw:unknown,expected:{id:string;digest:string;mode
         tasks:list(v.tasks,500).map(t=>{object(t);return {id:text(t.id,200),title:text(t.title,2000),status:text(t.status,100),result:text(t.result,100000)};})};
     if(v.error!==undefined)result.error=text(v.error);
     if(v.evidence!==undefined)result.evidence=list(v.evidence,50).map(m=>{object(m);return {id:text(m.id,128),type:choice(m.type,['report','done','ask']),message:text(m.message,100000),result:text(m.result,100000)};});
+    if(v.mode==='redteam'&&!['preparing','running'].includes(v.status))result.assessment=assessPentagi(result.tasks,result.evidence);
     for(const key of ['cleaned','isolationVerified'] as const)if(v[key]!==undefined){if(typeof v[key]!=='boolean')fail();result[key]=v[key];}
     if(v.scans!==undefined){
         if(v.mode!=='scans')fail();object(v.scans);const seen=new Set<string>();
