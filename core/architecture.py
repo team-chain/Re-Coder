@@ -275,7 +275,7 @@ def normalize(raw: Any) -> tuple[Optional[dict], list[str]]:
         services[a]["depends_on"].remove(b)
         notes.append(f"서비스 의존이 순환합니다({' → '.join(cycle)}) — {a} → {b} 를 뺐습니다")
         cycle = _cycle(services)
-    for name, db in dbs.items():
+    for name in dbs:
         if not any(name in s["databases"] for s in services.values()):
             notes.append(f"DB 「{name}」 — 쓰는 서비스가 없습니다")
     if not any(s["public"] for s in services.values()):

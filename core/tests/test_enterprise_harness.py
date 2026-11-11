@@ -167,6 +167,11 @@ def test_compose_file_is_valid_for_docker_compose(tmp_path):
     assert out.returncode == 0, out.stderr
     cfg = json.loads(out.stdout)
     assert cfg["services"]["orders"]["ports"][0]["host_ip"] == "127.0.0.1"
+    deployed = subprocess.run(["docker", "compose", "-f", str(tmp_path / "docker-compose.yml"), "--env-file", str(tmp_path / "v.env"),
+                               "config", "--format", "json"], capture_output=True, text=True, encoding="utf-8")
+    assert deployed.returncode == 0, deployed.stderr
+    public = [s for s in a["services"] if s["public"] and s["port"]]
+    assert public and all(json.loads(deployed.stdout)["services"][s["name"]]["ports"][0]["host_ip"] == "127.0.0.1" for s in public)
     missing = subprocess.run(["docker", "compose", "-f", str(tmp_path / "docker-compose.yml"), "config"],
                              capture_output=True, text=True, encoding="utf-8", cwd=tmp_path)
     assert missing.returncode != 0 and "ORDERS_DB_PASSWORD" in missing.stderr  # 비밀값 없이는 시작하지 않는다
@@ -376,3 +381,14 @@ def test_compose_check_build_failure_and_unavailable(tmp_path):
     assert res["status"] == "unavailable" and not res["failures"] and C.issues(res, a, {}) == []
     (tmp_path / "docker-compose.yml").unlink()
     assert C.run(tmp_path, a, docker=FakeDocker(1), http=_http_for({}))["status"] == "unavailable"
+
+
+def test_deployed_ports_are_local_only_by_default():
+    """단일 앱 로컬 배포와 같은 정책 — 같은 와이파이의 다른 기기에 개발용 앱을 열지 않는다."""
+    a = arch()
+    text = K.render_compose(a)
+    public = [s for s in a["services"] if s["public"] and s["port"]]
+    assert public
+    for s in public:
+        assert f'"${{RECODER_LOCAL_BIND:-127.0.0.1}}:{s['port']}:{s['port']}"' in text or \
+            f"${{RECODER_LOCAL_BIND:-127.0.0.1}}:{s['port']}:{s['port']}" in text

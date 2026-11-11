@@ -126,7 +126,8 @@ def _app_service(arch: dict, svc: dict) -> dict:
     if test:
         out["healthcheck"] = {"test": test, "interval": "5s", "timeout": "5s", "retries": 30, "start_period": "20s"}
     if svc["public"] and svc["port"]:
-        out["ports"] = [f"{svc['port']}:{svc['port']}"]
+        #: 단일 앱 로컬 배포와 같은 정책 — 기본은 이 PC 에서만 접속. 다른 기기에서 열려면 RECODER_LOCAL_BIND=0.0.0.0.
+        out["ports"] = [f"${{RECODER_LOCAL_BIND:-127.0.0.1}}:{svc['port']}:{svc['port']}"]
     return out
 
 
@@ -217,7 +218,7 @@ def verify_override(arch: dict) -> str:
     lines = ["services:"]
     for svc in arch["services"]:
         if svc["port"]:
-            lines += [f"  {svc['name']}:", f"    ports: !override", f"      - \"127.0.0.1::{svc['port']}\""]
+            lines += [f"  {svc['name']}:", "    ports: !override", f"      - \"127.0.0.1::{svc['port']}\""]
     return "\n".join(lines) + "\n" if len(lines) > 1 else "services: {}\n"
 
 

@@ -507,7 +507,7 @@ def test_실행조차_실패한_직후_재호출은_기다리지_않고_같은_�
     waited = []
     monkeypatch.setattr(da, "_wait_ready", lambda *a, **k: waited.append(1) or (_ for _ in ()).throw(AssertionError("대기 금지")))
 
-    first = da.ensure_docker(wait_seconds=120)
+    da.ensure_docker(wait_seconds=120)
     second = da.ensure_docker(wait_seconds=120)
 
     assert len(calls) == 1 and not waited

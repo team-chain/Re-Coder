@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import json
+import os
 import posixpath
 import re
 from pathlib import Path
@@ -263,18 +264,27 @@ def issues(arch: dict, files: dict[str, str]) -> list[dict]:
     return out
 
 
+_SKIP_DIRS = {"node_modules", "dist", "build", "__pycache__", ".venv", "venv", "coverage", ".git", "test", "tests", "__tests__"}
+
+
 def read_workspace(workspace: str | Path, arch: dict, limit: int = 2000) -> dict[str, str]:
+    """서비스 폴더의 코드만 읽는다. node_modules 같은 폴더는 들어가지도 않고(큰 프로젝트에서 느려짐),
+    심볼릭 링크는 따라가지 않는다(작업 폴더 밖 파일을 읽지 않게)."""
     root = Path(workspace)
     out: dict[str, str] = {}
     for svc in arch["services"]:
         base = root / svc["path"]
-        if not base.is_dir():
+        if not base.is_dir() or base.is_symlink():
             continue
-        for p in sorted(base.rglob("*")):
-            if len(out) >= limit:
-                return out
-            rel = p.relative_to(root).as_posix()
-            if p.is_file() and rel.endswith(CODE_EXT) and not _SKIP.search(rel):
+        for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
+            dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS and not d.startswith("."))
+            for name in sorted(filenames):
+                if len(out) >= limit:
+                    return out
+                p = Path(dirpath) / name
+                rel = p.relative_to(root).as_posix()
+                if not rel.endswith(CODE_EXT) or _SKIP.search(rel) or p.is_symlink():
+                    continue
                 try:
                     out[rel] = p.read_text(encoding="utf-8", errors="replace")[:400_000]
                 except OSError:

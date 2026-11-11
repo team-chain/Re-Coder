@@ -15,8 +15,7 @@ import hashlib
 import json
 import os
 import re
-import subprocess
-import time
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -137,6 +136,34 @@ def _save(records: list[dict]) -> None:
     os.replace(tmp, path)
 
 
+_store_lock = threading.Lock()
+#: 같은 프로젝트에서 배포·롤백이 겹치면(버튼 두 번, 창 두 개) 이미지 태그·기록이 꼬인다 — 하나만 진행한다.
+_busy: set[str] = set()
+_busy_lock = threading.Lock()
+
+
+def _append(record: dict) -> None:
+    """기록 추가는 읽기→쓰기 사이에 다른 배포가 끼어들지 않게 잠근다(다른 프로젝트 기록이 사라지지 않게)."""
+    with _store_lock:
+        _save(_records() + [record])
+
+
+def _claim(proj: str) -> bool:
+    with _busy_lock:
+        if proj in _busy:
+            return False
+        _busy.add(proj)
+        return True
+
+
+def _release(proj: str) -> None:
+    with _busy_lock:
+        _busy.discard(proj)
+
+
+_BUSY = {"status": "failed", "stage": "plan", "message": "이 프로젝트의 배포 또는 롤백이 이미 진행 중입니다. 끝난 뒤 다시 시도하세요."}
+
+
 def history(workspace: str | Path) -> list[dict]:
     proj = project_name(workspace)
     return [r for r in reversed(_records()) if r.get("project") == proj]
@@ -190,6 +217,17 @@ def _blocking(report: dict, kind: str) -> tuple[bool, str]:
 
 async def deploy(workspace: str | Path, *, scan: Scan, docker=None, http=None,
                  progress: Callable[[str, str], None] | None = None) -> dict:
+    proj = project_name(workspace)
+    if not _claim(proj):
+        return dict(_BUSY)
+    try:
+        return await _deploy(workspace, scan=scan, docker=docker, http=http, progress=progress)
+    finally:
+        _release(proj)
+
+
+async def _deploy(workspace: str | Path, *, scan: Scan, docker=None, http=None,
+                  progress: Callable[[str, str], None] | None = None) -> dict:
     """승인된 다중 서비스 로컬 배포. 결과 모양은 단일 앱 로컬 배포와 같다(status·stage·message·diagnosis)."""
     import asyncio
 
@@ -308,8 +346,7 @@ async def deploy(workspace: str | Path, *, scan: Scan, docker=None, http=None,
             ok, out = await asyncio.to_thread(_restore, docker, base, arch, target)
             rolled = "직전 버전으로 되돌렸습니다" if ok else f"되돌리기 실패: {out}"
         record.update(status="failed", failures=down[:10], rolled_back=rolled)
-        records = _records() + [record]
-        _save(records)
+        _append(record)
         return fail("deploy", "서비스가 정상적으로 시작하지 않았습니다", "; ".join(down[:5]) + (f" · {rolled}" if rolled else ""),
                     "결과의 서비스 로그를 확인하고 개발 화면에서 고친 뒤 다시 배포하세요.",
                     verification=result, rolled_back=bool(rolled and rolled.startswith("직전")))
@@ -318,7 +355,7 @@ async def deploy(workspace: str | Path, *, scan: Scan, docker=None, http=None,
     record["pins"] = {s["name"]: _pin(docker, proj, s["name"], deployment_id) for s in arch["services"]}
     record["status"] = "success" if not result["failures"] else "degraded"
     record["failures"] = [f["title"] for f in result["failures"]][:10]
-    _save(_records() + [record])
+    _append(record)
     _prune_pins(docker, proj, set(record["pins"].values()))
     _restore_tags(docker, proj, {}, drop=current_pins)
     public = next((s for s in arch["services"] if s["public"] and s["port"]), None)
@@ -347,6 +384,16 @@ def _restore_tags(docker, proj: str, pins: dict[str, str], drop: dict[str, str] 
 
 
 async def rollback(workspace: str | Path, deployment_id: str = "", *, docker=None) -> dict:
+    proj = project_name(workspace)
+    if not _claim(proj):
+        return {k: v for k, v in _BUSY.items() if k != "stage"}
+    try:
+        return await _rollback(workspace, deployment_id, docker=docker)
+    finally:
+        _release(proj)
+
+
+async def _rollback(workspace: str | Path, deployment_id: str = "", *, docker=None) -> dict:
     """승인된 롤백 — 지정한(없으면 직전) 성공 배포의 이미지로 되돌린다. 데이터(볼륨)는 그대로."""
     import asyncio
 
@@ -367,6 +414,6 @@ async def rollback(workspace: str | Path, deployment_id: str = "", *, docker=Non
     rec = {"id": uuid.uuid4().hex, "project": target["project"], "workspace": str(ws.resolve()),
            "at": datetime.now(timezone.utc).isoformat(), "status": "rolled_back" if ok else "failed", "rollback_to": target["id"],
            "services": target.get("services"), "pins": target.get("pins") if ok else {}}
-    _save(_records() + [rec])
+    _append(rec)
     return {"status": "success" if ok else "failed", "rollback_to": target["id"],
             "message": f"{target['at'][:19]} 배포로 되돌렸습니다" if ok else f"되돌리지 못했습니다: {out}"}

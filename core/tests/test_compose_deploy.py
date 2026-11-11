@@ -270,3 +270,28 @@ def test_contract_violation_blocks_deploy_before_build(tmp_path):
     res = run(D.deploy(ws, scan=scanner(), docker=docker, http=http))
     assert res["status"] == "failed" and "계약 위반" in res["message"] and "services/gateway/src/db.js:1" in res["message"]
     assert docker.builds == 0
+
+
+def test_same_project_deploys_do_not_overlap_and_records_survive(tmp_path):
+    ws = project(tmp_path)
+    gate = asyncio.Event()
+
+    async def slow_scan(kind, w, target):
+        await gate.wait()
+        return {"status": "ok", "critical_count": 0, "high_count": 0}
+
+    async def both():
+        first = asyncio.create_task(D.deploy(ws, scan=slow_scan, docker=Docker(), http=http))
+        await asyncio.sleep(0)
+        second = await D.deploy(ws, scan=scanner(), docker=Docker(), http=http)
+        busy_rb = await D.rollback(ws)
+        gate.set()
+        return await first, second, busy_rb
+
+    first, second, busy_rb = run(both())
+    assert first["status"] == "success", first
+    assert second["status"] == "failed" and "이미 진행 중" in second["message"]
+    assert busy_rb["status"] == "failed" and "이미 진행 중" in busy_rb["message"]
+    assert len(D.history(ws)) == 1
+    # 끝난 뒤에는 다시 배포할 수 있다
+    assert run(D.deploy(ws, scan=scanner(), docker=Docker(), http=http))["status"] == "success"

@@ -179,3 +179,22 @@ def test_check_workspace_reads_contract_and_files(tmp_path):
     assert res["available"] and res["summary"]["error"] == 2
     assert {s["name"] for s in res["services"]} == {"gateway", "orders", "catalog", "worker"}
     assert not any("node_modules" in f["file"] for f in res["findings"])
+
+
+def test_read_workspace_skips_symlinks_and_heavy_folders(tmp_path):
+    import os
+    import pytest
+    (tmp_path / "architecture.json").write_text(json.dumps(RAW), encoding="utf-8")
+    svc = tmp_path / "services/catalog"
+    svc.mkdir(parents=True)
+    (svc / "index.js").write_text(CATALOG, encoding="utf-8")
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.js"
+    outside.write_text("const k = process.env.ORDERS_DB_URL;", encoding="utf-8")
+    try:
+        os.symlink(outside, svc / "leak.js")
+    except (OSError, NotImplementedError):
+        pytest.skip("심볼릭 링크를 만들 수 없는 환경")
+    (svc / "node_modules/pkg").mkdir(parents=True)
+    (svc / "node_modules/pkg/i.js").write_text("x", encoding="utf-8")
+    files = C.read_workspace(tmp_path, arch())
+    assert list(files) == ["services/catalog/index.js"]
