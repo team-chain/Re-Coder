@@ -885,7 +885,7 @@ export class ApiClient {
         return resp.data;
     }
 
-    async rollbackFromHistory(source: 'local' | 'ecs', deploymentId: string): Promise<{ status: string; message: string; warning?: string; adr?: { file: string; content: string } }> {
+    async rollbackFromHistory(source: 'local' | 'ecs' | 'stack', deploymentId: string): Promise<{ status: string; message: string; warning?: string; adr?: { file: string; content: string } }> {
         const resp = await this.request<{ status: string; message: string; warning?: string; adr?: { file: string; content: string } }>(
             'POST', `/api/deploy/history/${source}/${encodeURIComponent(deploymentId)}/rollback`,
             { approved: true }, false, 300000,

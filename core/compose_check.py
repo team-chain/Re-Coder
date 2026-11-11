@@ -119,8 +119,23 @@ def _build_service(arch: dict, log: str) -> str:
     return found[0] if found else ""
 
 
+def _source_files(workspace: Path, arch: dict, limit: int = 400) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for svc in arch["services"]:
+        root = workspace / svc["path"]
+        for p in sorted(root.rglob("*")) if root.is_dir() else []:
+            if len(out) >= limit:
+                return out
+            if p.is_file() and p.suffix in (".ts", ".js", ".mjs", ".cjs", ".py") and not ({"node_modules", "dist", "__pycache__"} & set(p.parts)):
+                try:
+                    out[p.relative_to(workspace).as_posix()] = p.read_text(encoding="utf-8", errors="replace")[:200_000]
+                except OSError:
+                    continue
+    return out
+
+
 def run(workspace: Path, arch: dict, *, timeout: int = 900, docker: Runner | None = None, http: Http | None = None,
-        project: str = "") -> dict:
+        project: str = "", acceptance=None) -> dict:
     """{"kind": "compose", "status": passed|failed|unavailable, "passed", "services", "checks", "failures", "output"}"""
     docker = docker or _docker
     http = http or _http
@@ -144,7 +159,8 @@ def run(workspace: Path, arch: dict, *, timeout: int = 900, docker: Runner | Non
         override.write_text(compose_kit.verify_override(arch), encoding="utf-8")
         base = ["compose", "-p", project, "-f", str(compose_file), "-f", str(override), "--env-file", str(env_file)]
         try:
-            _check(arch, base, docker, http, result, timeout, started)
+            _check(arch, base, docker, http, result, timeout, started, acceptance=acceptance,
+                   files=_source_files(workspace, arch) if acceptance is not None else None)
         finally:
             down = docker([*base, "down", "-v", "--remove-orphans", "--rmi", "local", "--timeout", "5"], 300)
             if down.returncode != 0:
@@ -165,7 +181,8 @@ def _fail(result: dict, kind: str, service: str, title: str, detail: str = "", l
     result["failures"].append({"kind": kind, "service": service, "title": title, "detail": detail, "logs": logs, **extra})
 
 
-def _check(arch: dict, base: list[str], docker: Runner, http: Http, result: dict, timeout: int, started: float) -> None:
+def _check(arch: dict, base: list[str], docker: Runner, http: Http, result: dict, timeout: int, started: float,
+           acceptance=None, files: Optional[dict] = None) -> None:
     wait = max(60, min(600, timeout // 2))
     up = docker([*base, "up", "-d", "--build", "--wait", "--wait-timeout", str(wait)], timeout)
     log = (up.stdout or "") + "\n" + (up.stderr or "")
@@ -179,6 +196,14 @@ def _check(arch: dict, base: list[str], docker: Runner, http: Http, result: dict
         _fail(result, "build", svc, f"{svc or '서비스'} 이미지 빌드 실패", logs=_tail(log, 60, 6000))
         result["checks"].append({"name": f"build:{svc or '?'}", "ok": False})
         return
+    inspect(arch, base, docker, http, result, require_ports=True, acceptance=acceptance, files=files)
+
+
+def inspect(arch: dict, base: list[str], docker: Runner, http: Http, result: dict, *, require_ports: bool = False,
+            acceptance=None, files: Optional[dict] = None) -> None:
+    """이미 떠 있는 compose 프로젝트를 본다 — 상태·연결·스키마·통합 테스트(검증·배포가 함께 쓴다).
+
+    require_ports=False(배포): 공개하지 않은 서비스는 포트가 없으므로 그 서비스의 HTTP 시험은 건너뛴다."""
     rows = {r.get("Service"): r for r in _ps(docker([*base, "ps", "-a", "--format", "json"], 60).stdout)}
     logs_cache: dict[str, str] = {}
 
@@ -220,7 +245,7 @@ def _check(arch: dict, base: list[str], docker: Runner, http: Http, result: dict
             host = (out.stdout or "").strip().splitlines()[-1:] or [""]
             if re.fullmatch(r"[\d.]+:\d+", host[0].strip()):
                 ports[svc["name"]] = host[0].strip()
-            else:
+            elif require_ports:
                 #: 포트를 못 찾으면 통합 테스트를 건너뛴 채 "통과" 로 보이면 안 된다 — 검증 환경 문제로 남긴다.
                 result["checks"].append({"name": f"port:{svc['name']}", "ok": False})
                 _fail(result, "infra", "", f"{svc['name']} 검증 포트를 찾지 못함", _tail(out.stdout + out.stderr, 3, 300))
@@ -278,6 +303,56 @@ def _check(arch: dict, base: list[str], docker: Runner, http: Http, result: dict
                   f"{case['why']} · 응답: {text[:300]}", case=case, status=status)
             if status is not None and status >= 500:
                 result["failures"][-1]["logs"] = logs(case["service"])
+    if acceptance is not None and ports:
+        _acceptance(arch, ports, acceptance, files or {}, result)
+
+
+def _endpoint_service(arch: dict, method: str, path: str) -> Optional[str]:
+    bare = path.split("?", 1)[0]
+    for e in arch["endpoints"]:
+        segs = ["[^/]+" if seg.startswith((":", "{")) else re.escape(seg) for seg in e["path"].split("/")]
+        pattern = "^" + "/".join(segs) + "/?$"
+        if e["method"] == method and re.match(pattern, bare):
+            return e["service"]
+    return None
+
+
+def _acceptance(arch: dict, ports: dict[str, str], acceptance, files: dict[str, str], result: dict) -> None:
+    """명세 하네스(테스트 리코더) — 승인한 합격 조건을 함께 띄운 서비스들에 시험한다.
+
+    요청은 계약의 API 표로 그 API 를 가진 서비스에 보낸다(없으면 사용자가 접속하는 공개 API 로)."""
+    try:
+        import runtime_check
+        import code_test
+    except ImportError:  # pragma: no cover
+        from core import runtime_check, code_test  # type: ignore
+    entry = next((s["name"] for s in arch["services"] if s["public"] and s["kind"] == "api" and s["name"] in ports), None) \
+        or next((s["name"] for s in arch["services"] if s["kind"] == "api" and s["name"] in ports), None)
+    routes = []
+    for e in arch["endpoints"]:
+        svc = arch_mod.service(arch, e["service"])
+        if svc and e["service"] in ports:
+            routes.append((e["method"], e["path"], _route_file(svc, e["path"], files) or _entry(svc, files)))
+
+    def request(method, path, body=None, token=""):
+        target = _endpoint_service(arch, method, path) or entry
+        if not target or target not in ports:
+            return None, None
+        return runtime_check._request(f"http://{ports[target]}", method, path, body, token)
+
+    try:
+        outcome = acceptance.execute(request, routes, files, None)
+    except Exception as exc:  # noqa: BLE001 — 시험 자체가 깨져도 검증 판정을 망가뜨리지 않는다
+        result["acceptance_error"] = str(exc)[:300]
+        return
+    result["acceptance"] = {k: outcome.get(k) for k in ("passed", "failed", "unverifiable", "total")}
+    result["checks"].append({"name": "acceptance", "ok": not outcome.get("failed"),
+                             "passed": outcome.get("passed"), "total": outcome.get("total")})
+    for f in code_test.failures(outcome):
+        owned = [p for p in f.get("files") or [] if arch_mod.service_of(arch, p)]
+        svc = arch_mod.service_of(arch, owned[0]) if owned else arch_mod.service(arch, entry or "")
+        _fail(result, "acceptance", svc["name"] if svc else "", f"합격 조건 {f['criterion']} 실패 — {f.get('title') or f['request']}",
+              f.get("message") or "", logs="\n".join(f.get("lines") or []), files=owned, criterion=f["criterion"])
 
 
 # ── 실패 → 고칠 파일 ─────────────────────────────────────────────────────────
@@ -354,6 +429,8 @@ def issues(result: dict, arch: dict, files: dict[str, str]) -> list[dict]:
         if f["kind"] == "test":
             route = _route_file(svc, f["case"]["path"], files)
             blamed = blamed or ([route] if route else [])
+        if f["kind"] == "acceptance":
+            blamed = [p for p in f.get("files") or [] if p in files] + blamed
         target = (blamed or [_entry(svc, files)])[0]
         if compose_kit.is_fixed_path(arch, target):
             target = _entry(svc, files)
@@ -364,11 +441,13 @@ def issues(result: dict, arch: dict, files: dict[str, str]) -> list[dict]:
                             f"만으로 시작하게 고치세요. DB 가 늦게 준비돼도 재시도하고, /health 는 DB 연결 후 200.",
             "link": f"다른 서비스는 환경 변수 {f.get('var', '')} 로 부르세요(주소를 코드에 쓰지 않기).",
             "schema": f"서비스가 시작할 때 테이블 {', '.join(f.get('missing') or [])} 를 만들게 하세요(CREATE TABLE IF NOT EXISTS 또는 마이그레이션).",
+            "acceptance": "승인한 합격 조건을 만족하도록 기능을 고치세요. 시험을 통과시키려고 검사·인증을 끄거나 값을 하드코딩하지 마세요.",
             "test": ("로그인 토큰이 없으면 401 을 돌려주세요(인증 미들웨어)." if "401" in str((f.get("case") or {}).get("expect")) else
                      "계약의 API 경로·메서드를 그대로 구현하고 서버 오류를 고치세요(입력 검증은 4xx)."),
         }.get(f["kind"], "서비스 로그의 원인을 고치세요.")
         out.append({"code": {"build": "COMPOSE_BUILD_FAILED", "service_down": "COMPOSE_SERVICE_DOWN", "link": "COMPOSE_LINK_FAILED",
-                             "schema": "COMPOSE_SCHEMA_MISSING", "test": "CONTRACT_TEST_FAILED"}.get(f["kind"], "COMPOSE_FAILED"),
+                             "schema": "COMPOSE_SCHEMA_MISSING", "test": "CONTRACT_TEST_FAILED",
+                             "acceptance": "ACCEPTANCE_FAILED"}.get(f["kind"], "COMPOSE_FAILED"),
                     "severity": "error", "file": target, "message": message, "fix": fix,
                     "request": f.get("title")})
     return out

@@ -5,6 +5,10 @@
         실제 컨테이너로 띄워 compose_check 를 돌린다. 이어서 일부러 "로그인 없이 열린 API" 를 넣은 판을 돌려 잡아내는지 본다.
         필요: Docker Desktop 실행 중, 인터넷(이미지·npm·pip 받기). 첫 실행은 이미지 받기로 몇 분 걸린다.
 
+    python scripts/verify-enterprise-live.py deploy
+        AI 없이(요금 없음). 같은 프로젝트를 ReCoder 로컬 다중 서비스 배포로 올린다 — 실제 보안 게이트(Gitleaks·Hadolint·Trivy),
+        빌드, 기동, 검증, 두 번째 배포, 승인 롤백까지 돌리고 끝나면 컨테이너·볼륨·이미지를 지운다.
+
     python scripts/verify-enterprise-live.py generate --budget 3
         실제 AI 로 요청 한 줄에서 다중 서비스 앱을 만들고(팀 모드) compose 검증·교정까지 돈다. AI 요금이 든다.
         --budget 은 시작 전에 확인하는 USD 상한(한 번 실행의 비용은 결과에 표시). --out 폴더에 결과 프로젝트를 남긴다.
@@ -251,6 +255,43 @@ def fixture(work: Path) -> dict:
     return report
 
 
+def deploy_cycle(work: Path) -> dict:
+    """compose_deploy 를 실제 Docker·실제 스캐너로 — 배포 → 다시 배포 → 롤백 → 정리."""
+    import asyncio
+
+    import compose_deploy
+    from api.routes import deploy as routes
+
+    arch, _ = architecture.normalize(ARCH_RAW)
+    ws = work / "stack"
+    _write(ws, arch, FILES)
+    report: dict = {"mode": "deploy", "project": compose_deploy.project_name(ws)}
+    say = lambda stage, msg: print(f"  [{stage}] {msg}", flush=True)  # noqa: E731
+    try:
+        print("1/3 첫 배포(보안 게이트·빌드·기동·검증)…", flush=True)
+        first = asyncio.run(compose_deploy.deploy(ws, scan=routes._execute_scan, progress=say))
+        report["first"] = {k: first.get(k) for k in ("status", "stage", "message", "url")} | {"gate": first.get("gate", {}).get("unverified")}
+        print(json.dumps(report["first"], ensure_ascii=False), flush=True)
+        print("2/3 코드를 바꿔 다시 배포…", flush=True)
+        (ws / "services/gateway/src/server.js").write_text(GATEWAY.replace('"gateway up"', '"gateway v2 up"'), encoding="utf-8")
+        second = asyncio.run(compose_deploy.deploy(ws, scan=routes._execute_scan, progress=say))
+        report["second"] = {k: second.get(k) for k in ("status", "stage", "message")}
+        print("3/3 승인 롤백(직전 버전으로)…", flush=True)
+        back = asyncio.run(compose_deploy.rollback(ws))
+        report["rollback"] = back
+        report["history"] = [{k: r.get(k) for k in ("status", "at")} for r in compose_deploy.history(ws)]
+        report["verdict"] = {"ok": first.get("status") == "success" and second.get("status") == "success" and back.get("status") == "success"}
+    finally:
+        env, _ = compose_deploy.env_file(ws, arch)
+        subprocess.run(["docker", *compose_deploy._base(ws, env), "down", "-v", "--remove-orphans", "--rmi", "local"],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+        for rec in compose_deploy.history(ws):
+            for tag in (rec.get("pins") or {}).values():
+                if tag:
+                    subprocess.run(["docker", "image", "rm", tag], capture_output=True, timeout=60)
+    return report
+
+
 def generate(work: Path, args) -> dict:
     import code_agent
     from llm import cost_ledger, task_tier
@@ -295,6 +336,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("fixture", help="AI 없이 실제 컨테이너로 하네스 검증")
+    sub.add_parser("deploy", help="AI 없이 다중 서비스 로컬 배포·롤백 검증")
     g = sub.add_parser("generate", help="실제 AI 로 생성 → compose 검증(요금 발생)")
     g.add_argument("--budget", type=float, required=True)
     g.add_argument("--agents", type=int, default=3)
@@ -307,12 +349,13 @@ def main() -> None:
     work = ROOT / ".test-artifacts" / ("enterprise-live-" + time.strftime("%Y%m%d-%H%M%S"))
     work.mkdir(parents=True, exist_ok=False)
     os.environ.pop("RECODER_TEST_MODE", None)
-    report = fixture(work) if args.cmd == "fixture" else generate(work, args)
+    os.environ.setdefault("RECODER_HOME", str(work / "recoder-home"))  # 사용자의 배포 기록·비밀값과 섞지 않는다
+    report = fixture(work) if args.cmd == "fixture" else deploy_cycle(work) if args.cmd == "deploy" else generate(work, args)
     (work / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"\n결과: {work / 'report.json'}")
-    if args.cmd == "fixture":
-        print("판정:", "통과 — 실제 컨테이너에서 하네스가 동작합니다" if report["verdict"]["ok"] else f"실패 — {report['verdict']}")
-        raise SystemExit(0 if report["verdict"]["ok"] else 1)
+    if args.cmd in ("fixture", "deploy"):
+        print("판정:", "통과" if report.get("verdict", {}).get("ok") else f"실패 — {report.get('verdict')}")
+        raise SystemExit(0 if report.get("verdict", {}).get("ok") else 1)
 
 
 if __name__ == "__main__":

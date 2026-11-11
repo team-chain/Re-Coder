@@ -800,6 +800,10 @@ def _command_steps(plan: DeploymentPlan, workspace: str) -> list[dict]:
     """
     if plan.method != DeployMethod.LOCAL_DOCKER or not plan.container_name or not plan.image:
         return []
+    if workspace:
+        import compose_deploy
+        if compose_deploy.load(workspace):
+            return compose_deploy.preview_steps(workspace)
     import local_services
     import deploy_settings
     c = str(plan.container_name)
@@ -3756,6 +3760,25 @@ async def _run_pre_deploy_security_gate(request: DeployPlanRequest) -> dict:
         else:
             unverified_reasons.append("Gitleaks: 소스 비밀키 검사 미완료 — 실행 전에 다시 검사합니다.")
 
+    #: 3.1 여러 서비스로 된 프로젝트 — 서비스마다 Dockerfile 을 검사한다(루트 Dockerfile 이 없다).
+    try:
+        import compose_deploy as _cd
+        _stack = _cd.load(workspace) if workspace else None
+    except Exception:  # noqa: BLE001
+        _stack = None
+    if _stack and dockerfile_path is None:
+        for _svc in _stack["services"]:
+            _report = await _execute_scan("hadolint", workspace, str(Path(workspace) / _svc["path"] / "Dockerfile"))
+            reports[f"hadolint:{_svc['name']}"] = _report
+            if _report.get("status") == "ok":
+                if int(_report.get("critical_count", 0) or 0):
+                    blockers.append(f"Hadolint({_svc['name']}): {_report.get('critical_count')} Dockerfile error(s)")
+                if int(_report.get("high_count", 0) or 0):
+                    risk_reasons.append(f"Hadolint({_svc['name']}): {_report.get('high_count')} warning(s)")
+            else:
+                unverified_reasons.append(f"Hadolint({_svc['name']}): Dockerfile 검사 미완료 — 실행 전에 다시 검사합니다.")
+        unverified_reasons.append("Trivy: 서비스 이미지는 빌드 뒤 실행 단계에서 서비스마다 검사합니다.")
+
     # Hadolint — only meaningful if a Dockerfile exists.
     if dockerfile_path is not None:
         hadolint_report = await _execute_scan("hadolint", workspace, dockerfile_path)
@@ -4781,6 +4804,16 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         #: (test_replace_safety)이 깨진다. 빌드 실패는 돌고 있던 컨테이너를 건드리기
         #: 전이라 되돌릴 것이 없다.
         workspace_for_build = _plan_workspaces.get(request.plan_id, "")
+        if plan.method == DeployMethod.LOCAL_DOCKER and workspace_for_build:
+            import compose_deploy
+            if compose_deploy.load(workspace_for_build):
+                #: 3.1 여러 서비스로 된 프로젝트 — 서비스별 보안 게이트 → 빌드 → 이미지 검사 → compose 기동·검증 → 기록·롤백.
+                stack = await compose_deploy.deploy(workspace_for_build, scan=_execute_scan, progress=report_progress)
+                _deployment_plans.pop(request.plan_id, None)
+                _plans_pending_image_scan.pop(request.plan_id, None)
+                _plan_workspaces.pop(request.plan_id, None)
+                return {**stack, "plan_id": request.plan_id, "method": "local_docker_compose", "stdout": "",
+                        "stderr": stack.get("stderr", "")}
         if plan.method == DeployMethod.LOCAL_DOCKER and workspace_for_build and plan.container_name:
             # Scan the current sources, not only the plan-time preview. Secrets
             # added while approval was pending must not reach the image build.
@@ -5371,6 +5404,33 @@ async def execute_deployment_local(request: ExecuteRequest) -> dict:
     the v6.4 design document (§20.5 DeploymentPlan, method=local_docker).
     """
     return await execute_deployment(request)
+
+
+class StackRollbackRequest(BaseModel):
+    workspace_path: str
+    deployment_id: str = ""
+    approved: bool = False
+
+
+@router.post("/api/deploy/stack/rollback")
+async def rollback_stack(body: StackRollbackRequest) -> dict:
+    """3.1 여러 서비스 프로젝트 롤백 — 승인해야 실행한다. 데이터(DB 볼륨)는 그대로 둔다."""
+    import compose_deploy
+    if not body.approved:
+        raise HTTPException(status_code=400, detail="승인 없이 되돌리지 않습니다.")
+    if not compose_deploy.load(body.workspace_path):
+        raise HTTPException(status_code=404, detail="ReCoder 다중 서비스 프로젝트가 아닙니다.")
+    return await compose_deploy.rollback(body.workspace_path, body.deployment_id)
+
+
+@router.get("/api/deploy/stack/history")
+async def stack_history(workspace_path: str) -> dict:
+    import compose_deploy
+    if not compose_deploy.load(workspace_path):
+        return {"project": "", "entries": []}
+    return {"project": compose_deploy.project_name(workspace_path),
+            "entries": [{k: r.get(k) for k in ("id", "at", "status", "services", "checks", "failures", "rollback_to", "rolled_back")}
+                        for r in compose_deploy.history(workspace_path)[:30]]}
 
 
 @router.get("/api/deploy/records")

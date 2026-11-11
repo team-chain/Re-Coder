@@ -135,7 +135,8 @@ def verify_proposal(root: Path, ops: list[dict], *, timeout: int | None = None, 
                         pass  # Build verdict remains valid even if cache cleanup fails.
 
 
-def verify_compose(root: Path, ops: list[dict], arch: dict, *, timeout: int | None = None, docker=None, http=None) -> dict:
+def verify_compose(root: Path, ops: list[dict], arch: dict, *, timeout: int | None = None, docker=None, http=None,
+                   acceptance=None) -> dict:
     """3.1 다중 서비스 — 제안 파일을 일회용 복사본에 펼쳐 docker compose 로 함께 띄워 검증한다(프로젝트는 건드리지 않는다)."""
     try:
         import compose_check
@@ -163,4 +164,5 @@ def verify_compose(root: Path, ops: list[dict], arch: dict, *, timeout: int | No
                 target.write_text(scrub_build_source(op["content"]), encoding="utf-8", newline="")
         except (OSError, ValueError) as exc:
             return {**base, "output": f"검증 복사본을 만들지 못했습니다: {exc}"}
-        return compose_check.run(workspace, arch, timeout=timeout or max(_BUILD_TIMEOUT, 900), docker=docker, http=http)
+        return compose_check.run(workspace, arch, timeout=timeout or max(_BUILD_TIMEOUT, 900), docker=docker, http=http,
+                                 acceptance=acceptance)

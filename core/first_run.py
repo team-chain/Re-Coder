@@ -613,11 +613,3 @@ class FirstRunDiagnostics:
     @staticmethod
     def _detect_bedrock_region() -> Optional[str]:
         return _detect_bedrock_region()
-        save_diagnostics(result)
-
-    async def load_diagnostics(self) -> Optional[DiagnosticsResult]:
-        return load_diagnostics()
-
-    @staticmethod
-    def _detect_bedrock_region() -> Optional[str]:
-        return _detect_bedrock_region()

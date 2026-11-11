@@ -99,3 +99,12 @@ test('host requests real history, preserves errors, and refuses unapproved rollb
     assert.equal(messages.at(-1).payload.message, 'Core 연결 끊김');
   } finally { Module._resolveFilename = originalResolve; }
 });
+
+test('3.1 multi-service stacks appear with their own filter and approval wording', () => {
+  const stack = entry({ key: 'stack:s1', source: 'stack', deployment_id: 's1', target: 'recoder-shop-abc123 · 서비스 3개', image: '', region: '', service_url: '',
+    rollback: { available: true, target: '2026-11-10T00:00:00Z', reason: '', approval_level: 2 } });
+  const state = reduce(reduce(loaded([entry(), stack]), { type: 'select', key: 'stack:s1' }), { type: 'review', key: 'stack:s1' });
+  const html = render(state);
+  for (const text of ['로컬 다중 서비스 · recoder-shop-abc123', '다중 서비스 롤백 승인', 'DB 데이터(볼륨)는 그대로', '>다중 서비스<']) assert.ok(html.includes(text), text);
+  assert.deepEqual(filterHistory([entry(), stack], 'stack', '').map(e => e.key), ['stack:s1']);
+});

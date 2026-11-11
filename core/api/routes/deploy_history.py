@@ -29,7 +29,7 @@ class HistoryRollback(BaseModel):
 
 class HistoryEntry(BaseModel):
     key: str
-    source: Literal["local", "ecs"]
+    source: Literal["local", "ecs", "stack"]
     deployment_id: str
     project_id: str = ""
     target: str
@@ -125,8 +125,40 @@ def _ecs_entry(record) -> HistoryEntry:
     )
 
 
+def _stack_entries() -> list[HistoryEntry]:
+    """3.1 여러 서비스 프로젝트(compose) 배포 — 프로젝트마다 최신 기록에서만 직전 성공 버전으로 되돌릴 수 있다."""
+    import compose_deploy
+    records = compose_deploy._records()
+    latest: dict[str, str] = {}
+    for rec in records:
+        latest[rec.get("project", "")] = rec.get("id", "")
+    labels = {"success": "실행 완료", "degraded": "실행 중 · 일부 검사 실패", "failed": "실패", "rolled_back": "롤백 실행 완료"}
+    out = []
+    for rec in records:
+        proj = rec.get("project", "")
+        older = [r for r in records if r.get("project") == proj and r.get("status") in ("success", "degraded", "rolled_back")
+                 and r.get("pins") and r.get("id") != rec.get("id") and r.get("at", "") < rec.get("at", "")]
+        reason = ""
+        if rec.get("id") != latest.get(proj):
+            reason = "이후 배포가 있습니다. 같은 프로젝트의 최신 기록을 선택하세요."
+        elif not older:
+            reason = "되돌릴 이전 성공 배포가 없습니다."
+        events = [HistoryEvent(at=rec.get("at", ""), title="배포 기록", detail=", ".join(rec.get("services") or []))]
+        if rec.get("rolled_back"):
+            events.append(HistoryEvent(at=rec.get("at", ""), title="자동 롤백", detail=rec["rolled_back"]))
+        checks = rec.get("checks") or {}
+        out.append(HistoryEntry(
+            key=f"stack:{rec.get('id')}", source="stack", deployment_id=rec.get("id", ""), project_id=proj,
+            target=f"{proj} · 서비스 {len(rec.get('services') or [])}개", status=rec.get("status", ""),
+            status_text=labels.get(rec.get("status", ""), rec.get("status", "")), started_at=rec.get("at", ""),
+            error="; ".join(rec.get("failures") or [])[:400],
+            warnings=[f"배포 검사 {checks.get('passed', 0)}/{checks.get('total', 0)} 통과"] if checks else [],
+            events=events, rollback=HistoryRollback(available=not reason, reason=reason, target=(older[-1].get("at", "") if older else ""))))
+    return out
+
+
 @router.get("", response_model=HistoryResponse)
-async def list_history(source: Literal["all", "local", "ecs"] = "all", limit: int = Query(200, ge=1, le=500)) -> HistoryResponse:
+async def list_history(source: Literal["all", "local", "ecs", "stack"] = "all", limit: int = Query(200, ge=1, le=500)) -> HistoryResponse:
     entries = []
     if source in {"all", "local"}:
         records = [r for r in deploy._records_newest_first() if r.method == DeployMethod.LOCAL_DOCKER]
@@ -139,6 +171,8 @@ async def list_history(source: Literal["all", "local", "ecs"] = "all", limit: in
         entries.extend(_local_entry(r, latest_ids) for r in records)
     if source in {"all", "ecs"}:
         entries.extend(_ecs_entry(r) for r in ecs._deploy_records.values())
+    if source in {"all", "stack"}:
+        entries.extend(_stack_entries())
     entries.sort(key=lambda row: datetime.fromisoformat(row.started_at).timestamp(), reverse=True)
     warnings = []
     if local_deploy_store.load_incomplete:
@@ -149,9 +183,18 @@ async def list_history(source: Literal["all", "local", "ecs"] = "all", limit: in
 
 
 @router.post("/{source}/{deployment_id}/rollback")
-async def approve_history_rollback(source: Literal["local", "ecs"], deployment_id: str, body: HistoryApproval) -> dict:
+async def approve_history_rollback(source: Literal["local", "ecs", "stack"], deployment_id: str, body: HistoryApproval) -> dict:
     if not body.approved:
         raise HTTPException(status_code=400, detail="실행 대상 확인과 사용자 승인이 필요합니다.")
+    if source == "stack":
+        import compose_deploy
+        entry = next((e for e in _stack_entries() if e.deployment_id == deployment_id), None)
+        if entry is None:
+            raise HTTPException(status_code=404, detail="배포 기록을 찾을 수 없습니다.")
+        if not entry.rollback.available:
+            raise HTTPException(status_code=409, detail=entry.rollback.reason)
+        record = next(r for r in compose_deploy._records() if r.get("id") == deployment_id)
+        return await compose_deploy.rollback(record["workspace"])
     if source == "local":
         record = deploy._deployment_records.get(deployment_id)
         if record is None:

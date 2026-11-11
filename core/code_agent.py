@@ -2580,11 +2580,11 @@ def _verify_generated_build(root: Path, target_folder: str, ops: list[dict], run
     return verify_proposal(base, _verification_ops(base, ops))
 
 
-def _verify_compose(root: Path, target_folder: str, ops: list[dict], arch: dict) -> dict:
+def _verify_compose(root: Path, target_folder: str, ops: list[dict], arch: dict, acceptance=None) -> dict:
     """3.1 다중 서비스·다중 DB — 계약대로 compose 로 함께 띄워 빌드·기동·연결·스키마·통합 테스트를 본다."""
     from generated_validation import verify_compose
     base = (root / target_folder).resolve() if target_folder else root.resolve()
-    return verify_compose(base, ops, arch)
+    return verify_compose(base, ops, arch, acceptance=acceptance) if acceptance is not None else verify_compose(base, ops, arch)
 
 
 def _compose_issues(verification: dict, arch: dict, ops: list[dict]) -> list[dict]:
@@ -2987,8 +2987,6 @@ def _generate_code(
             acceptance_note = "테스트를 끈 채 만들었습니다."
         elif existing:
             acceptance_note = "기존 프로젝트에 더한 코드는 아직 자동으로 시험하지 않습니다."
-        elif multi:
-            acceptance_note = "여러 서비스로 나뉜 앱은 아키텍처 계약에서 만든 통합 테스트(contract-tests.json)로 시험합니다."
         else:
             try:
                 import code_test as _code_test
@@ -3024,7 +3022,7 @@ def _generate_code(
         if not errors and multi:
             _report({"step": "consistency", "round": _round + 1,
                      "message": f"서비스 {len(arch['services'])}개 · DB {len(arch['databases'])}개를 함께 띄워 연결·통합 테스트를 확인하는 중"})
-            verification = _verify_compose(root, target_folder, ops_out, arch)
+            verification = _verify_compose(root, target_folder, ops_out, arch, acceptance)
             if verification["status"] != "failed":
                 break
             errors = [i for i in _compose_issues(verification, arch, ops_out) if i.get("severity") == "error"]
@@ -3033,13 +3031,15 @@ def _generate_code(
             ckeys = {re.sub(r"\d{2,}", "#", str(f.get("title"))) for f in verification.get("failures") or []}
             if compose_keys and not (compose_keys[-1] - ckeys):
                 if bool(ckeys - compose_keys[-1]) and prev_compose is not None:
-                    ops_out, verification = prev_compose
+                    ops_out, verification, kept_runs = prev_compose
+                    if acceptance is not None:
+                        del acceptance.runs[kept_runs:]
                 print(f"[code_agent] 다중 서비스 검증 실패가 줄지 않아 교정을 멈춥니다(남은 {len(ckeys)}건)", flush=True)
                 _report({"step": "consistency", "round": _round + 1,
                          "message": "다중 서비스 검증 실패가 더 줄지 않아 교정을 멈췄습니다 — 결과에 서비스별 로그를 보여 드립니다"})
                 break
             compose_keys.append(ckeys)
-            prev_compose = (ops_out, verification)
+            prev_compose = (ops_out, verification, len(acceptance.runs) if acceptance is not None else 0)
             _report({"step": "consistency", "round": _round + 1,
                      "message": "다중 서비스 검증 — " + "; ".join(f["title"] for f in (verification.get("failures") or [])[:3])
                                 + " — 서비스 로그로 고치는 중"})
@@ -3231,7 +3231,8 @@ def _generate_code(
             unused = []
     if verification["status"] == "blocked":
         #: 정적 문제가 남아도 실제 빌드는 확인한다 — 결과에 "빌드 검증 미통과" 만 남고 무엇이 깨지는지 몰랐다(실기기 2.0.6).
-        verification = _verify_compose(root, target_folder, ops_out, arch) if multi else _verify_generated_build(root, target_folder, ops_out)
+        verification = (_verify_compose(root, target_folder, ops_out, arch, acceptance) if multi
+                        else _verify_generated_build(root, target_folder, ops_out))
     if multi:
         seen_c = {(i.get("file"), i.get("code"), i.get("message")) for i in consistency}
         consistency += [i for i in _compose_issues(verification, arch, ops_out)

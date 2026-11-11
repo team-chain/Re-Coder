@@ -1865,10 +1865,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             case 'replay.rollback': {
                 const p = (payload ?? {}) as { source?: string; deploymentId?: string; approved?: boolean; requestId?: string };
                 try {
-                    if (!p.approved || !p.deploymentId || !['local', 'ecs'].includes(p.source ?? '')) {
+                    if (!p.approved || !p.deploymentId || !['local', 'ecs', 'stack'].includes(p.source ?? '')) {
                         throw new Error('롤백 대상 확인과 승인이 필요합니다.');
                     }
-                    const result = await this._apiClient.rollbackFromHistory(p.source as 'local' | 'ecs', p.deploymentId);
+                    const result = await this._apiClient.rollbackFromHistory(p.source as 'local' | 'ecs' | 'stack', p.deploymentId);
                     let auditWarning = '';
                     if (result.adr) {
                         try { await this.writeWorkspaceFile(result.adr.file, result.adr.content); }

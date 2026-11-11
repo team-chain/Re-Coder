@@ -28,4 +28,6 @@ def test_caller_config_wins():
     cfg = client.meta.config
     assert cfg.read_timeout == 5
     assert cfg.connect_timeout == 5
-    assert cfg.retries.get("mode") != "standard"  # 호출자가 준 재시도 설정이 그대로 쓰인다
+    #: 호출자가 준 재시도 설정이 그대로 쓰인다. botocore 1.44 부터는 mode 기본값이 standard 로 바뀌어(botocore 가 채움)
+    #: mode 로는 판단할 수 없다 — ReCoder 가 재시도 값을 덮어쓰지 않았는지를 횟수로 본다.
+    assert cfg.retries.get("max_attempts", cfg.retries.get("total_max_attempts", 1) - 1) == 0

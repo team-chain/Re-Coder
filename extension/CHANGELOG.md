@@ -6,8 +6,10 @@
 - **계약에서 만드는 고정 파일:** `docker-compose.yml`(DB healthcheck·볼륨·의존 순서·비밀값은 `.env`), 서비스별 Dockerfile(비루트 실행)·nginx 설정, `.env.example`, `architecture.json`, `ARCHITECTURE.md`, `contract-tests.json`과 실행기 `scripts/contract-test.mjs`. AI 교정은 이 파일들을 바꾸지 않습니다.
 - **함께 띄워 검증:** 생성 직후 일회용 복사본을 `docker compose up --wait`로 띄워 빌드·기동·서비스 간 연결·테이블 생성·계약 통합 테스트(헬스·인증 없이 거절·라우트 존재·5xx 없음)를 확인하고, 실패는 서비스 로그와 함께 원인 파일만 고칩니다. 실패가 줄지 않으면 멈추고 이전 상태로 되돌립니다. 이미지 저장소·Docker에 닿지 못한 것은 코드 오류로 보지 않습니다.
 - 결과 화면에 다중 서비스 검증(DB·서비스·연결·테이블·통합 테스트 통과 수, 실패 목록)을 표시합니다. 단일 앱은 예전 흐름 그대로입니다.
-- 여러 서비스로 된 프로젝트는 단일 컨테이너 로컬 배포 대신 `docker compose`로 실행하도록 안내합니다(AWS 다중 서비스 배포는 다음 단계).
-- 실제 Docker·실제 AI 검증 스크립트: `python scripts/verify-enterprise-live.py fixture`(요금 없음) · `generate --budget N`(실제 AI). 설계와 남은 한계는 `docs/enterprise-harness.md`.
+- **다중 서비스 로컬 배포:** 승인하면 비밀값 검사(Gitleaks) → 서비스별 Dockerfile 검사(안전 검사·Hadolint) → 빌드 → 서비스별 이미지 검사(Trivy) → DB·서비스 순서로 기동 → 연결·테이블·통합 테스트 순으로 진행합니다. 심각한 문제는 돌고 있던 서비스를 바꾸기 전에 막고, 새 버전이 뜨지 않으면 직전 버전으로 자동 복구합니다. 배포 이력 화면에서 「다중 서비스」로 보고 승인 롤백할 수 있습니다(DB 볼륨 유지). 비밀값은 프로젝트 .env 가 없으면 사용자 폴더에 한 번 만들어 보관합니다. AWS 다중 서비스 배포는 다음 단계입니다.
+- **명세 하네스 + 다중 서비스:** 승인한 합격 조건을 함께 띄운 서비스들에 시험하고(계약의 API 표로 해당 서비스에 요청), 실패하면 조건 기준으로 고친 뒤 다시 시험합니다.
+- 실제 Docker·실제 AI 검증 스크립트: `python scripts/verify-enterprise-live.py fixture`·`deploy`(요금 없음) · `generate --budget N`(실제 AI). 설계와 남은 한계는 `docs/enterprise-harness.md`.
+- 정리: Core 진단 클래스의 중복 코드 제거, botocore 버전에 따라 결과가 달라지던 AWS 기본값 시험 수정.
 
 ## 3.0.9 — Unreleased (통합 검증 후보)
 

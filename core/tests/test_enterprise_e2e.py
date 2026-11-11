@@ -241,7 +241,7 @@ def test_요청_한_줄에서_다중_서비스를_만들고_compose_검증으로
     ai, docker = FakeAI(), Docker()
     real = generated_validation.verify_compose
     monkeypatch.setattr(generated_validation, "verify_compose",
-                        lambda root, ops, arch, **kw: real(root, ops, arch, docker=docker, http=docker.http))
+                        lambda root, ops, arch, **kw: real(root, ops, arch, docker=docker, http=docker.http, **kw))
     monkeypatch.setattr(ca, "get_router", lambda: ai)
     result = ca.generate_code("게이트웨이·주문 서비스·워커로 나뉜 마이크로서비스 주문 플랫폼, PostgreSQL 과 Redis 사용",
                               project_root=str(tmp_path), mode="team", test=False, decisions=[DECISION])
@@ -305,3 +305,39 @@ def test_계약을_못_받으면_일반_설계로_계속_만든다(monkeypatch, 
     assert "architecture" not in engine.state["manifest"]
     assert any(f["file"] == "docker-compose.yml" for f in engine.state["files"])  # AI 목록 그대로(예전 흐름)
     assert compose_check  # 모듈이 import 된다
+
+
+def test_명세_하네스도_다중_서비스에서_합격_조건을_시험하고_교정한다(monkeypatch, tmp_path):
+    import code_test
+    import runtime_check
+
+    ai, docker = FakeAI(), Docker()
+    real = generated_validation.verify_compose
+    monkeypatch.setattr(generated_validation, "verify_compose",
+                        lambda root, ops, arch, **kw: real(root, ops, arch, docker=docker, http=docker.http, **kw))
+    monkeypatch.setattr(ca, "get_router", lambda: ai)
+    asked = []
+
+    def fake_checks(prompt):
+        asked.append(prompt)
+        return {"checks": [{"criterion": "AC-1", "title": "토큰 없이 주문 목록은 401",
+                            "steps": [{"method": "GET", "path": "/api/orders", "expect": {"status": 401}}]}]}
+    monkeypatch.setattr(code_test, "_call_ai", fake_checks)
+    sent = []
+
+    def request(base, method, path, body=None, token=""):
+        sent.append((base, method, path))
+        status, _ = docker.http(method, base + path, body)
+        return status, None
+    monkeypatch.setattr(runtime_check, "_request", request)
+    spec = {"goal": "주문 플랫폼", "criteria": [{"text": "로그인하지 않고 주문 목록을 보면 401 로 거절된다", "kind": "api"}]}
+    result = ca.generate_code("게이트웨이·주문 서비스·워커로 나뉜 마이크로서비스 주문 플랫폼, PostgreSQL 과 Redis 사용",
+                              project_root=str(tmp_path), mode="team", test=True, spec=spec, decisions=[DECISION])
+    # 시험은 한 번 만들고(계약의 API 표를 경로표로), 교정 회차마다 다시 돌린다
+    assert len(asked) == 1 and "/api/orders" in asked[0]
+    acc = result["spec"]["acceptance"]
+    assert acc["status"] == "passed" and acc["passed"] == 1 and acc["rounds"] == 2, acc
+    assert acc["criteria"][0]["history"] == ["failed", "passed"]
+    # 계약 API 표대로 그 API 를 가진 서비스(orders)에 보냈다
+    assert any(base == "http://127.0.0.1:4800" and path == "/api/orders" for base, _, path in sent)
+    assert any(c["name"] == "acceptance" and c["ok"] for c in result["verification"]["checks"])
