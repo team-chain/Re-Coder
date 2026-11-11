@@ -2719,6 +2719,18 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 break;
             }
+            case 'map.contract': {
+                //: 3.1 계약 대조 — Core 가 없거나 계약이 없으면 패널을 그리지 않는다(구조 지도는 그대로).
+                try {
+                    const root = activeProjectPath();
+                    if (!root) { this.postMessage('map.contractError', { message: '분석할 폴더가 열려있지 않습니다.' }); break; }
+                    const data = await this._apiClient.getArchitectureCheck(root);
+                    this.postMessage('map.contractResult', data);
+                } catch (err) {
+                    this.postMessage('map.contractError', { message: String(err) });
+                }
+                break;
+            }
             case 'models.check':
             case 'models.load': {
                 //: 2.0.36 작업별 AI 공급자 화면 — 등급별 공급자·30일 비용·마지막 비교. 키 값은 보내지 않는다(있는지만).

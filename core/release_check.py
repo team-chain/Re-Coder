@@ -46,7 +46,7 @@ RUNTIME_IMPORTS = (
     #: 3.0.2 — 마지막 성공 배포 기록(롤백 대상) · 5xx 오류 ID 응답
     'ecs_stable', 'api.errors',
     #: 3.1 — 다중 서비스·다중 DB 아키텍처 계약 · compose 인프라 파일 · compose 실행 검증(함수 안에서 불러온다)
-    'architecture', 'compose_kit', 'compose_check', 'compose_deploy',
+    'architecture', 'compose_kit', 'compose_check', 'compose_deploy', 'contract_check',
 )
 
 #: 실행 파일에 넣는 AWS 서비스 정의. Core 가 부르는 서비스와 자격증명 해석(SSO·로그인)에

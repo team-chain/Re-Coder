@@ -879,6 +879,13 @@ export class ApiClient {
         return resp.data;
     }
 
+    /** 3.1 계약 대조 — 설계도(architecture.json)와 실제 코드의 차이. 읽기만 한다. */
+    async getArchitectureCheck(workspacePath: string): Promise<object> {
+        const resp = await this.request<object>('GET', `/api/architecture/check?workspace_path=${encodeURIComponent(workspacePath)}`);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '계약 대조를 불러오지 못했습니다.'); }
+        return resp.data;
+    }
+
     async getDeploymentHistory(): Promise<object> {
         const resp = await this.request<object>('GET', '/api/deploy/history');
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '배포 이력을 불러오지 못했습니다.'); }

@@ -13,6 +13,7 @@
 import React, { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import FlowDryRun from "./FlowDryRun";
+import ContractPanel, { ContractResult } from "./ContractPanel";
 import type { FlowGraph } from "./dryRunModel";
 import StructureDiagram, { DiagramEdge, DiagramNode } from "./StructureDiagram";
 import { ROLE_LABEL, ROLE_ORDER, Role, aggregateFolders, folderOf, roleOf } from "./structureLayout";
@@ -210,10 +211,13 @@ const CodeMap: React.FC<{ isActive?: boolean }> = ({ isActive = true }) => {
   const [flowError, setFlowError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  //: 3.1 계약 대조 — 아키텍처 계약이 있는 프로젝트만(없으면 패널을 그리지 않는다)
+  const [contract, setContract] = useState<ContractResult | null>(null);
 
   const loadProject = useCallback(() => {
     setLoading(true); setError(null); setView("project");
     postMessage("map.project", {});
+    postMessage("map.contract", {});
   }, [postMessage]);
 
   useMessage(useCallback((msg) => {
@@ -228,6 +232,10 @@ const CodeMap: React.FC<{ isActive?: boolean }> = ({ isActive = true }) => {
       setFlow(payload as FlowGraph); setFlowLoading(false); setFlowError(null);
     } else if (type === "map.flowError") {
       setFlowError(String((payload as { message?: string })?.message ?? payload)); setFlowLoading(false);
+    } else if (type === "map.contractResult") {
+      setContract(payload as ContractResult);
+    } else if (type === "map.contractError") {
+      setContract(null);
     }
   }, []));
 
@@ -333,6 +341,10 @@ const CodeMap: React.FC<{ isActive?: boolean }> = ({ isActive = true }) => {
       )}
       {view === "flow" && !flowLoading && flow && (
         <FlowDryRun graph={flow} onOpen={(f, line) => postMessage("map.openFile", { id: f, line })} />
+      )}
+
+      {view === "project" && contract?.available && (
+        <ContractPanel result={contract} onOpen={(f, line) => postMessage("map.openFile", { id: f, line })} />
       )}
 
       {/* 프로젝트 뷰 */}

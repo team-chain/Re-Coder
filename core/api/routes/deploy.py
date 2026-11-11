@@ -5412,6 +5412,15 @@ class StackRollbackRequest(BaseModel):
     approved: bool = False
 
 
+@router.get("/api/architecture/check")
+async def architecture_check(workspace_path: str) -> dict:
+    """3.1 계약 대조 — 코드 맵 화면이 설계도(architecture.json)와 실제 코드의 차이를 보여 준다. 읽기만 한다."""
+    import contract_check
+    if not workspace_path or not Path(workspace_path).is_dir():
+        return {"available": False, "reason": "작업 폴더를 찾지 못했습니다."}
+    return await asyncio.to_thread(contract_check.check_workspace, workspace_path)
+
+
 @router.post("/api/deploy/stack/rollback")
 async def rollback_stack(body: StackRollbackRequest) -> dict:
     """3.1 여러 서비스 프로젝트 롤백 — 승인해야 실행한다. 데이터(DB 볼륨)는 그대로 둔다."""

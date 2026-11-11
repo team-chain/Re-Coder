@@ -237,6 +237,19 @@ async def deploy(workspace: str | Path, *, scan: Scan, docker=None, http=None,
             gate["blockers"].append(why)
         elif report.get("status") != "ok":
             gate["unverified"].append(f"Hadolint:{svc['name']}")
+    #: 계약 대조 — 다른 서비스 DB 직접 접속·계약 밖 호출은 설계를 어긴 것이라 배포하지 않는다(경고는 기록만).
+    try:
+        try:
+            import contract_check
+        except ImportError:  # pragma: no cover
+            from core import contract_check  # type: ignore
+        contract = contract_check.check(arch, contract_check.read_workspace(ws, arch))
+        gate["contract"] = contract["summary"]
+        for f in contract["findings"]:
+            if f["severity"] == "error":
+                gate["blockers"].append(f"계약 위반 — {f['message']}" + (f" ({f['file']}:{f['line']})" if f["line"] else ""))
+    except Exception as exc:  # noqa: BLE001
+        gate["unverified"].append(f"계약 대조({exc.__class__.__name__})")
     if gate["blockers"]:
         return fail("scan", "보안 게이트에서 막았습니다", "; ".join(gate["blockers"]),
                     "보안 화면의 수정 제안을 적용한 뒤 다시 배포하세요. 기존에 돌던 서비스는 그대로입니다.")

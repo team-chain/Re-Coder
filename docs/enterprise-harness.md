@@ -45,6 +45,7 @@
 | 요청 한 줄 → 계약 → 생성 → compose 실패 → 교정 → 통과 | 가짜 AI·가짜 Docker E2E (`test_enterprise_e2e.py`) | 통과 |
 | 판정 로직이 실제 HTTP·SQL에서 맞는가 | 실제 Postgres 16·Redis·uvicorn·node 프로세스로 fixture 실행(Docker 없이) | 정상판 13/13, 결함판에서 `GET /api/orders` 무인증 노출을 `services/orders/app/main.py`로 지목 |
 | Node 실행기와 파이썬 판정이 같은가 | 실제 HTTP 서버 | 일치 |
+| 계약 대조 | 단위 테스트 6개 + 생성 교정·배포 게이트 연동 시험 | 위반을 파일·줄로 지목, 위반 시 배포 차단 |
 | 기존 기능 | Core 전체 · 확장 전체 테스트 | 기존과 같음(환경 문제 2건: AWS 클라이언트 기본값, Docker Hub 차단으로 인한 빌드 테스트) |
 
 ## 아직 검증하지 않은 것 (사용자 PC에서)
@@ -59,6 +60,6 @@
 - 로컬 다중 서비스 배포(`compose_deploy`)는 구현했습니다: 서비스별 보안 게이트 → 빌드 → 이미지 검사 → 기동 → 검증 → 기록, 실패 시 자동 복구, 배포 이력에서 승인 롤백.
 - AWS 다중 서비스 배포(compose → ECS 서비스 여러 개 + RDS + ElastiCache/DocumentDB)와 묶음 단위 감시는 4단계입니다.
 - 통합 테스트는 계약 수준(라우트·인증·서버 오류)이고, 업무 규칙은 명세 하네스(합격 조건 시험)가 다중 서비스에서도 봅니다. 화면 조건처럼 HTTP 로 확인할 수 없는 것은 "확인 불가"로 남습니다.
-- 구조 분석(코드 맵)은 아직 서비스 사이 호출과 계약 대조를 보여 주지 않습니다.
+- 구조 분석(코드 맵)에 계약 대조를 붙였습니다(`contract_check`, `GET /api/architecture/check`): 서비스가 읽는 환경 변수·선언한 API·하드코딩된 호스트를 계약과 비교합니다. 정적 분석이라 동적으로 만든 변수 이름·URL은 못 봅니다. 실제 호출 확인은 compose 통합 테스트가 맡습니다.
 - 서비스 언어는 Node·Python, DB는 PostgreSQL·MySQL·MongoDB·Redis입니다. 메시지 브로커(Kafka·RabbitMQ)는 아직 계약에 없습니다(Redis 대기열로 대체).
 - 계약 단계는 요청에 여러 서비스·여러 DB를 뜻하는 말이 있을 때만 켜집니다(`RECODER_ARCHITECTURE=0`으로 끔).

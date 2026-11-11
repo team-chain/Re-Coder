@@ -496,3 +496,30 @@ def test_macOS_open_은_확장_호스트_환경변수를_빼고_띄운다(monkey
     assert "ELECTRON_RUN_AS_NODE" not in seen["env"]
     assert "NODE_OPTIONS" not in seen["env"]
     assert seen["env"].get("HOME") == "/Users/x", "필요한 변수까지 지웠다"
+
+
+def test_실행조차_실패한_직후_재호출은_기다리지_않고_같은_사유를_돌려준다(monkeypatch):
+    """Windows·Linux 는 app_running() 이 늘 True — 예전엔 두 번째 호출이 120초 동안 대기했다."""
+    _daemon_seq(monkeypatch, [False])
+    calls = []
+    monkeypatch.setattr(da, "_launch", lambda: calls.append(1) or (False, "실행 파일 없음"))
+    monkeypatch.setattr(da, "app_running", lambda: True)
+    waited = []
+    monkeypatch.setattr(da, "_wait_ready", lambda *a, **k: waited.append(1) or (_ for _ in ()).throw(AssertionError("대기 금지")))
+
+    first = da.ensure_docker(wait_seconds=120)
+    second = da.ensure_docker(wait_seconds=120)
+
+    assert len(calls) == 1 and not waited
+    assert second.ready is False and second.launched is False and "실행 파일 없음" in second.message
+
+
+def test_쿨다운_중_다시_확인했을_때_데몬이_떠_있으면_실패를_재사용하지_않는다(monkeypatch):
+    _daemon_seq(monkeypatch, [False, False, True])
+    monkeypatch.setattr(da, "_launch", lambda: (False, "실행 파일 없음"))
+    monkeypatch.setattr(da, "app_running", lambda: True)
+
+    da.ensure_docker(wait_seconds=0)
+    second = da.ensure_docker(wait_seconds=0)
+
+    assert second.ready is True

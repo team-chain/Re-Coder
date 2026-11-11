@@ -2943,6 +2943,18 @@ def _generate_code(
         if payment_ai:
             #: 결제 약속(모의 결제 모드·서명 웹훅)이 빠졌으면 일관성 점검이 고칠 오류로 넣는다 — 빠진 채로 두면 키 없이 배포할 수 없다.
             found = found + payment_contract.issues(candidate_ops)
+        contract = data.get("architecture") if isinstance(data, dict) else None
+        if not existing and not foundation and _architecture.is_multi(contract):
+            #: 3.1 계약 대조 — 다른 서비스 DB 직접 접속·계약 밖 호출은 정확한 근거(변수 이름)가 있어 compose 를 띄우기 전에 고친다.
+            try:
+                try:
+                    import contract_check as _cc
+                except ImportError:  # pragma: no cover
+                    from core import contract_check as _cc  # type: ignore
+                sources = {str(op.get("file") or ""): str(op.get("content") or "") for op in candidate_ops if op.get("action") != "delete"}
+                found = found + _cc.issues(contract, sources)
+            except Exception as exc:  # noqa: BLE001 — 대조 실패가 생성을 막지 않는다
+                print(f"[code_agent] 계약 대조 생략: {exc}", flush=True)
         if not existing and not foundation:
             #: 만들어 놓고 서버가 등록하지 않은 API 파일 — 그 기능이 동작하지 않으므로 서버 진입 파일을 고칠 오류로 넣는다.
             try:

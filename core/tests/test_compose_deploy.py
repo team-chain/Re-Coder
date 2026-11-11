@@ -37,7 +37,10 @@ def project(tmp_path) -> Path:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(op["content"], encoding="utf-8")
     (ws / "services/orders/app").mkdir(parents=True, exist_ok=True)
-    (ws / "services/orders/app/main.py").write_text("x = 1\n", encoding="utf-8")
+    (ws / "services/orders/app/main.py").write_text("import os\nDB = os.environ['ORDERS_DB_URL']\n", encoding="utf-8")
+    (ws / "services/gateway/src").mkdir(parents=True, exist_ok=True)
+    (ws / "services/gateway/src/server.js").write_text(
+        "const ORDERS = process.env.ORDERS_URL;\napp.get('/api/orders', (q, s) => s.json([]));\n", encoding="utf-8")
     return ws
 
 
@@ -258,3 +261,12 @@ def test_history_lists_stacks_and_rolls_back_latest_only(tmp_path, monkeypatch):
     res = run(H.approve_history_rollback("stack", newest.deployment_id, H.HistoryApproval(approved=True)))
     assert res["status"] == "success"
     assert docker.images[f"{D.project_name(ws)}-orders"] == "sha256:orders-1"
+
+
+def test_contract_violation_blocks_deploy_before_build(tmp_path):
+    ws = project(tmp_path)
+    (ws / "services/gateway/src/db.js").write_text("const pg = process.env.ORDERS_DB_URL;\n", encoding="utf-8")
+    docker = Docker()
+    res = run(D.deploy(ws, scan=scanner(), docker=docker, http=http))
+    assert res["status"] == "failed" and "계약 위반" in res["message"] and "services/gateway/src/db.js:1" in res["message"]
+    assert docker.builds == 0

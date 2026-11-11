@@ -405,6 +405,10 @@ def ensure_docker(wait_seconds: int | None = None) -> AutostartResult:
         # 돌려주는 건 틀리다 — 직전엔 성공했는데 사용자가 방금 껐다면 "자동 조치함"
         # 을 보여 주면서 데몬은 죽어 있는 꼴이 된다(실기기에서 실제로 났다).
         # 그래서: 앱이 살아 있고 직전에 실패했을 때만 재실행을 막고 기다린다.
+        if in_cooldown and not _last_result.ready and not _last_result.launched and not _last_result.starting:
+            #: 직전에 띄우지도 못했다(설치 안 됨·Linux 미지원·실행 실패) — 기다릴 대상이 없다. 2분을 붙잡지 않고 바로 같은 이유를 돌려준다.
+            #: (예전: Windows·Linux 는 app_running() 이 늘 True 라 두 번째 호출이 120초 대기 → 진단 화면이 멈춘 것처럼 보였다)
+            return _last_result
         if in_cooldown and not _last_result.ready and app_running():
             _last_attempt_at = now
             _last_result = _wait_ready(limit, launched_now=False)
