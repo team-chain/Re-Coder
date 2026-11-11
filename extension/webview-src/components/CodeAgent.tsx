@@ -33,7 +33,8 @@ interface CodeOp {
   removal_check?: RemovalCheck;
 }
 interface CodeResult { summary: string; ops: CodeOp[]; model: string; requestId?: number; projectRoot?: string;
-  verification?: {status: string; passed: boolean; output?: string};
+  verification?: {status: string; passed: boolean; output?: string; kind?: string;
+    checks?: {name: string; ok: boolean}[]; failures?: {kind: string; service: string; title: string}[]};
   /** 일관성 점검·빌드 검증이 끝까지 고치지 못한 문제. 오류가 남으면 확인 전까지 적용을 잠근다. */
   consistency_issues?: ConsistencyIssue[];
   /** 아무도 쓰지 않는 생성 파일 — "모두 적용" 에서 기본으로 뺀다. */
@@ -171,6 +172,30 @@ function trapTab(e: React.KeyboardEvent<HTMLDivElement>) {
   if (e.shiftKey && (at === first || at === e.currentTarget)) { e.preventDefault(); last.focus(); }
   else if (!e.shiftKey && at === last) { e.preventDefault(); first.focus(); }
 }
+
+/** 3.1 다중 서비스 검증 — 서비스·DB 를 함께 띄워 본 결과(기동·연결·스키마·통합 테스트)를 한 줄 + 펼치면 실패 목록. */
+const COMPOSE_GROUPS: [string, string][] = [["db", "DB"], ["service", "서비스"], ["link", "연결"], ["schema", "테이블"], ["test", "통합 테스트"]];
+export const ComposeVerification: React.FC<{v: NonNullable<CodeResult["verification"]>}> = ({ v }) => {
+  const checks = v.checks ?? [];
+  const head = v.status === "passed" ? "다중 서비스 검증 통과" : v.status === "failed" ? "다중 서비스 검증 미통과" : "다중 서비스 미검증";
+  const groups = COMPOSE_GROUPS.map(([key, label]) => {
+    const mine = checks.filter((c) => c.name.startsWith(key + ":"));
+    return mine.length ? `${label} ${mine.filter((c) => c.ok).length}/${mine.length}` : "";
+  }).filter(Boolean);
+  return (
+    <span data-testid="compose-verification">
+      {head}{groups.length ? ` · ${groups.join(" · ")}` : v.output ? ` · ${v.output}` : ""}
+      {(v.failures?.length ?? 0) > 0 && (
+        <details style={{ marginTop: 4 }}>
+          <summary style={{ cursor: "pointer" }}>실패 {v.failures!.length}건 보기</summary>
+          <ul style={{ margin: "4px 0 0 16px", padding: 0 }}>
+            {v.failures!.slice(0, 20).map((f, i) => <li key={i}>{f.title}</li>)}
+          </ul>
+        </details>
+      )}
+    </span>
+  );
+};
 
 export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTurn | null; onReviewRequired?: () => void; connectionPending?: boolean; connectionError?: string; onOpenHub?: (hub: "deploy" | "security") => void; onOpenModels?: () => void }> = ({ isActive, externalTurn, onReviewRequired, connectionPending, connectionError, onOpenHub, onOpenModels }) => {
   const { postMessage, useMessage } = useVSCodeApi();
@@ -837,7 +862,8 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
               )}
               <div role="status" data-testid="code-build-verification" style={{fontSize: 11, marginBottom: 8,
                 color: turn.result.verification?.status === "passed" ? "var(--vscode-testing-iconPassed)" : "var(--vscode-editorWarning-foreground)"}}>
-                {turn.result.verification?.status === "passed" ? "컨테이너 빌드 통과 · 실행 환경과 업무 기능 검증은 별도입니다."
+                {turn.result.verification?.kind === "compose" ? <ComposeVerification v={turn.result.verification} />
+                  : turn.result.verification?.status === "passed" ? "컨테이너 빌드 통과 · 실행 환경과 업무 기능 검증은 별도입니다."
                   : turn.result.verification?.status === "failed" || turn.result.verification?.status === "blocked"
                     ? "빌드 검증 미통과 · 오류를 해결한 뒤 배포하세요."
                     : "빌드 미검증 · Docker와 실행 설정을 확인한 뒤 검증하세요."}

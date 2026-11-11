@@ -113,6 +113,14 @@ def _board():
     return board
 
 
+def _arch():
+    try:
+        import architecture
+    except ImportError:  # pragma: no cover
+        from core import architecture  # type: ignore
+    return architecture
+
+
 def _ca():
     import code_agent as ca  # 지연 import — code_agent 가 이 모듈을 부른다
     return ca
@@ -480,8 +488,10 @@ class LargeGeneration:
                  emit: Callable[[dict], None] | None = None, limiter: RateLimiter | None = None,
                  security_review: bool = True, skip_failed: bool = False,
                  plan_hook: Callable[[list[dict]], tuple[list[dict], list[dict], str]] | None = None,
-                 root: str = "") -> None:
+                 root: str = "", architecture: bool = False) -> None:
         self.prompt = prompt
+        #: 3.1 다중 서비스·다중 DB — 설계 전에 아키텍처 계약을 받고, 인프라 파일은 계약에서 ReCoder 가 만든다(새 앱만).
+        self.architecture = bool(architecture) and new_project
         #: 프로젝트 루트(디스크) — 기존 프로젝트에 더할 때 이미 있는 파일을 "없는 파일"로 보지 않게.
         #: 설계 목록의 경로는 대상 폴더 기준이다 — 디스크 확인도 같은 기준으로(검토 2.0.15: 프로젝트 루트 기준으로 보면
         #: 대상 폴더의 기존 파일을 "없다" 로 보고 다시 만들어 사용자 코드를 덮어쓸 수 있었다).
@@ -696,7 +706,9 @@ class LargeGeneration:
         if self.state.get("manifest") and self.state.get("files"):
             return
         self._event("planning", message="설계 중 — 파일 사이의 약속과 만들 파일 목록을 정리합니다")
-        header = self.context_prompt + f"""
+        arch = self._plan_architecture() if self.architecture else None
+        multi = _arch().is_multi(arch)
+        header = self.context_prompt + (_arch().contract_text(arch) if multi else "") + f"""
 
 [대규모 생성 1단계 — 설계] 이 요청은 파일이 많아 여러 에이전트가 나눠 만듭니다. 이번 응답에서는 **파일 내용을 쓰지 말고**
 아래 JSON 만 주세요.
@@ -711,7 +723,9 @@ class LargeGeneration:
   contracts 에는 화면 공용 컴포넌트의 props(이름·타입·필수 여부), 훅·Context 가 돌려주는 필드 이름과 타입,
   공용 타입(예: CartItem 의 필드)도 적으세요 — 화면 파일들이 이것을 글자 그대로 씁니다.
   의존성 순서로 나열하세요. root package.json/Dockerfile/.dockerignore/README, 로그인·회원가입, DB 초기화 등 실행에 필요한 파일을
-  빠뜨리지 마세요. 파일 수는 줄이지 말고 실제로 필요한 만큼 모두 적으세요."""
+  빠뜨리지 마세요. 파일 수는 줄이지 말고 실제로 필요한 만큼 모두 적으세요.""" + ("""
+  (이 앱은 위 아키텍처 계약을 따릅니다 — 파일은 서비스 폴더 아래에 두고, Dockerfile·docker-compose.yml·.env.example 은
+  목록에 넣지 마세요. 서비스마다 package.json 또는 requirements.txt 와 /health 를 구현할 진입 파일을 넣으세요.)""" if multi else "")
         files: list[dict] = []
         try:
             resp = self.call(header, PLAN_SCHEMA, "generate_code_manifest", 6000, agent="planner")
@@ -733,7 +747,12 @@ class LargeGeneration:
                 header + "\n\n지금은 파일 목록 없이 contracts(파일 사이의 약속) 문서만 씁니다.",
                 "파일 사이의 약속(contracts) 문서", agent="planner", operation="generate_code_contracts")
             more = True
+        if multi:
+            #: 약속 문서에 계약을 넣어 둔다 — 파일 목록 이어 받기·파일 작성·교정이 모두 같은 이름·변수를 본다.
+            contracts = (contracts + _arch().contract_text(arch)).strip()
         manifest = {"summary": summary, "contracts": contracts}
+        if arch:
+            manifest["architecture"] = arch
         stalls = 0
         page_size = PAGE_FILES
         while more and len(files) < FILES_SAFETY:
@@ -797,6 +816,8 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
                 f["layer"] = _guess_layer(f["file"])
         files = self._complete_plan(files, manifest)
         fixed_ops: list[dict] = []
+        if multi:
+            files, fixed_ops = self._apply_architecture(files, arch)
         if self.plan_hook:
             try:
                 files, fixed_ops, extra = self.plan_hook(files)
@@ -810,13 +831,57 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
         for op in fixed_ops:
             self.state["ops"][_norm(op["file"])] = op
         self._save()
+        if multi:
+            self._event("architecture", agent="planner", architecture=arch,
+                        message=f"아키텍처 계약 — 서비스 {len(arch['services'])}개 · DB {len(arch['databases'])}개 · "
+                                f"API {len(arch['endpoints'])}개, compose·Dockerfile·통합 테스트는 ReCoder 가 계약에서 만듭니다")
         waves = {layer: sum(1 for f in files if f["layer"] == layer) for layer in (0, 1, 2)}
         self._event("planned", message=f"설계 완료 — 파일 {len(files)}개 (기반 {waves[0]} · 기능 {waves[1]} · 화면 {waves[2]})",
                     summary=summary, files=[{"file": f["file"], "layer": f["layer"], "purpose": f.get("purpose", "")} for f in files])
         for op in fixed_ops:
-            #: ReCoder 가 넣은 고정 파일(결제 모듈) — AI 가 쓰지 않으므로 바로 완료로 알린다(목록에 대기로 남지 않게).
+            #: ReCoder 가 넣은 고정 파일(결제 모듈·계약 인프라) — AI 가 쓰지 않으므로 바로 완료로 알린다(목록에 대기로 남지 않게).
             self._event("file_done", agent="planner", file=op["file"], lines=op["content"].count("\n") + 1,
-                        message=f"{op['file']} — ReCoder 결제 모듈(검증된 고정 파일)을 넣었습니다")
+                        message=f"{op['file']} — " + ("ReCoder 결제 모듈(검증된 고정 파일)을 넣었습니다" if "결제" in str(op.get("rationale"))
+                                                      else "아키텍처 계약에서 ReCoder 가 만들었습니다"))
+
+    def _plan_architecture(self) -> dict | None:
+        """0단계 — 아키텍처 계약(서비스·DB·API)을 받아 정규화한다. 못 받으면 None(예전 흐름으로 만든다)."""
+        arch_mod = _arch()
+        self._event("planning", message="아키텍처 설계 중 — 서비스·DB·API 를 나눕니다")
+        try:
+            resp = self.call(arch_mod.prompt(self.context_prompt), arch_mod.SCHEMA, "plan_architecture", 4096, agent="planner")
+            raw = _ca()._extract_json(resp.text)
+        except (LLMError, CodeOutputError, ValueError) as exc:
+            if isinstance(exc, LLMError) and not _is_truncation(exc) and exc.error_type != LLMErrorType.STRUCTURED_OUTPUT \
+                    and not _recoverable(exc):
+                raise
+            self._log("-", "plan", f"아키텍처 계약을 받지 못해 일반 설계로 만듭니다: {exc}")
+            return None
+        arch, notes = arch_mod.normalize(raw)
+        if notes:
+            self._log("-", "plan", "아키텍처 계약 정리: " + "; ".join(notes[:6]))
+        return arch
+
+    def _apply_architecture(self, files: list[dict], arch: dict) -> tuple[list[dict], list[dict]]:
+        """설계 목록을 계약에 맞춘다 — 인프라 파일은 ReCoder 고정 파일로, 서비스마다 필요한 파일은 채운다."""
+        try:
+            import compose_kit
+        except ImportError:  # pragma: no cover
+            from core import compose_kit  # type: ignore
+        arch_mod = _arch()
+        fixed = compose_kit.fixed_ops(arch)
+        fixed_keys = {_norm(op["file"]) for op in fixed}
+        drop = re.compile(r"(?:^|/)(?:dockerfile|\.dockerignore|docker-compose\.ya?ml|compose\.ya?ml)$", re.I)
+        kept = [f for f in files if _norm(f["file"]) not in fixed_keys and not drop.search(f["file"])
+                and not _norm(f["file"]) in ("package.json", ".env.example")]
+        keys = {_norm(f["file"]) for f in kept}
+        for f in arch_mod.required_files(arch):
+            if _norm(f["file"]) not in keys:
+                kept.append(dict(f, planned_by="recoder", uses=[]))
+                keys.add(_norm(f["file"]))
+        entries = [{"file": op["file"], "layer": 0, "size": "small", "fixed": True, "uses": [],
+                    "purpose": op.get("rationale", "")} for op in fixed]
+        return entries + kept, fixed
 
     def _complete_plan(self, files: list[dict], manifest: dict) -> list[dict]:
         """설계 목록의 빈 곳을 메운다 — 결정적으로 알 수 있는 것(진입점·DB 스키마·uses) + 검토 에이전트가 약속과 대조."""
@@ -1599,6 +1664,8 @@ replace 는 바꿀 내용입니다.
         self._event("generated", message=f"파일 {len(ops)}개 작성 완료 — 전체 점검 중"
                     + (f" (만들지 못한 {len(self.skipped)}개는 뺌)" if self.skipped else ""))
         return ({"summary": str(self.state["manifest"].get("summary") or ""), "skipped": self.skipped,
+                 #: 3.1 아키텍처 계약 — 전체 점검이 compose 로 함께 띄워 검증한다(없으면 None)
+                 "architecture": self.state["manifest"].get("architecture"),
                  #: 전체 점검 단계가 빠진 파일을 마저 만들 때 같은 약속을 지키게 넘긴다(결과 화면에는 쓰지 않는다)
                  "contracts": str(self.state["manifest"].get("contracts") or ""),
                  "fallback_docs": self.fallback_docs or [{"file": op["file"], "reason": "자동 작성"} for op in ops if op.get("fallback")]},

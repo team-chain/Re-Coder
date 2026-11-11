@@ -133,3 +133,34 @@ def verify_proposal(root: Path, ops: list[dict], *, timeout: int | None = None, 
                         )
                     except (OSError, subprocess.TimeoutExpired):
                         pass  # Build verdict remains valid even if cache cleanup fails.
+
+
+def verify_compose(root: Path, ops: list[dict], arch: dict, *, timeout: int | None = None, docker=None, http=None) -> dict:
+    """3.1 다중 서비스 — 제안 파일을 일회용 복사본에 펼쳐 docker compose 로 함께 띄워 검증한다(프로젝트는 건드리지 않는다)."""
+    try:
+        import compose_check
+    except ImportError:  # pragma: no cover
+        from core import compose_check  # type: ignore
+    base = {"kind": "compose", "passed": False, "status": "unavailable"}
+    if docker is None and not compose_check.enabled():
+        return {**base, "output": "Compose verification is disabled in unit tests."}
+    if docker is None and not shutil.which("docker"):
+        return {**base, "output": "Docker is required for multi-service verification."}
+    with tempfile.TemporaryDirectory(prefix="recoder-compose-src-") as directory:
+        workspace = Path(directory) / "project"
+        workspace.mkdir()
+        try:
+            snapshot(root, workspace, manifest(root))
+            for op in ops:
+                if op.get("action") == "delete":
+                    continue
+                #: .env* 는 검증 복사본에 넣지 않는다(.env.example 도 — 비밀값은 이번 실행만 쓰는 임시 파일로 넘긴다).
+                if any(part.startswith(".env") or part in {".aws", ".ssh", ".npmrc", ".netrc"}
+                       for part in Path(op["file"]).parts):
+                    continue
+                target = safe_path(workspace, op["file"])
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(scrub_build_source(op["content"]), encoding="utf-8", newline="")
+        except (OSError, ValueError) as exc:
+            return {**base, "output": f"검증 복사본을 만들지 못했습니다: {exc}"}
+        return compose_check.run(workspace, arch, timeout=timeout or max(_BUILD_TIMEOUT, 900), docker=docker, http=http)

@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.1.0 — Unreleased (엔터프라이즈 하네스 1~3단계)
+
+- **아키텍처 계약:** 마이크로서비스·여러 DB(PostgreSQL·MySQL·MongoDB·Redis)·워커·게이트웨이를 원하는 새 앱은 설계 전에 서비스·DB·API 계약을 받고, ReCoder가 이름·폴더·포트·접속 변수(예: `ORDERS_DB_URL`, `ORDERS_URL`)를 하나로 확정합니다. 모든 생성·교정 프롬프트가 같은 계약을 봅니다.
+- **계약에서 만드는 고정 파일:** `docker-compose.yml`(DB healthcheck·볼륨·의존 순서·비밀값은 `.env`), 서비스별 Dockerfile(비루트 실행)·nginx 설정, `.env.example`, `architecture.json`, `ARCHITECTURE.md`, `contract-tests.json`과 실행기 `scripts/contract-test.mjs`. AI 교정은 이 파일들을 바꾸지 않습니다.
+- **함께 띄워 검증:** 생성 직후 일회용 복사본을 `docker compose up --wait`로 띄워 빌드·기동·서비스 간 연결·테이블 생성·계약 통합 테스트(헬스·인증 없이 거절·라우트 존재·5xx 없음)를 확인하고, 실패는 서비스 로그와 함께 원인 파일만 고칩니다. 실패가 줄지 않으면 멈추고 이전 상태로 되돌립니다. 이미지 저장소·Docker에 닿지 못한 것은 코드 오류로 보지 않습니다.
+- 결과 화면에 다중 서비스 검증(DB·서비스·연결·테이블·통합 테스트 통과 수, 실패 목록)을 표시합니다. 단일 앱은 예전 흐름 그대로입니다.
+- 여러 서비스로 된 프로젝트는 단일 컨테이너 로컬 배포 대신 `docker compose`로 실행하도록 안내합니다(AWS 다중 서비스 배포는 다음 단계).
+- 실제 Docker·실제 AI 검증 스크립트: `python scripts/verify-enterprise-live.py fixture`(요금 없음) · `generate --budget N`(실제 AI). 설계와 남은 한계는 `docs/enterprise-harness.md`.
+
 ## 3.0.9 — Unreleased (통합 검증 후보)
 
 - develop의 AI 선택·모델 호환·배포 보안 수정과 보안 브랜치의 Security 현황판·AI 소스 감사·선택형 레드팀 실행을 통합합니다.

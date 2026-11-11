@@ -2410,7 +2410,7 @@ def _complete_fullstack_manifest(files: list[dict]) -> list[dict]:
 def _generate_split(prompt: str, target_folder: str = "", *, new_project: bool = False,
                     job_id: str = "", fingerprint: str = "", resume: dict | None = None,
                     concurrency: int | None = None, skip_failed: bool = False,
-                    plan_hook=None, root: str = "") -> tuple[dict, list[dict], object]:
+                    plan_hook=None, root: str = "", architecture: bool = False) -> tuple[dict, list[dict], object]:
     """큰 요청을 대규모 생성 엔진으로 만든다. 멈추면 GenerationPaused(이어서 만들기 가능)."""
     try:
         import gen_engine
@@ -2421,7 +2421,7 @@ def _generate_split(prompt: str, target_folder: str = "", *, new_project: bool =
     engine = gen_engine.LargeGeneration(
         prompt, target_folder=target_folder, new_project=new_project, job_id=job_id,
         fingerprint=fingerprint, concurrency=concurrency, emit=generation_progress.current(),
-        skip_failed=skip_failed, plan_hook=plan_hook, root=root,
+        skip_failed=skip_failed, plan_hook=plan_hook, root=root, architecture=architecture,
     )
     engine.resume_from(resume)
     return engine.run()
@@ -2578,6 +2578,22 @@ def _verify_generated_build(root: Path, target_folder: str, ops: list[dict], run
             return verify_proposal(base, _verification_ops(base, ops), run_app=True, acceptance=acceptance)
         return verify_proposal(base, _verification_ops(base, ops), run_app=True)
     return verify_proposal(base, _verification_ops(base, ops))
+
+
+def _verify_compose(root: Path, target_folder: str, ops: list[dict], arch: dict) -> dict:
+    """3.1 다중 서비스·다중 DB — 계약대로 compose 로 함께 띄워 빌드·기동·연결·스키마·통합 테스트를 본다."""
+    from generated_validation import verify_compose
+    base = (root / target_folder).resolve() if target_folder else root.resolve()
+    return verify_compose(base, ops, arch)
+
+
+def _compose_issues(verification: dict, arch: dict, ops: list[dict]) -> list[dict]:
+    try:
+        import compose_check
+    except ImportError:  # pragma: no cover
+        from core import compose_check  # type: ignore
+    files = {str(op.get("file") or ""): str(op.get("content") or "") for op in ops if op.get("action") != "delete"}
+    return compose_check.issues(verification, arch, files)
 
 
 def _runtime_issues(verification: dict) -> list[dict]:
@@ -2779,10 +2795,18 @@ def _generate_code(
     import payment_kit
     kit_hook = payment_kit.plan_with_kit if (payment_ai and not existing) else None
 
+    #: 3.1 여러 서비스·여러 DB 를 원하는 새 앱 — 아키텍처 계약 단계를 더하고 compose 로 함께 띄워 검증한다.
+    try:
+        import architecture as _architecture
+    except ImportError:  # pragma: no cover
+        from core import architecture as _architecture  # type: ignore
+    enterprise = (not existing and os.environ.get("RECODER_ARCHITECTURE", "1") != "0"
+                  and _architecture.wants(instruction, norm_decisions))
+
     def _split() -> tuple:
         return _generate_split(prompt, target_folder, new_project=not existing,
                                job_id=job_id, fingerprint=fp, resume=saved, concurrency=agents,
-                               skip_failed=skip_failed, plan_hook=kit_hook, root=str(root))
+                               skip_failed=skip_failed, plan_hook=kit_hook, root=str(root), architecture=enterprise)
 
     # Request a native schema instead of relying only on prose instructions.
     # Reject incomplete batches as a whole, then give the model one bounded
@@ -2950,6 +2974,11 @@ def _generate_code(
         return found
 
     consistency = _issues_for(ops_out)
+    #: 3.1 아키텍처 계약 — 서비스·DB 가 여럿이면 compose 로 함께 띄워 검증한다(단일 앱은 예전 실행 점검 그대로).
+    arch = data.get("architecture") if isinstance(data, dict) else None
+    multi = not existing and not foundation and _architecture.is_multi(arch)
+    compose_keys: list[set] = []
+    prev_compose: tuple | None = None
     #: 2.0.45 테스트 리코더 — 승인한 합격 조건이 있는 새 앱이면, 앱을 띄운 실행 점검 안에서 조건 시험을 돌린다.
     acceptance = None
     acceptance_note = ""
@@ -2958,6 +2987,8 @@ def _generate_code(
             acceptance_note = "테스트를 끈 채 만들었습니다."
         elif existing:
             acceptance_note = "기존 프로젝트에 더한 코드는 아직 자동으로 시험하지 않습니다."
+        elif multi:
+            acceptance_note = "여러 서비스로 나뉜 앱은 아키텍처 계약에서 만든 통합 테스트(contract-tests.json)로 시험합니다."
         else:
             try:
                 import code_test as _code_test
@@ -2979,10 +3010,10 @@ def _generate_code(
             print(f"[code_agent] 생성 시간 예산({budget}s) 초과 — AI 교정을 멈추고 결과를 돌려줍니다", flush=True)
             break
         errors = [i for i in consistency if i["severity"] == "error"]
-        if not existing and not foundation:
+        if not existing and not foundation and not multi:
             #: 교정이 package.json·시작 스크립트를 바꿨을 수 있다 — 검증본 Dockerfile 을 지금 구조로 다시 쓴다.
             ops_out, _changed = _apply_docker_kit(root, target_folder, ops_out)
-        if errors and _round >= 2 and split_mode:
+        if errors and _round >= 2 and split_mode and not multi:
             #: 정적 문제가 두 번 고쳐도 남으면 빌드도 함께 돌려 소스 오류(tsc·vite)를 한꺼번에 받는다 —
             #: 정적 문제만 고치다 빌드 검증을 한 번도 못 해 "빌드 검증 미통과" 로 끝났다(실기기 TEMP 2.0.6).
             _report({"step": "consistency", "round": _round + 1, "message": "남은 문제와 함께 컨테이너 빌드 오류도 확인하는 중"})
@@ -2990,7 +3021,29 @@ def _generate_code(
             if built["status"] == "failed":
                 seen = {(e.get("file"), e.get("code")) for e in errors}
                 errors = errors + [e for e in _build_failure_issues(built, ops_out) if (e.get("file"), e.get("code")) not in seen]
-        if not errors:
+        if not errors and multi:
+            _report({"step": "consistency", "round": _round + 1,
+                     "message": f"서비스 {len(arch['services'])}개 · DB {len(arch['databases'])}개를 함께 띄워 연결·통합 테스트를 확인하는 중"})
+            verification = _verify_compose(root, target_folder, ops_out, arch)
+            if verification["status"] != "failed":
+                break
+            errors = [i for i in _compose_issues(verification, arch, ops_out) if i.get("severity") == "error"]
+            if not errors:
+                break  # DB·Docker 자원 문제 — 코드로 고칠 것이 아니다(결과에 경고로 보여 준다)
+            ckeys = {re.sub(r"\d{2,}", "#", str(f.get("title"))) for f in verification.get("failures") or []}
+            if compose_keys and not (compose_keys[-1] - ckeys):
+                if bool(ckeys - compose_keys[-1]) and prev_compose is not None:
+                    ops_out, verification = prev_compose
+                print(f"[code_agent] 다중 서비스 검증 실패가 줄지 않아 교정을 멈춥니다(남은 {len(ckeys)}건)", flush=True)
+                _report({"step": "consistency", "round": _round + 1,
+                         "message": "다중 서비스 검증 실패가 더 줄지 않아 교정을 멈췄습니다 — 결과에 서비스별 로그를 보여 드립니다"})
+                break
+            compose_keys.append(ckeys)
+            prev_compose = (ops_out, verification)
+            _report({"step": "consistency", "round": _round + 1,
+                     "message": "다중 서비스 검증 — " + "; ".join(f["title"] for f in (verification.get("failures") or [])[:3])
+                                + " — 서비스 로그로 고치는 중"})
+        elif not errors:
             _report({"step": "consistency", "round": _round + 1, "message": "컨테이너 빌드로 실제 동작을 확인하는 중"})
             verification = (_verify_generated_build(root, target_folder, ops_out, run_app=True, acceptance=acceptance)
                             if acceptance is not None else
@@ -3178,11 +3231,15 @@ def _generate_code(
             unused = []
     if verification["status"] == "blocked":
         #: 정적 문제가 남아도 실제 빌드는 확인한다 — 결과에 "빌드 검증 미통과" 만 남고 무엇이 깨지는지 몰랐다(실기기 2.0.6).
-        verification = _verify_generated_build(root, target_folder, ops_out)
-    if verification["status"] != "failed" and not existing and not foundation:
+        verification = _verify_compose(root, target_folder, ops_out, arch) if multi else _verify_generated_build(root, target_folder, ops_out)
+    if multi:
+        seen_c = {(i.get("file"), i.get("code"), i.get("message")) for i in consistency}
+        consistency += [i for i in _compose_issues(verification, arch, ops_out)
+                        if (i.get("file"), i.get("code"), i.get("message")) not in seen_c]
+    elif verification["status"] != "failed" and not existing and not foundation:
         seen_rt = {(i.get("file"), i.get("code")) for i in consistency}
         consistency += [i for i in _runtime_issues(verification) if (i.get("file"), i.get("code")) not in seen_rt]
-    if verification["status"] == "failed":
+    if verification["status"] == "failed" and not multi:
         per_file = _build_failure_issues(verification, ops_out)
         seen = {(i.get("file"), i.get("code")) for i in consistency}
         #: 파일별로 뽑은 오류가 이미 결과에 있으면 그대로 둔다 — 예전엔 이때도 "Dockerfile" 오류를 하나 더 붙여

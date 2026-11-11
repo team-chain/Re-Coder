@@ -4584,6 +4584,21 @@ async def _build_local_image(plan: DeploymentPlan, workspace_path: str) -> Optio
     """
     if plan.method != DeployMethod.LOCAL_DOCKER or not plan.image:
         return None
+    compose = Path(workspace_path or ".") / "docker-compose.yml"
+    if workspace_path and compose.is_file() and not _dockerfile_in(workspace_path):
+        try:
+            import compose_kit as _ck
+            ours = compose.read_text(encoding="utf-8", errors="replace").startswith(_ck.MARKER)
+        except Exception:  # noqa: BLE001
+            ours = False
+        if ours:
+            #: 3.1 다중 서비스 프로젝트 — 서비스 하나짜리 템플릿 Dockerfile 을 만들어 엉뚱한 것을 띄우지 않는다.
+            msg = ("서비스·DB 가 여럿인 프로젝트(ReCoder 아키텍처 계약)는 단일 컨테이너 로컬 배포 대상이 아닙니다. "
+                   "프로젝트 폴더에서 `cp .env.example .env`(값 입력) 후 `docker compose up -d --build --wait` 로 실행하세요. "
+                   "생성 단계에서 같은 compose 로 함께 띄워 검증했습니다.")
+            return {"status": "failed", "stage": "build", "message": msg, "stderr": "", "stdout": "",
+                    "diagnosis": {"code": "COMPOSE_PROJECT", "title": "여러 서비스로 된 프로젝트입니다", "cause": msg, "fix": msg,
+                                  "lines": [], "step": "이미지 빌드"}}
     dockerfile = _dockerfile_in(workspace_path)
     workspace_has_project = bool(workspace_path) and Path(workspace_path).is_dir() and (
         any((Path(workspace_path) / name).is_file() for name in _PROJECT_MANIFESTS) or _nested_project_dir(workspace_path) is not None)
