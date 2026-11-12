@@ -10,7 +10,8 @@
 |---|---|---|
 | Core 전체 테스트 | pytest 전체(병렬) | 3579 통과, 3 건너뜀 (Docker 데몬이 필요한 시험) |
 | 확장 전체 테스트 | tsc 컴파일 + node:test | 855 통과 |
-| 릴리스 빌드 | `scripts/build-release.py` (PyInstaller → frozen self-check → VSIX 패키징·검증) | linux-x64 VSIX 생성, 패키지 내용 검증 통과 |
+| 릴리스 빌드 | `scripts/build-release.py` (PyInstaller → frozen self-check → VSIX 패키징·검증) | linux-x64 VSIX 생성, 패키지 내용 검증 통과. 공식 빌드와 같은 Python 3.12.11로도 통과 |
+| 원격 staging 그대로 | push된 `origin/staging`(c35196e)을 새로 받아 의존성 설치(`npm ci`)부터 다시 | Core 3579 통과·3 건너뜀, 확장 855 통과, 릴리스 빌드·패키지된 Core 점검·보안 경계 점검 통과 |
 | 패키지된 Core 실행 | frozen 바이너리를 띄워 OpenAPI 전체 GET 라우트·부작용 없는 POST 라우트 호출 | 5xx 없음, Traceback 0건, 버전 일치 |
 | 보안 경계 | 실행 중인 Core 점검 | 127.0.0.1에서만 대기, 토큰 없거나 틀리면 401, runtime.json 0600, CORS는 VS Code 웹뷰만, 경로 탈출 404 |
 | 의존성 취약점 | npm audit(전체), pip-audit(requirements.txt, release win32·linux·darwin 고정판) | 0건 |
@@ -47,7 +48,7 @@
 | 4 | 실제 AI로 엔터프라이즈 생성 | `python scripts/verify-enterprise-live.py generate --budget 3` (여러 번) | 검증 통과율 기록. 목표는 팀에서 정하기 |
 | 5 | Windows 패키지 | Windows에서 `scripts/build-release.py` → VSIX 설치 → Core 기동 | self-check 통과, 확장에서 연결됨 |
 | 6 | 실제 AWS (ECS 배포·롤백·감시자) | 테스트 계정에서 배포 → 일부러 고장 → 롤백 제안 → 승인 | 복구 확인 · 자원 정리 |
-| 7 | 레드팀 | GPT 작업 완료 후 별도 점검 | 문서 `security-live-followup` 기준 |
+| 7 | 레드팀 | GPT 보강 브랜치를 최신 staging에 합친 뒤 점검 | 2026-11-11 GPT 검토의 출시 차단 항목 해소: 취약점 탐지 정확도(실제 모델 재검증), 보고서 근거, 사용자 A/B 권한 검사, 검사 범위 네트워크 차단, 검사 종료 처리, 프로젝트 간 연결 변경 결함, 진행 화면 복구 |
 
 | 8 | 버전 확정 | CHANGELOG는 3.1.0인데 패키지는 아직 3.0.9예요 | 출시할 때 확장·Core 버전을 3.1.0으로 올리고 날짜 기입 |
 
@@ -59,4 +60,4 @@
 - **계약 대조는 정적 분석:** 동적으로 만든 변수 이름·URL은 못 봐요. 실제 호출은 compose 통합 테스트로 확인해요.
 - **실제 AI 성공률:** 실제 AI로 생성했을 때의 성공률은 측정 전이에요. 이 숫자가 나오기 전에는 "엔터프라이즈 앱을 완성한다"고 표현하지 않아요.
 - **업무 로직:** 합격 조건으로 쓴 것만 시험해요. 화면 조건은 "확인 불가"로 남아요.
-- **릴리스 빌드 버전:** 이 점검의 릴리스 빌드는 Python 3.13으로 만들었어요. 공식 빌드에서 쓰던 Python 버전(3.12.11)으로도 확인해야 해요.
+- **Gemini 라이브러리:** 패키지된 Core가 실행될 때 `google-generativeai` 지원 종료 경고를 출력해요. 지금은 동작하지만 후속 버전에서 새 라이브러리로 바꿔야 해요.
