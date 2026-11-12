@@ -1862,6 +1862,20 @@ def _deployment_preflight(workspace_path: str) -> dict:
     if not root.is_dir():
         raise ValueError("유효한 워크스페이스 경로가 아닙니다.")
 
+    #: 3.1 다중 서비스 프로젝트 — 지원하는 배포는 로컬 compose 다. ECS 를 추천하면 막힌 길로 안내하게 된다.
+    try:
+        import compose_deploy as _compose_deploy
+        _stack = _compose_deploy.load(root)
+    except Exception:  # noqa: BLE001 - 판단 실패 시 예전 감지로
+        _stack = None
+    if _stack:
+        return {
+            "app_kind": "server",
+            "summary": f"다중 서비스 앱 — 서비스 {len(_stack['services'])}개 · DB {len(_stack['databases'])}개 (로컬 Docker 로 함께 배포)",
+            "evidence": ["docker-compose.yml (ReCoder 아키텍처 계약)", "architecture.json"],
+            "recommended_target": "local",
+        }
+
     server_evidence: list[str] = []
     static_evidence: list[str] = []
     extra_evidence: list[str] = []
@@ -2099,6 +2113,16 @@ def _run_deployment_safety_preflight(workspace_path: str, app_kind: str = "unkno
     if inferred or target in ("ecs", "s3"):
         #: 로컬 배포는 빈 PC 포트를 스스로 고르고, ECS·S3 는 PC 포트를 쓰지 않는다.
         skipped.add("HOST_PORT_CONFLICT")
+    try:
+        import compose_deploy as _compose_deploy
+        if _compose_deploy.load(root):
+            #: 3.1 다중 서비스 프로젝트는 루트 Dockerfile 이 없는 게 정상이다(서비스마다 있고, 배포 게이트가 서비스별로 검사한다).
+            #: 이걸 막으면 지원하는 로컬 compose 배포가 버튼에서 멈추고, 수정안은 엉뚱한 루트 Dockerfile 생성이 된다.
+            skipped.add("MISSING_DOCKERFILE")
+            #: 헬스 경로(/health 는 계약이 넣고 함께 띄워 확인)와 이미지 검사(배포 게이트가 서비스별 Trivy)는 루트 기준 점검이 볼 수 없다.
+            skipped.update({"MISSING_HEALTH_ENDPOINT", "CRITICAL_VULNERABILITY"})
+    except Exception as exc:  # noqa: BLE001 - 판단 실패로 점검 전체를 막지 않는다
+        logger.warning("compose project detection skipped: %s", exc)
     if not (root / contract.runtime.env_file).exists():
         # A project with no environment file has nothing for Git to track.
         # Actual source-secret checks still run below.
@@ -2288,6 +2312,18 @@ async def deploy_preflight(request: DeployPreflightRequest) -> dict:
             'static' if request.target == 's3' else detected["app_kind"],
             request.target,
         )
+        if request.target in ('ecs', 's3'):
+            #: 3.1 다중 서비스 프로젝트는 아직 AWS 대상이 아니다 — 배포 버튼 직후에 이유를 보여 준다(자원 생성 전).
+            import compose_deploy as _compose_deploy
+            _aws_block = await asyncio.to_thread(_compose_deploy.aws_block, request.workspace_path)
+            if _aws_block:
+                safety["blocked"] = True
+                safety["reasons"].append({"code": "MULTI_SERVICE_AWS_UNSUPPORTED", "severity": "high", "message": _aws_block,
+                                          "fix": "배포 대상을 「로컬 Docker」로 바꿔 주세요.",
+                                          "remediation_available": False, "proposal_id": None})
+                safety["fixes"].append({"code": "MULTI_SERVICE_AWS_UNSUPPORTED", "message": "배포 대상을 「로컬 Docker」로 바꿔 주세요.",
+                                        "proposal_id": None, "auto_apply_available": False})
+                return {**detected, **safety}
         if request.target == 'ecs' or (request.target != 's3' and detected.get('app_kind') != 'static'):
             # 컨테이너 빌드·실행이 확정적으로 실패할 설정은 배포 전에 막는다.
             readiness = await asyncio.to_thread(_workspace_readiness, request.workspace_path)
@@ -3310,6 +3346,10 @@ async def generate_dockerfile(request: DockerfileRequest) -> InfraFileProposal:
     InfraAgent. **AI 호출이 실패해도 500 을 내지 않고** 템플릿 초안으로
     폴백하며, 왜 AI 를 못 썼는지를 risk_reasons 에 담아 사용자에게 알린다.
     """
+    import compose_deploy as _compose_deploy
+    if await asyncio.to_thread(_compose_deploy.load, request.workspace_path):
+        #: 3.1 — 루트에 서비스 하나짜리 Dockerfile 을 만들면 검증한 구성과 다른 것이 배포된다.
+        raise HTTPException(status_code=400, detail=_compose_deploy.FIXED_FILES)
     stack = request.stack or _detect_stack(request.workspace_path)
 
     #: 화면·서버 폴더형 Node 앱은 ReCoder 검증 Dockerfile 을 바로 쓴다(AI·범용 템플릿보다 확실하다 — 실기기 TEMP 2.0.6).
@@ -3503,6 +3543,11 @@ async def generate_compose_route(request: ComposeRequest) -> InfraFileProposal:
         raise HTTPException(status_code=400, detail="workspace_path 가 비어있습니다.")
     if not Path(ws_path).expanduser().resolve().exists():
         raise HTTPException(status_code=404, detail=f"워크스페이스 경로가 없습니다: {ws_path}")
+
+    import compose_deploy as _compose_deploy
+    if await asyncio.to_thread(_compose_deploy.load, ws_path):
+        #: 3.1 — 계약에서 만든 검증 compose 를 범용 초안으로 덮어쓰지 않는다.
+        raise HTTPException(status_code=400, detail=_compose_deploy.FIXED_FILES)
 
     try:
         from infra_agent import generate_docker_compose  # type: ignore
@@ -3803,7 +3848,10 @@ async def _run_pre_deploy_security_gate(request: DeployPlanRequest) -> dict:
     #: 같은 규칙으로 정해서 이미 빌드된 이미지는 여기서 검사한다. 예전엔 "이미지
     #: 미지정" 으로 미검증 처리돼, 검사가 깨끗해도 승인이 Level 3 로 올라갔다(실기기).
     image = request.image or _default_image_name(workspace)
-    if not image:
+    if _stack and dockerfile_path is None:
+        #: 3.1 다중 서비스 — <폴더>:latest 라는 이미지는 만들지 않는다. 서비스별 이미지는 실행 게이트가 빌드 뒤 검사한다(위 안내).
+        reports["trivy"] = _unverified_trivy_report("서비스 이미지는 빌드 뒤 실행 단계에서 서비스마다 검사합니다.")
+    elif not image:
         reports["trivy"] = _unverified_trivy_report(
             "스캔할 이미지가 지정되지 않았습니다."
         )
@@ -3846,6 +3894,53 @@ async def _run_pre_deploy_security_gate(request: DeployPlanRequest) -> dict:
         "unverified": bool(unverified_reasons),
         "reports": reports,
     }
+
+
+def _stack_plan(plan: DeploymentPlan, arch: dict, workspace: str) -> DeploymentPlan:
+    """3.1 다중 서비스 프로젝트의 승인 화면 — 실제로 실행할 것(compose)과 같은 내용을 보여 준다.
+
+    단일 앱 플랜을 그대로 두면 승인 화면에 있지도 않은 이미지·포트 8080·함께 띄울 DB 와 그 접속값이 나온다
+    (패키지된 Core 에 실제 프로젝트를 줘서 확인). 실행은 compose 경로라 그 값들은 쓰이지 않는다 — 보여 주는 것과 하는 것이 달랐다.
+    """
+    import socket
+    import compose_deploy
+
+    proj = compose_deploy.project_name(workspace)
+    public = [s for s in arch["services"] if s["public"] and s["port"]]
+    done = [r for r in compose_deploy.history(workspace) if r.get("status") in ("success", "degraded") and r.get("pins")]
+    bind = (os.environ.get("RECODER_LOCAL_BIND") or "127.0.0.1").strip() or "127.0.0.1"
+    reasons = [f"서비스 {len(arch['services'])}개({', '.join(s['name'] for s in arch['services'])})와 "
+               f"DB {len(arch['databases'])}개({', '.join(d['name'] for d in arch['databases']) or '없음'})를 함께 빌드해 시작합니다."]
+    for svc in public:
+        where = "이 PC 에서만 접속됩니다" if bind == "127.0.0.1" else f"{bind} 로 열립니다(RECODER_LOCAL_BIND)"
+        reasons.append(f"{svc['name']} 가 http://localhost:{svc['port']} 로 열립니다 — {where}. 나머지 서비스·DB 는 밖에 열지 않습니다.")
+        if not done:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                probe.settimeout(0.3)
+                if probe.connect_ex(("127.0.0.1", int(svc["port"]))) == 0:
+                    reasons.append(f"포트 {svc['port']} 를 이미 다른 프로그램이 쓰고 있습니다 — 그대로 두면 {svc['name']} 가 시작하지 못합니다. "
+                                   "그 프로그램을 끄고 배포하세요.")
+    try:
+        _, env_source = compose_deploy.env_file(workspace, arch)
+        reasons.append("DB 비밀번호 등 비밀값: " + ("프로젝트의 .env 를 씁니다." if env_source == "project"
+                                              else "ReCoder 가 한 번 만들어 사용자 폴더(~/.recoder/compose)에 보관한 값을 씁니다. 화면·기록에는 남기지 않습니다."))
+    except Exception as exc:  # noqa: BLE001 - 안내 실패가 계획을 막지 않는다
+        logger.warning("stack env preview failed: %s", exc)
+    reasons.append("DB 데이터는 볼륨에 유지됩니다. 새 버전이 뜨지 않으면 직전 버전으로 자동 복구합니다." if done
+                   else "롤백 대상 없음: 이 프로젝트의 첫 배포입니다. 실패하면 새로 만든 컨테이너를 내립니다.")
+    plan.image = proj
+    plan.container_name = proj
+    plan.ports = {str(s["port"]): str(s["port"]) for s in public}
+    plan.env, plan.env_files, plan.companions = {}, [], []
+    plan.settings, plan.settings_missing, plan.demo, plan.readiness = [], [], None, None
+    plan.rollback_image = None
+    plan.risk_reasons = reasons
+    try:
+        plan.command_steps = _command_steps(plan, workspace)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("command preview failed: %s", exc)
+        plan.command_steps = []
+    return plan
 
 
 @router.post("/api/deploy/plan")
@@ -3893,9 +3988,19 @@ async def create_deployment_plan(request: DeployPlanRequest) -> DeploymentPlan:
             ),
         )
 
-    # 화면에 보여 줄 현재 롤백 후보를 계산한다. 이 값은 승인 대기 중 오래될 수
-    # 있으므로 execute_deployment 에서 반드시 한 번 더 새로 계산한다.
-    _refresh_rollback_target(plan)
+    stack = None
+    if plan.method == DeployMethod.LOCAL_DOCKER and request.workspace_path:
+        try:
+            import compose_deploy
+            stack = await asyncio.to_thread(compose_deploy.load, request.workspace_path)
+        except Exception as exc:  # noqa: BLE001 - 판단 실패 시 단일 앱 흐름으로
+            logger.warning("compose project detection failed: %s", exc)
+    if stack:
+        plan = await asyncio.to_thread(_stack_plan, plan, stack, request.workspace_path)
+    else:
+        # 화면에 보여 줄 현재 롤백 후보를 계산한다. 이 값은 승인 대기 중 오래될 수
+        # 있으므로 execute_deployment 에서 반드시 한 번 더 새로 계산한다.
+        _refresh_rollback_target(plan)
 
     # Apply the security-gate verdict onto the plan.
     extra_reasons: list[str] = []
@@ -3914,8 +4019,21 @@ async def create_deployment_plan(request: DeployPlanRequest) -> DeploymentPlan:
         plan.approval_level = ApprovalLevel.DOUBLE_CONFIRM
     # A plan-time scan is only a preview: execute may rebuild this tag.
     # Keep this requirement until execution completes, including failed retries.
-    if not request.skip_security_scan and plan.image:
+    if not request.skip_security_scan and plan.image and not stack:
         _plans_pending_image_scan[plan.plan_id] = plan.image
+
+    if stack:
+        #: 서비스별 Dockerfile·이미지 검사와 계약 대조는 실행 게이트가 한다. 단일 앱용 점검(루트 Dockerfile·함께 띄울 DB·설정값)은 맞지 않는다.
+        try:
+            has_previous = any(r.get("status") in ("success", "degraded") for r in compose_deploy.history(request.workspace_path))
+            plan.trust = await asyncio.wait_for(asyncio.to_thread(
+                _trust_report, request.workspace_path, "local",
+                {"enable_continuous_verification": plan.enable_continuous_verification}, "", has_previous), timeout=30)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("trust check failed: %s", exc)
+        _deployment_plans[plan.plan_id] = plan
+        _plan_workspaces[plan.plan_id] = request.workspace_path or ""
+        return plan
 
     if plan.method == DeployMethod.LOCAL_DOCKER and plan.ports:
         try:

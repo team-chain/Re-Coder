@@ -58,7 +58,7 @@
 ## 한계 · 다음 단계
 
 - 로컬 다중 서비스 배포(`compose_deploy`)는 구현했습니다: 서비스별 보안 게이트 → 빌드 → 이미지 검사 → 기동 → 검증 → 기록, 실패 시 자동 복구, 배포 이력에서 승인 롤백.
-- AWS 다중 서비스 배포(compose → ECS 서비스 여러 개 + RDS + ElastiCache/DocumentDB)와 묶음 단위 감시는 4단계입니다.
+- AWS 다중 서비스 배포(compose → ECS 서비스 여러 개 + RDS + ElastiCache/DocumentDB)와 묶음 단위 감시는 4단계입니다. 그 전까지 다중 서비스 프로젝트의 ECS·S3 배포는 자원 생성 전에 안내와 함께 막습니다(`compose_deploy.aws_block`).
 - 통합 테스트는 계약 수준(라우트·인증·서버 오류)이고, 업무 규칙은 명세 하네스(합격 조건 시험)가 다중 서비스에서도 봅니다. 화면 조건처럼 HTTP 로 확인할 수 없는 것은 "확인 불가"로 남습니다.
 - 구조 분석(코드 맵)에 계약 대조를 붙였습니다(`contract_check`, `GET /api/architecture/check`): 서비스가 읽는 환경 변수·선언한 API·하드코딩된 호스트를 계약과 비교합니다. 정적 분석이라 동적으로 만든 변수 이름·URL은 못 봅니다. 실제 호출 확인은 compose 통합 테스트가 맡습니다.
 - 서비스 언어는 Node·Python, DB는 PostgreSQL·MySQL·MongoDB·Redis입니다. 메시지 브로커(Kafka·RabbitMQ)는 아직 계약에 없습니다(Redis 대기열로 대체).
