@@ -55,6 +55,22 @@ def load(workspace: str | Path) -> Optional[dict]:
     return arch
 
 
+#: AWS(ECS·S3)는 아직 컨테이너 하나짜리 앱만 올린다. 다중 서비스 프로젝트를 그 경로로 보내면 서비스 하나만 올라가거나
+#: (다른 서비스·DB 없이) 루트 Dockerfile 이 없다는 엉뚱한 오류로 끝난다 — AWS 자원을 만들기 전에 이유를 말하고 멈춘다.
+AWS_UNSUPPORTED = ("서비스·DB 가 여럿인 프로젝트(ReCoder 아키텍처 계약)는 아직 AWS 배포를 지원하지 않습니다. "
+                   "AWS 자원은 아무것도 만들지 않았습니다. 지금은 「로컬 Docker」 배포로 전체 서비스를 함께 띄우고 검증·롤백할 수 있습니다.")
+FIXED_FILES = ("이 프로젝트의 docker-compose.yml·서비스별 Dockerfile 은 아키텍처 계약에서 만들어 함께 띄워 검증한 파일입니다. "
+               "새로 만들면 검증한 구성과 달라지므로 만들지 않습니다. 구성을 바꾸려면 개발 화면에서 요청하세요.")
+
+
+def aws_block(workspace: str | Path | None) -> str:
+    """다중 서비스 프로젝트면 AWS 배포를 막는 안내문, 아니면 빈 문자열. 읽기만 한다."""
+    try:
+        return AWS_UNSUPPORTED if workspace and load(workspace) else ""
+    except Exception:  # noqa: BLE001 - 판단 실패로 단일 앱 배포를 막지 않는다
+        return ""
+
+
 def project_name(workspace: str | Path) -> str:
     ws = Path(workspace).resolve()
     slug = re.sub(r"[^a-z0-9]+", "-", ws.name.lower()).strip("-")[:30] or "app"

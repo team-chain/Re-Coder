@@ -214,6 +214,17 @@ async def start_deployment(
 
     OPA 정책 위반 시 400 반환 (fail-closed Level ≥ 3).
     """
+    #: 3.1 다중 서비스 프로젝트 — 서비스 하나만 올리거나 엉뚱한 빌드 오류로 끝나지 않게, 자원을 만들기 전에 멈춘다.
+    #: 두 경로(확장·직접 호출)의 합류점이라 여기 한 곳에서 막는다. 자리를 잡기 전이라 다음 배포를 막지 않는다.
+    try:
+        import compose_deploy as _compose_deploy  # type: ignore
+    except ImportError:  # pragma: no cover
+        from core import compose_deploy as _compose_deploy  # type: ignore
+    #: 작은 파일 두 개만 읽는 동기 호출이다 — 자리를 잡기 전에는 await 하지 않는다(중복 배포 방지 불변식).
+    _blocked = _compose_deploy.aws_block(request.workspace_path)
+    if _blocked:
+        raise HTTPException(status_code=400, detail={"error": "multi_service_project", "message": _blocked})
+
     # **자리를 먼저 잡는다.** 확인과 등록 사이에 await 가 하나라도 들어가면
     # 그 틈으로 두 번째 요청이 들어온다 — 자세한 것은 `_reserve_deployment`.
     record = _reserve_deployment(request)

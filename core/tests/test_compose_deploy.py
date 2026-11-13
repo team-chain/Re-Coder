@@ -233,6 +233,15 @@ def test_deploy_routes_delegate_compose_projects(tmp_path, monkeypatch):
     assert ("hadolint", str(ws / "services/orders/Dockerfile")) in scanned
     steps = [" ".join(st["args"]) for st in routes._command_steps(plan, str(ws))]
     assert any("docker compose" in st and " up " in st for st in steps), steps
+    # 승인 화면이 실제로 실행할 것과 같다 — 단일 앱용 값(없는 이미지·포트 8080·함께 띄울 DB 접속값)이 나오지 않는다
+    assert plan.container_name == plan.image == D.project_name(ws)
+    assert plan.ports == {"3000": "3000"} and plan.env == {} and plan.companions == [] and plan.settings_missing == []
+    assert plan.command_steps and any("compose" in " ".join(st["args"]) for st in plan.command_steps)
+    text = " ".join(plan.risk_reasons)
+    assert "서비스 2개" in text and "http://localhost:3000" in text and "이 PC 에서만" in text and "첫 배포" in text
+    assert "8080" not in text and "PASSWORD" not in json.dumps(plan.model_dump(mode="json"))
+    assert plan.plan_id not in routes._plans_pending_image_scan
+    assert not any("미빌드" in r or ":latest" in r for r in plan.risk_reasons), plan.risk_reasons  # 만들지 않는 이미지 안내가 없다
     res = asyncio.run(routes.execute_deployment(routes.ExecuteRequest(plan_id=plan.plan_id, approved=True)))
     assert res["method"] == "local_docker_compose" and res["status"] == "success", res
     assert plan.plan_id not in routes._deployment_plans
@@ -295,3 +304,62 @@ def test_same_project_deploys_do_not_overlap_and_records_survive(tmp_path):
     assert len(D.history(ws)) == 1
     # 끝난 뒤에는 다시 배포할 수 있다
     assert run(D.deploy(ws, scan=scanner(), docker=Docker(), http=http))["status"] == "success"
+
+
+def test_aws_paths_stop_before_creating_anything(tmp_path, monkeypatch):
+    """다중 서비스 프로젝트를 ECS·S3 로 보내면 서비스 하나만 올라가거나 엉뚱한 빌드 오류로 끝난다 — 자원 생성 전에 이유를 말한다."""
+    from fastapi import BackgroundTasks, HTTPException
+    from api.routes import deploy as routes
+    from api.routes import ecs as ecs_routes
+    from schemas import ECSDeployRequest
+
+    ws = project(tmp_path)
+    single = tmp_path / "single"
+    single.mkdir()
+    assert D.aws_block(ws) == D.AWS_UNSUPPORTED and D.aws_block(single) == "" and D.aws_block(None) == ""
+
+    # 합류점(확장·직접 호출 공통): 자리 예약도 하지 않는다 → 다음 배포를 막지 않는다
+    monkeypatch.setattr(ecs_routes, "_deploy_records", {})
+    reserved = []
+    monkeypatch.setattr(ecs_routes, "_reserve_deployment", lambda r: reserved.append(r) or (_ for _ in ()).throw(AssertionError("예약 금지")))
+    req = ECSDeployRequest(project_id="p", cluster="recoder-cluster", service="recoder-app", region="us-east-1", workspace_path=str(ws))
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(ecs_routes.start_deployment(req, BackgroundTasks(), None))
+    assert exc.value.status_code == 400 and exc.value.detail["error"] == "multi_service_project"
+    assert "로컬 Docker" in exc.value.detail["message"] and not reserved
+
+    # 배포 버튼 직후 점검: ECS·S3 는 막고, 로컬은 막지 않는다
+    for target in ("ecs", "s3"):
+        res = asyncio.run(routes.deploy_preflight(routes.DeployPreflightRequest(workspace_path=str(ws), target=target)))
+        assert res["blocked"] is True
+        assert any(r["code"] == "MULTI_SERVICE_AWS_UNSUPPORTED" for r in res["reasons"])
+    local = asyncio.run(routes.deploy_preflight(routes.DeployPreflightRequest(workspace_path=str(ws), target="local")))
+    assert not any(r["code"] == "MULTI_SERVICE_AWS_UNSUPPORTED" for r in local["reasons"])
+
+    # 검증한 고정 파일을 범용 초안으로 다시 만들지 않는다
+    for call in (routes.generate_dockerfile(routes.DockerfileRequest(workspace_path=str(ws))),
+                 routes.generate_compose_route(routes.ComposeRequest(workspace_path=str(ws)))):
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(call)
+        assert exc.value.status_code == 400 and "검증한" in str(exc.value.detail)
+
+
+def test_local_preflight_does_not_block_multi_service_projects(tmp_path):
+    """패키지된 Core 에 실제 프로젝트를 줬을 때 찾은 결함 — 루트 Dockerfile 이 없다는 이유로 지원하는 로컬 배포가 버튼에서 막혔고,
+    추천 대상은 막힌 ECS 였다."""
+    from api.routes import deploy as routes
+
+    ws = project(tmp_path)
+    for target in ("local", None):
+        res = asyncio.run(routes.deploy_preflight(routes.DeployPreflightRequest(workspace_path=str(ws), target=target)))
+        codes = {r["code"] for r in res["reasons"]} | {w["code"] for w in res["warnings"]}
+        assert res["blocked"] is False, res["reasons"]
+        assert not codes & {"MISSING_DOCKERFILE", "MISSING_HEALTH_ENDPOINT", "CRITICAL_VULNERABILITY"}
+        assert res["recommended_target"] == "local" and "다중 서비스" in res["summary"]
+    # 단일 앱은 예전 그대로 — 루트 Dockerfile 이 없으면 알린다
+    single = tmp_path / "single"
+    single.mkdir()
+    (single / "package.json").write_text('{"name":"a","dependencies":{"express":"4.19.2"},"scripts":{"start":"node server.js"}}', encoding="utf-8")
+    (single / "server.js").write_text("require('express')().listen(3000)", encoding="utf-8")
+    res = asyncio.run(routes.deploy_preflight(routes.DeployPreflightRequest(workspace_path=str(single), target="local")))
+    assert "MISSING_DOCKERFILE" in {r["code"] for r in res["reasons"]} | {w["code"] for w in res["warnings"]}
