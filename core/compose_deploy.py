@@ -57,6 +57,11 @@ def load(workspace: str | Path) -> Optional[dict]:
 
 #: AWS(ECS·S3)는 아직 컨테이너 하나짜리 앱만 올린다. 다중 서비스 프로젝트를 그 경로로 보내면 서비스 하나만 올라가거나
 #: (다른 서비스·DB 없이) 루트 Dockerfile 이 없다는 엉뚱한 오류로 끝난다 — AWS 자원을 만들기 전에 이유를 말하고 멈춘다.
+_PORT_BUSY = re.compile(r"(?:failed to bind host port [\d.:\[\]]*?:(\d+)/\w+: address already in use|"
+                        r"Bind for [\d.:]*?:(\d+) failed: port is already allocated|"
+                        r"listen tcp[46]? [\d.:\[\]]*?:(\d+): bind: address already in use|"
+                        r"ports are not available[^\n]*?:(\d+)|port is already allocated|address already in use)", re.I)
+
 AWS_UNSUPPORTED = ("서비스·DB 가 여럿인 프로젝트(ReCoder 아키텍처 계약)는 아직 AWS 배포를 지원하지 않습니다. "
                    "AWS 자원은 아무것도 만들지 않았습니다. 지금은 「로컬 Docker」 배포로 전체 서비스를 함께 띄우고 검증·롤백할 수 있습니다.")
 FIXED_FILES = ("이 프로젝트의 docker-compose.yml·서비스별 Dockerfile 은 아키텍처 계약에서 만들어 함께 띄워 검증한 파일입니다. "
@@ -355,16 +360,29 @@ async def _deploy(workspace: str | Path, *, scan: Scan, docker=None, http=None,
               "gate": {"unverified": gate["unverified"]}, "pins": {}}
     if not started_ok:
         down = [f["title"] for f in result["failures"]] or [compose_check._tail(up.stderr or up.stdout, 3, 300)]
+        fix = "결과의 서비스 로그를 확인하고 개발 화면에서 고친 뒤 다시 배포하세요."
+        #: 실제 Docker 에서 확인: 포트가 이미 쓰이고 있으면 서비스는 "시작 못 함" 으로만 나온다 — 원인(포트)을 앞에 말한다.
+        busy = _PORT_BUSY.search((up.stderr or "") + "\n" + (up.stdout or ""))
+        if busy:
+            port = next((g for g in busy.groups() if g), "")
+            down.insert(0, f"포트 {port} 를 이미 다른 프로그램이 쓰고 있습니다" if port else "공개 포트를 이미 다른 프로그램이 쓰고 있습니다")
+            fix = "그 포트를 쓰는 프로그램(다른 프로젝트의 컨테이너 포함)을 끄고 다시 배포하세요."
         rolled = ""
         if previous or current_pins:
             say("rollback", "새 버전이 뜨지 않아 직전 버전으로 되돌립니다")
             target = previous if previous else {"project": proj, "pins": current_pins}
             ok, out = await asyncio.to_thread(_restore, docker, base, arch, target)
             rolled = "직전 버전으로 되돌렸습니다" if ok else f"되돌리기 실패: {out}"
+        else:
+            #: 첫 배포 실패 — 되돌릴 버전이 없다. 그대로 두면 죽은 서비스가 계속 재시작하고(restart 정책) 깨진 이미지가
+            #: 다음 배포의 "직전 버전" 으로 보관된다(실제 Docker 에서 확인). 컨테이너와 방금 만든 이미지를 내리고 데이터 볼륨은 둔다.
+            say("rollback", "첫 배포가 뜨지 않아 새로 만든 컨테이너를 내립니다(데이터는 유지)")
+            gone = await asyncio.to_thread(docker, [*base, "down", "--remove-orphans", "--rmi", "local", "--timeout", "10"], 300)
+            rolled = ("새로 만든 컨테이너를 내렸습니다(데이터 볼륨 유지)" if gone.returncode == 0
+                      else "컨테이너 정리 실패: " + compose_check._tail(gone.stderr or gone.stdout, 2, 200))
         record.update(status="failed", failures=down[:10], rolled_back=rolled)
         _append(record)
-        return fail("deploy", "서비스가 정상적으로 시작하지 않았습니다", "; ".join(down[:5]) + (f" · {rolled}" if rolled else ""),
-                    "결과의 서비스 로그를 확인하고 개발 화면에서 고친 뒤 다시 배포하세요.",
+        return fail("deploy", "서비스가 정상적으로 시작하지 않았습니다", "; ".join(down[:5]) + (f" · {rolled}" if rolled else ""), fix,
                     verification=result, rolled_back=bool(rolled and rolled.startswith("직전")))
 
     # 6. 성공 — 이번 버전을 보관하고 오래된 보관본을 정리한다.

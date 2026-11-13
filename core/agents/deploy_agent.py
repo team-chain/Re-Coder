@@ -111,9 +111,16 @@ PORT_REASON_PREFIX = "이 PC 의 포트 "
 
 
 def local_port_reason(host_port) -> str:
-    """로컬 Docker 실행의 첫 위험 사유 — 어디로 열리는지 사실대로(docker -p 는 모든 네트워크 주소에 연다)."""
-    return (f"{PORT_REASON_PREFIX}{host_port} 로 열립니다 — http://localhost:{host_port} "
-            "(PC 방화벽 설정에 따라 같은 네트워크의 다른 기기에서도 접속될 수 있습니다)")
+    """로컬 Docker 실행의 첫 위험 사유 — 어디로 열리는지 사실대로.
+
+    2.0.32 부터 기본은 이 PC(127.0.0.1)에만 연다(`deployment_inputs.port_publish`). 그런데 안내는 예전 그대로
+    "다른 기기에서도 접속될 수 있다" 고 해서 실제 동작과 달랐다 — 실제로 여는 주소에 맞춰 말한다.
+    """
+    import os
+    bind = (os.environ.get("RECODER_LOCAL_BIND") or "127.0.0.1").strip()
+    scope = ("이 PC 에서만 접속됩니다" if bind == "127.0.0.1" else
+             "PC 방화벽 설정에 따라 같은 네트워크의 다른 기기에서도 접속될 수 있습니다")
+    return f"{PORT_REASON_PREFIX}{host_port} 로 열립니다 — http://localhost:{host_port} ({scope})"
 
 class DeployAgent:
     """

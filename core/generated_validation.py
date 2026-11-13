@@ -140,8 +140,9 @@ def verify_compose(root: Path, ops: list[dict], arch: dict, *, timeout: int | No
     """3.1 다중 서비스 — 제안 파일을 일회용 복사본에 펼쳐 docker compose 로 함께 띄워 검증한다(프로젝트는 건드리지 않는다)."""
     try:
         import compose_check
+        import compose_kit
     except ImportError:  # pragma: no cover
-        from core import compose_check  # type: ignore
+        from core import compose_check, compose_kit  # type: ignore
     base = {"kind": "compose", "passed": False, "status": "unavailable"}
     if docker is None and not compose_check.enabled():
         return {**base, "output": "Compose verification is disabled in unit tests."}
@@ -161,7 +162,10 @@ def verify_compose(root: Path, ops: list[dict], arch: dict, *, timeout: int | No
                     continue
                 target = safe_path(workspace, op["file"])
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(scrub_build_source(op["content"]), encoding="utf-8", newline="")
+                #: ReCoder 가 계약에서 만든 고정 파일(compose·Dockerfile 등)은 비밀값이 없고 `${변수}` 참조만 있다 — 그대로 쓴다.
+                #: 가리면 compose 의 DB 주소가 깨져 서비스가 DB 에 붙지 못한다(실제 Docker 에서 확인).
+                fixed = bool(op.get("fixed")) or compose_kit.is_fixed_path(arch, op["file"])
+                target.write_text(op["content"] if fixed else scrub_build_source(op["content"]), encoding="utf-8", newline="")
         except (OSError, ValueError) as exc:
             return {**base, "output": f"검증 복사본을 만들지 못했습니다: {exc}"}
         return compose_check.run(workspace, arch, timeout=timeout or max(_BUILD_TIMEOUT, 900), docker=docker, http=http,

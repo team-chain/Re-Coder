@@ -46,6 +46,7 @@
 | 판정 로직이 실제 HTTP·SQL에서 맞는가 | 실제 Postgres 16·Redis·uvicorn·node 프로세스로 fixture 실행(Docker 없이) | 정상판 13/13, 결함판에서 `GET /api/orders` 무인증 노출을 `services/orders/app/main.py`로 지목 |
 | Node 실행기와 파이썬 판정이 같은가 | 실제 HTTP 서버 | 일치 |
 | 계약 대조 | 단위 테스트 6개 + 생성 교정·배포 게이트 연동 시험 | 위반을 파일·줄로 지목, 위반 시 배포 차단 |
+| 실제 Docker 엔진(로컬 대체 베이스 이미지) | 하네스 fixture · 개발 에이전트 루프(가짜 AI) · 배포/복구/롤백 · 실패 분류 | 모두 통과. 이 과정에서 결함 7건 수정(`docs/release-readiness-3.1.md` 1-1) |
 | 기존 기능 | Core 전체 · 확장 전체 테스트 | 기존과 같음(환경 문제 2건: AWS 클라이언트 기본값, Docker Hub 차단으로 인한 빌드 테스트) |
 
 ## 아직 검증하지 않은 것 (사용자 PC에서)

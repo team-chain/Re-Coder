@@ -573,8 +573,13 @@ _CODE_SECRET_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\b(?:sk|rk)_live_[A-Za-z0-9]{20,}\b"), "[MASKED_STRIPE_KEY]"),
     (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"), "[MASKED_SLACK_TOKEN]"),
     (re.compile(r"\bAIza[0-9A-Za-z\-_]{35}\b"), "[MASKED_GCP_KEY]"),
-    #: 접속 문자열 안의 비밀번호(postgres://user:pass@host) — 사용자·호스트는 남긴다.
-    (re.compile(r"\b((?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|amqps?)://[^:/@\s'\"`]+:)([^@/\s'\"`]+)(@)"), r"\1[MASKED]\3"),
+    #: 접속 문자열 안의 비밀번호(postgres://user:pass@host) — 사용자·호스트는 남긴다. redis://:pass@host 처럼 사용자가 빈 것도 가린다.
+    #: **변수 참조는 비밀값이 아니다** — `${DB_PASSWORD}`·`$PW`·f-string `{password}`·`%s`·`<password>` 자리는 그대로 둔다.
+    #: 가리면 실행 코드가 망가진다: 검증 복사본의 compose 가 `postgres://app:[MASKED]@db` 가 되어 서비스가 DB 인증에 실패했고
+    #: (실제 Docker 에서 확인 — 다중 서비스 생성 검증이 전부 실패), JS 템플릿 문자열·파이썬 f-string 도 같은 식으로 깨졌다.
+    (re.compile(r"\b((?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|amqps?)://[^:/@\s'\"`]*:)"
+                r"(?!(?:\$\{[^}@]*\}|\$[A-Za-z_]\w*|\{[^}@]*\}|%s|%\([^)@]*\)s|<[^>@]*>|#\{[^}@]*\})+@)"
+                r"([^@/\s'\"`]+)(@)"), r"\1[MASKED]\3"),
 ]
 
 

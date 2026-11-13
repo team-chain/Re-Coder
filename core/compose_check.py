@@ -45,6 +45,8 @@ Http = Callable[[str, str, Optional[dict]], tuple[Optional[int], str]]
 _UNAVAILABLE = re.compile(r"(pull access denied|failed to resolve reference|manifest unknown|toomanyrequests|"
                           r"tls handshake|i/o timeout|no such host|connection refused.*docker|cannot connect to the docker daemon|"
                           r"error during connect|docker daemon is not running|403 forbidden|: forbidden)", re.I)
+#: BuildKit 이 실패한 단계를 보여 주는 줄 — " > [orders 4/6] RUN pip install ...:"
+_FAILED_STEP = re.compile(r"^\s*> \[[^\]]*\] RUN (.+?):\s*$", re.M)
 _BUILD_FAIL = re.compile(r"(failed to solve|error building|=> ERROR \[|target [\w-]+: failed|executor failed running)", re.I)
 
 
@@ -237,7 +239,7 @@ def inspect(arch: dict, base: list[str], docker: Runner, http: Http, result: dic
             str(state), f"상태 {state}/{health}")
         if health == "unhealthy":
             why = f"{svc['health'] or '/'} 응답 실패(unhealthy)"
-        _fail(result, "service_down", svc["name"], f"{svc['name']} {why}", logs=logs(svc["name"]))
+        _fail(result, "service_down", svc["name"], f"{svc['name']} {why}", logs=logs(svc["name"]), state=str(state))
     ports: dict[str, str] = {}
     for svc in arch["services"]:
         if svc["port"] and svc["name"] in healthy:
@@ -417,8 +419,20 @@ def issues(result: dict, arch: dict, files: dict[str, str]) -> list[dict]:
     out: list[dict] = []
     if not isinstance(result, dict) or result.get("status") != "failed":
         return out
-    for f in result.get("failures") or []:
+    failures = result.get("failures") or []
+    #: 스스로 못 뜬 것(빌드 실패·시작하다 죽음·DB 안 뜸) — 이것을 기다리다 시작도 못 한 서비스는 원인이 아니라 결과다.
+    down = {f.get("service") for f in failures if f["kind"] in ("build", "service_down", "db_down")}
+    for f in failures:
         svc = arch_mod.service(arch, f.get("service") or "")
+        if svc and f["kind"] == "service_down" and f.get("state") == "created":
+            waiting = [d for d in [*svc["depends_on"], *svc["databases"]] if d in down and d != svc["name"]]
+            if waiting:
+                #: 실제 Docker 에서 확인: orders 가 죽으면 그것을 기다리던 gateway 도 "시작 못 함" 으로 나온다.
+                #: 이것을 오류로 넘기면 교정이 멀쩡한 gateway 코드까지 고친다 — 원인 서비스만 고치게 한다.
+                out.append({"code": "COMPOSE_WAITING_ON_DEPENDENCY", "severity": "warning", "file": _entry(svc, files),
+                            "message": f"{svc['name']} 는 {', '.join(waiting)} 가 준비되지 않아 시작하지 못했습니다(이 서비스의 코드 문제가 아닙니다).",
+                            "fix": f"{', '.join(waiting)} 의 문제를 먼저 고치세요."})
+                continue
         if f["kind"] == "db_down" or not svc:
             out.append({"code": "COMPOSE_DB_DOWN" if f["kind"] == "db_down" else "COMPOSE_FAILED", "severity": "warning",
                         "file": "docker-compose.yml", "message": f["title"] + (f"\n{f['logs'][-800:]}" if f.get("logs") else ""),
@@ -426,6 +440,15 @@ def issues(result: dict, arch: dict, files: dict[str, str]) -> list[dict]:
             continue
         logs = f.get("logs") or ""
         blamed = _from_logs(svc, logs, files)
+        if f["kind"] == "build" and not blamed:
+            #: 실제 Docker 에서 확인: 의존성 설치가 실패해도 시작 파일(main.py)을 지목했다 — 실패한 빌드 단계의 명령으로 고칠 파일을 고른다.
+            step = _FAILED_STEP.findall(logs)
+            command = step[-1] if step else ""
+            manifest = ("requirements.txt" if re.search(r"\bpip3? install\b", command) else
+                        "package.json" if re.search(r"\b(npm|yarn|pnpm) (ci|install|run build|prune)\b|\bnpm (ci|install)\b", command) else "")
+            path = f"{svc['path']}/{manifest}"
+            if manifest and path in files:
+                blamed = [path]
         if f["kind"] == "test":
             route = _route_file(svc, f["case"]["path"], files)
             blamed = blamed or ([route] if route else [])
