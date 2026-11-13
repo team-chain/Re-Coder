@@ -22,7 +22,9 @@
 # Install with:  pip install -r requirements-dev.txt
 
 pytest>=9.0.3
-moto[server]>=5.0
+# 5.2.2 는 CloudFront list_distributions 응답에서 Comment·Origins 를 빠뜨려 CloudFront 시험 13개가 실패한다
+# (Windows 검증에서 확인, 5.2.2 로 재현 · 5.2.5 에서 통과). 제품 코드가 아니라 시험 도구 버전에 따른 차이다.
+moto[server]>=5.2.5
 
 # Generated docker-compose files are parsed as YAML in the tests, because the
 # app health check embeds a command containing quotes. A string-only check

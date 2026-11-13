@@ -174,7 +174,8 @@ def test_compose_file_is_valid_for_docker_compose(tmp_path):
     assert public and all(json.loads(deployed.stdout)["services"][s["name"]]["ports"][0]["host_ip"] == "127.0.0.1" for s in public)
     missing = subprocess.run(["docker", "compose", "-f", str(tmp_path / "docker-compose.yml"), "config"],
                              capture_output=True, text=True, encoding="utf-8", cwd=tmp_path)
-    assert missing.returncode != 0 and "ORDERS_DB_PASSWORD" in missing.stderr  # 비밀값 없이는 시작하지 않는다
+    #: 비밀값 없이는 시작하지 않는다. compose 가 여러 누락 중 어느 것을 먼저 말하는지는 버전·플랫폼마다 다르다(Windows 에서 확인).
+    assert missing.returncode != 0 and any(name in missing.stderr for name in K.verify_env(a)), missing.stderr
 
 
 def test_fixed_ops_cover_infra_and_are_marked_fixed():
@@ -235,8 +236,10 @@ def test_node_runner_matches_python_judge(tmp_path, api_server):
     (tmp_path / "scripts").mkdir()
     (tmp_path / "contract-tests.json").write_text(K.contract_tests(a), encoding="utf-8")
     (tmp_path / "scripts" / "contract-test.mjs").write_text(K.CONTRACT_RUNNER, encoding="utf-8")
-    env = {"PATH": __import__("os").environ["PATH"], "ORDERS_BASE_URL": f"http://127.0.0.1:{api_server.server_address[1]}",
-           "NO_PROXY": "127.0.0.1"}
+    #: Windows 의 Node 는 SystemRoot 가 없으면 시작하다 죽는다(exit 134, 난수 초기화 실패) — 실행에 필요한 기본 변수는 남긴다.
+    keep = ("PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "USERPROFILE", "HOME", "APPDATA", "LOCALAPPDATA")
+    env = {k: v for k, v in __import__("os").environ.items() if k.upper() in keep}
+    env.update({"ORDERS_BASE_URL": f"http://127.0.0.1:{api_server.server_address[1]}", "NO_PROXY": "127.0.0.1"})
     out = subprocess.run(["node", str(tmp_path / "scripts" / "contract-test.mjs")], capture_output=True, text=True, encoding="utf-8", env=env, timeout=60)
     assert out.returncode == 1, out.stdout + out.stderr  # 인증 없이 열린 GET /api/orders 를 잡는다
     assert "FAIL GET orders/api/orders → 200" in out.stdout and "PASS POST orders/api/orders → 201" in out.stdout

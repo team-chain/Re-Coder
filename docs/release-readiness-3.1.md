@@ -48,6 +48,16 @@
 
 **이 방법으로도 확인하지 못한 것:** 공식 이미지(alpine·slim)에서의 빌드, MySQL·MongoDB·화면(nginx) 서비스, 실제 스캐너(Gitleaks·Hadolint·Trivy)를 거친 배포, 단일 앱 배포(스캐너가 없어 안전하게 차단됨까지만 확인).
 
+## 1-2. Windows 검증(GPT, 2026-11-13)에서 나온 Core 실패 14건
+
+| 실패 | 원인 | 조치 |
+|---|---|---|
+| CloudFront 관련 13건 | 시험 도구 moto 5.2.2가 `list_distributions` 응답에서 Comment·Origins를 빠뜨려요. 같은 코드가 moto 5.2.5에서는 통과해요(이 환경에서 5.2.2로 13건 그대로 재현). | `requirements-dev.txt`를 `moto[server]>=5.2.5`로 올렸어요. Windows에서 `pip install -r core/requirements-dev.txt` 후 다시 확인해야 해요. |
+| 계약 실행기 시험 1건 | 시험이 Node를 띄울 때 환경 변수를 새로 만들면서 Windows에 필요한 `SystemRoot`를 뺐어요. | 실행에 필요한 기본 변수는 남기도록 시험을 고쳤어요. 제품 코드는 그대로예요. |
+| compose 비밀값 시험 1건(병합 후) | 실제 compose가 여러 누락 중 어느 변수를 먼저 말하는지를 시험이 하나로 고정했어요. | 필수 비밀값 중 하나라도 말하면 통과하도록 고쳤어요. compose는 정상적으로 막고 있었어요. |
+
+세 가지 모두 제품 결함이 아니라 시험 쪽 문제였어요. Windows에서 다시 돌려 0건이 되는지는 아직 확인 전이에요.
+
 ## 2. 이번에 고친 것
 
 - `first_run.py`: 진단 클래스 끝에 중복된 도달 불가 코드가 있었어요(정의되지 않은 변수 사용). 제거했어요.
