@@ -1163,7 +1163,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 const p = payload as { action: string; requestId: string; mode?: 'audit'|'redteam'|'scans' };
                 const workspace = activeProjectPath();
                 try {
-                    if (!['configure', 'start', 'status', 'stop', 'recover', 'localStart', 'localStatus', 'localStop', 'localCleanup', 'localOpenReport', 'localOpenRawReport', 'localKey', 'managedStatus', 'managedLogin', 'managedSetup', 'managedPermissions', 'managedStart', 'managedAuditStart', 'managedScansStart', 'managedStop', 'managedReport'].includes(p.action)) throw new Error('지원하지 않는 요청입니다.');
+                    if (!['configure', 'start', 'status', 'stop', 'recover', 'localStart', 'localStatus', 'localStop', 'localCleanup', 'localOpenReport', 'localOpenRawReport', 'localKey', 'localAccessConfigure', 'localAccessClear', 'managedStatus', 'managedLogin', 'managedSetup', 'managedPermissions', 'managedStart', 'managedAuditStart', 'managedScansStart', 'managedStop', 'managedReport'].includes(p.action)) throw new Error('지원하지 않는 요청입니다.');
                     if(p.action.startsWith('managed')) {
                         if(!this._globalState)throw new Error('검사 기록 저장소를 사용할 수 없습니다.');
                         this._managedSecurity??=new ManagedSecurityHost(this._coreManager,this._globalState,vscode.Uri.joinPath(this._extensionUri,'out','security').fsPath);

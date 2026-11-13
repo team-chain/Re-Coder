@@ -16,17 +16,22 @@ async function main(){
   const target=await call('Target.createTarget',{url:'about:blank'}),attached=await call('Target.attachToTarget',{targetId:target.targetId,flatten:true});cmd=(m,p)=>call(m,p,attached.sessionId);
   await cmd('Runtime.enable');await cmd('Page.enable');
   const evaluate=async expression=>{const r=await cmd('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(r.exceptionDetails)throw Error(JSON.stringify(r.exceptionDetails));return r.result.value;};
-  const click=async label=>{await until(()=>evaluate(`(()=>{const b=[...document.querySelectorAll('button')].find(e=>e.offsetParent!==null&&e.textContent.trim()===${JSON.stringify(label)});if(!b||b.disabled)return false;b.click();return true;})()`),label);};
+  const click=async label=>{const labels=Array.isArray(label)?label:[label];await until(()=>evaluate(`(()=>{const b=[...document.querySelectorAll('button')].find(e=>e.offsetParent!==null&&${JSON.stringify(labels)}.includes(e.textContent.trim()));if(!b||b.disabled)return false;b.click();return true;})()`),label);};
   const contains=s=>evaluate('document.body.innerText.includes('+JSON.stringify(s)+')');
   const screen=async name=>{const r=await cmd('Page.captureScreenshot',{format:'png'});await fs.writeFile(path.join(root,name+'.png'),Buffer.from(r.data,'base64'));};
   await cmd('Page.addScriptToEvaluateOnNewDocument',{source:`window.uiRequests=[];const f=window.fetch;window.fetch=function(url,o){if(url==='/message'&&o?.body)window.uiRequests.push(JSON.parse(o.body));return f.apply(this,arguments);};`});
   await cmd('Page.navigate',{url:process.env.RECODER_PREVIEW_URL||'http://127.0.0.1:4188/?layout=workspace'});
-  await click('Security');await click('레드팀 테스트');await click('내 PC의 테스트 앱');await click('레드팀 테스트 시작');
-  await until(()=>contains('SQL 입력 · 대조 응답 비교'),'running task');
+  await click('Security');await click('레드팀 테스트');await click('내 PC의 테스트 앱');await click(['레드팀 테스트 시작','다시 테스트']);
+  await until(()=>evaluate(`document.querySelectorAll('.rc-rt-task[data-active=true]').length===1`),'running task');
   assert.equal(await evaluate(`document.querySelectorAll('.rc-rt-task[data-active=true]').length`),1);
+  assert.equal(await evaluate(`document.querySelectorAll('.rc-rt-traffic .rt-packet').length`),1);
+  assert.equal(await contains('마지막 요청 #2'),true);
+  assert.equal(await contains('58 ms'),true);
+  assert.equal(await evaluate(`document.querySelector('.rc-rt-run header button')?.textContent`),'중단 · 환경 삭제','stop remains next to the visible progress');
   await screen('redteam-running');
   await until(()=>contains('일시적 연결 끊김'),'transient failure');
   assert.equal(await evaluate(`document.querySelectorAll('.rc-rt-task[data-active=true]').length`),0);
+  assert.equal(await evaluate(`document.querySelectorAll('.rc-rt-traffic .rt-packet').length`),0,'no fake traffic while disconnected');
   await until(()=>contains('미검증 범위 5개'),'automatic status recovery');
   assert.equal(await evaluate(`window.uiRequests.filter(m=>m.payload?.action==='localStart').length`),1,'must not retry start');
   assert.equal(await evaluate(`document.querySelectorAll('.rc-rt-flow [data-current=true]').length`),0);
@@ -38,11 +43,11 @@ async function main(){
   await screen('redteam-narrow');
   await cmd('Emulation.setEmulatedMedia',{features:[{name:'prefers-reduced-motion',value:'reduce'}]});
   assert.equal(await evaluate(`getComputedStyle(document.querySelector('.rc-rt-dot')).animationName`),'none');
-  await click('다시 테스트');await until(()=>contains('SQL 입력 · 대조 응답 비교'),'second run');await click('중단 · 환경 삭제');
+  await click('다시 테스트');await until(()=>evaluate(`document.querySelectorAll('.rc-rt-task[data-active=true]').length===1`),'second run');await click('중단 · 환경 삭제');
   await until(()=>contains('중단 후 환경 삭제 완료'),'cancel cleanup');
   assert.equal(await evaluate(`document.querySelectorAll('.rc-rt-flow [data-done=true]').length`),0);
   assert.deepEqual(errors,[]);await fs.writeFile(path.join(root,'redteam-ui-result.json'),JSON.stringify({fixture:true,modelCalls:0,passed:['actual task animation','transient failure/recovery','no duplicate start','incomplete legacy report','1200/700/390 layout','reduced motion','stop/cleanup'],requests:await evaluate('window.uiRequests')},null,2));
-  console.log('PASS: 7 red-team UI scenarios (offline fixtures; no AI accuracy claim)');await call('Browser.close').catch(()=>{});
+  console.log('PASS: 7 red-team UI scenarios plus request animation and disconnected-state assertions (offline fixtures; no AI accuracy claim)');await call('Browser.close').catch(()=>{});
  }catch(e){if(cmd){const shot=await cmd('Page.captureScreenshot',{format:'png'}).catch(()=>null);if(shot)await fs.writeFile(path.join(root,'redteam-ui-failure.png'),Buffer.from(shot.data,'base64'));}throw e;}
  finally{if(socket)socket.close();if(browser.exitCode===null)browser.kill();await Promise.race([exited,pause(5000)]);assert.ok(path.resolve(profile).startsWith(root+path.sep)&&path.basename(profile).startsWith('redteam-browser-'));await fs.rm(profile,{recursive:true,force:true,maxRetries:3,retryDelay:500}).catch(()=>{});}
 }

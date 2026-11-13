@@ -24,14 +24,16 @@ test('cleanup does not claim success if Docker refuses to delete the owned engin
 test('preparation bootstraps privately, pins images, keeps credentials off CLI and never mounts host Docker',async t=>{
  const calls=[],http=[];
  t.mock.method(global,'fetch',async(url,init={})=>{http.push({url,init});if(url.endsWith('/info'))return new Response('{}');if(url.endsWith('/auth/login'))return new Response('{}',{headers:{'set-cookie':'auth=session; HttpOnly'}});return Response.json({data:{token:'temporary-token'}});});
- const runtime=new LocalPentagiRuntime(id,async(args,options={})=>{calls.push({args,options});if(args[0]==='context')return 'npipe:////./pipe/docker_engine';if(args[0]==='info')return 'linux|8589934592|4';if(args.includes('psql')&&options.input.startsWith('SELECT'))return '1';if(args[0]==='port')return '127.0.0.1:49152';return '';});
- const connection=await runtime.prepare('PRIVATE_API_KEY','openai',async()=>{});
+ const runtime=new LocalPentagiRuntime(id,async(args,options={})=>{calls.push({args,options});if(args[0]==='context')return 'npipe:////./pipe/docker_engine';if(args[0]==='info')return 'linux|8589934592|4';if(args.includes('getent'))return '192.168.65.254 host.docker.internal';if(args.includes('image')&&args.includes('inspect'))return 'sha256:'+'1'.repeat(64);if(args.includes('psql')&&options.input.startsWith('SELECT'))return '1';if(args[0]==='port')return '127.0.0.1:49152';return '';});
+ const connection=await runtime.prepare('PRIVATE_API_KEY','openai',async()=>{},undefined,'http://host.docker.internal:3000/');
+ const engine=calls.find(c=>c.args[0]==='run'&&c.args.includes(id+'-engine'));
+ assert.ok(engine.args.includes('--feature=containerd-snapshotter=false'));assert.ok(engine.args.includes('--storage-driver=overlay2'));
  assert.equal(connection.server,'http://127.0.0.1:49152');assert.equal(connection.token,'temporary-token');
  assert.ok(Object.values(PENTAGI_IMAGES).every(x=>/@sha256:[a-f0-9]{64}$/.test(x)));
  const app=calls.find(c=>c.args[0]==='create'&&c.args.includes(id+'-app'));
  const bootstrap=calls.find(c=>c.args[0]==='create'&&c.args.includes(id+'-bootstrap'));
  assert.ok(app.args.includes('127.0.0.1::8443'));assert.ok(!bootstrap.args.includes('-p'));
- assert.ok(app.args.includes('DOCKER_HOST=tcp://engine:2375'));assert.ok(app.args.includes('DOCKER_NETWORK=host'));
+ assert.ok(app.args.includes('DOCKER_HOST=tcp://engine:2375'));assert.ok(app.args.includes('DOCKER_NETWORK=recoder-isolated'));
  assert.equal(app.options.env.OPEN_AI_KEY,'PRIVATE_API_KEY');
  assert.ok(!JSON.stringify(calls.map(c=>c.args)).includes('PRIVATE_API_KEY'));
  assert.ok(!calls.some(c=>c.args.some(a=>a.includes('/var/run/docker.sock:'))));
@@ -43,6 +45,14 @@ test('saved reports survive environment deletion and are scoped to a validated s
  const report={session:id,workspace:'project',target:'http://host.docker.internal:3000/',createdAt:new Date().toISOString(),phase:'saving',step:'결과 저장',tasks:[{id:'1',title:'Headers',result:'Evidence stays available'}]};
  try {await saveReport(root,report);report.phase='removed';await saveReport(root,report);assert.equal((await readReport(root,id)).tasks[0].result,'Evidence stays available');}
  finally {assert.equal(path.dirname(root),os.tmpdir());assert.ok(path.basename(root).startsWith('recoder-redteam-test-'));await fs.rm(root,{recursive:true,force:true});}
+});
+
+test('a missing final evidence fetch remains incomplete when reopening the saved report',async()=>{
+ const {localAssessment}=require('../out/security/localPentagi');
+ const report={target:'http://localhost:3000/',evidenceUnavailable:true};
+ const result=localAssessment(report);
+ assert.equal(result.status,'incomplete');
+ assert.ok(result.warnings.some(w=>w.includes('상세 보고서를 수집하지 못했습니다')));
 });
 test('upstream task output cannot persist the supplied model key or temporary API token',()=>{
  const report={session:id,error:'KEY_PRIVATE',tasks:[{result:'key KEY_PRIVATE and token TEMP_TOKEN',title:'Evidence'}]};
@@ -69,12 +79,12 @@ test('Anthropic preparation injects only the selected provider secret',async t=>
  const runtime=new LocalPentagiRuntime(id,async(args,options={})=>{
   calls.push({args,options});
   if(args[0]==='context')return 'npipe:////./pipe/docker_engine';
-  if(args[0]==='info')return 'linux|8589934592|4';
+  if(args[0]==='info')return 'linux|8589934592|4';if(args.includes('getent'))return '192.168.65.254 host.docker.internal';if(args.includes('image')&&args.includes('inspect'))return 'sha256:'+'1'.repeat(64);
   if(args.includes('psql')&&options.input.startsWith('SELECT'))return '1';
   if(args[0]==='port')return '127.0.0.1:49152';
   return '';
  });
- await runtime.prepare('ANTHROPIC_PRIVATE_KEY','anthropic',async()=>{});
+ await runtime.prepare('ANTHROPIC_PRIVATE_KEY','anthropic',async()=>{},undefined,'http://host.docker.internal:3000/');
  const app=calls.find(c=>c.args[0]==='create'&&c.args.includes(id+'-app'));
  assert.ok(app.args.includes('ANTHROPIC_API_KEY'));assert.equal(app.options.env.ANTHROPIC_API_KEY,'ANTHROPIC_PRIVATE_KEY');
  assert.equal(app.options.env.OPEN_AI_KEY,undefined);assert.ok(!JSON.stringify(calls.map(c=>c.args)).includes('ANTHROPIC_PRIVATE_KEY'));
@@ -84,8 +94,10 @@ test('a waiting flow saves partial evidence and cleans immediately instead of id
  const {PentagiClient}=require('../out/security/pentagiClient');
  const root=await fs.mkdtemp(path.join(os.tmpdir(),'recoder-waiting-test-'));
  let finished=0,cleaned=0,snapshots=0;
- t.mock.method(LocalPentagiRuntime.prototype,'prepare',async()=>({server:'http://127.0.0.1:8443',token:'TOKEN'}));
+ t.mock.method(LocalPentagiRuntime.prototype,'prepare',async()=>({server:'http://127.0.0.1:8443',token:'TOKEN',executionTarget:'http://172.30.0.10:3000/',isolationVerified:true}));
  t.mock.method(LocalPentagiRuntime.prototype,'cleanup',async()=>{cleaned++;});
+ t.mock.method(LocalPentagiRuntime.prototype,'events',async()=>[]);
+ t.mock.method(require('../out/security/redTeamCapacity'),'ensureRedTeamCapacity',async()=>{});
  t.mock.method(PentagiClient.prototype,'providers',async()=>['openai']);
  t.mock.method(PentagiClient.prototype,'start',async()=>({id:'1',title:'check',status:'running',createdAt:''}));
  t.mock.method(PentagiClient.prototype,'snapshot',async()=>{snapshots++;return {flow:{id:'1',title:'check',status:finished?'finished':'waiting',createdAt:''},tasks:[{id:'1',title:'partial',status:'waiting',result:'Only one route tested'}]};});
@@ -106,7 +118,7 @@ test('managed runtime keeps model credentials outside worker arguments and remov
  const runtime=new LocalPentagiRuntime(id,async(args,options={})=>{
   calls.push({args,options});
   if(args[0]==='context')return 'unix:///var/run/docker.sock';
-  if(args[0]==='info')return 'linux|8589934592|4';
+  if(args[0]==='info')return 'linux|8589934592|4';if(args.includes('getent'))return '192.168.65.254 host.docker.internal';if(args.includes('image')&&args.includes('inspect'))return 'sha256:'+'1'.repeat(64);
   if(args.includes('psql')&&options.input.startsWith('SELECT'))return '1';
   if(args[0]==='port')return '127.0.0.1:49152';
   if(args[0]==='create'&&args.includes(id+'-app'))assert.equal(targetPrepared,true);
@@ -117,6 +129,7 @@ test('managed runtime keeps model credentials outside worker arguments and remov
  const app=calls.find(c=>c.args[0]==='create'&&c.args.includes(id+'-app'));
  const vars=Object.fromEntries(app.args.filter((_,i,a)=>a[i-1]==='-e'&&a[i].includes('=')).map(v=>{const n=v.indexOf('=');return [v.slice(0,n),v.slice(n+1)];}));
  assert.equal(vars.DOCKER_NETWORK,'recoder-isolated');assert.equal(vars.DOCKER_ALLOWED_IMAGES,worker);
+ assert.ok(!calls.find(c=>c.args[0]==='run'&&c.args.includes(id+'-engine')).args.includes('--feature=containerd-snapshotter=false'),'managed engine configuration is preserved');
  // Pinned upstream browser.IsAvailable uses nonempty URLs as its availability flag.
  assert.equal(Boolean(vars.SCRAPER_PRIVATE_URL||vars.SCRAPER_PUBLIC_URL),false);
  assert.equal(Number(vars.TERMINAL_TOOL_TIMEOUT),120);assert.equal(Number(vars.HTTP_CLIENT_TIMEOUT),120);

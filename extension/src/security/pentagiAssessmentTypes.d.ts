@@ -3,6 +3,8 @@ export interface AssessmentCheck {kind:CheckKind;status:'tested'|'blocked'|'not_
 export interface AssessmentFinding {
  title:string;kind:CheckKind;route:string;observation:string;remediation:string;
  request:string;response:string;controlRequest:string;controlResponse:string;
- evidence:'agent_reported';cvss?:{vector:string;score:number};
+ evidence:'agent_reported'|'http_observed';cvss?:{vector:string;score:number};
 }
 export interface PentagiAssessment {schema:1;status:'review_required'|'incomplete';checks:AssessmentCheck[];findings:AssessmentFinding[];warnings:string[];limitations:string[]}
+
+export interface RedTeamHttpEvent {id:number;method:string;path:string;status:number;durationMs:number;blocked:boolean}

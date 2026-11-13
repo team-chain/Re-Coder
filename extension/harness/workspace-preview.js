@@ -28,6 +28,7 @@ if (process.env.HARNESS_SECURITY === '1') {
   require('../out/security/redTeamHost').RedTeamHost.prototype.handle=async action=>{
     if(process.env.HARNESS_REDTEAM_PROGRESS==='1'){
       if(action==='localStart'){redteamPolls=0;sampleRun={session:'ui-fixture',target:'http://localhost:3000/ · UI 예시',createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),phase:'running',step:'UI 예시 · SQL 입력과 대조 응답 검사',tasks:[{id:'1',title:'앱 경로 탐색',status:'finished',result:'UI 예시: /search 입력 확인'},{id:'2',title:'SQL 입력 · 대조 응답 비교',status:'running',result:''}]};}
+      if(action==='localStart')Object.assign(sampleRun,{target:'http://localhost:3000/',isolationVerified:true,httpEvents:[{id:1,method:'GET',path:'/search',status:200,durationMs:42,blocked:false},{id:2,method:'GET',path:'/search',status:200,durationMs:58,blocked:false}]});
       if(action==='localStatus'&&sampleRun&&sampleRun.phase==='running'){
         redteamPolls++;
         if(redteamPolls===1)throw Error('UI 예시 · 일시적 연결 끊김');

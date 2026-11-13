@@ -41,3 +41,33 @@ test('remote waiting with completed tasks is terminal but an unstructured report
  await host.handle('start','project');const result=await host.handle('status','project');
  assert.equal(result.runs[0].terminal,true);assert.equal(result.assessment.status,'incomplete');assert.equal(result.assessment.checks.filter(c=>c.status==='not_tested').length,5);
 });
+test('connections remain workspace scoped while another workspace changes server',async t=>{
+ const data=new Map(),secrets=new Map([['recoder.pentagi.connection.v1',JSON.stringify({server:'https://a.example',token:'A_FAKE'})]]);
+ const host=new RedTeamHost({get:async k=>secrets.get(k),store:async(k,v)=>secrets.set(k,v)},{get:(k,f)=>data.get(k)??f,update:async(k,v)=>data.set(k,structuredClone(v))});
+ t.mock.method(PentagiClient.prototype,'providers',async()=>['openai']);
+ t.mock.method(PentagiClient.prototype,'start',async()=>({id:'1',status:'running'}));
+ let stoppedServer; t.mock.method(PentagiClient.prototype,'stop',async function(){stoppedServer=this.base;});
+ t.mock.method(PentagiClient.prototype,'snapshot',async()=>({flow:{id:'1',status:'waiting'},tasks:[]}));
+ t.mock.method(PentagiClient.prototype,'evidence',async()=>[]);
+ mock.window.showQuickPick=async()=> 'openai';mock.window.showInputBox=async()=> 'http://host.docker.internal:3000';mock.window.showWarningMessage=async()=> '범위를 확인했고 실행';
+ await host.handle('start','A');
+ const answers=['https://b.example','B_FAKE'];mock.window.showInputBox=async()=>answers.shift();
+ await host.handle('configure','B');
+ const result=await host.handle('stop','A');
+ assert.equal(stoppedServer,'https://a.example');assert.equal(result.runs[0].terminal,true);
+ assert.equal(JSON.stringify([...data]).includes('A_FAKE'),false);
+ assert.equal((await host.handle('status','B')).server,'https://b.example');
+});
+test('legacy orphan can reconnect to its original server and rotate expired credentials',async t=>{
+ const data=new Map(),secrets=new Map([['recoder.pentagi.connection.v1',JSON.stringify({server:'https://wrong.example',token:'OLD_FAKE'})]]);
+ const key='security.redteam.'+require('node:crypto').createHash('sha256').update('A').digest('hex');
+ data.set(key,[{id:'9',server:'https://original.example',target:'http://localhost:3000',createdAt:'',terminal:false}]);
+ const host=new RedTeamHost({get:async k=>secrets.get(k),store:async(k,v)=>secrets.set(k,v)},{get:(k,f)=>data.get(k)??f,update:async(k,v)=>data.set(k,structuredClone(v))});
+ t.mock.method(PentagiClient.prototype,'providers',async()=>['openai']);
+ await assert.rejects(()=>host.handle('status','A'),/다시 연결/);
+ let answers=['https://different.example'];mock.window.showInputBox=async()=>answers.shift();
+ await assert.rejects(()=>host.handle('configure','A'),/원래 서버/);
+ answers=['https://original.example','NEW_FAKE'];
+ const result=await host.handle('configure','A');
+ assert.equal(result.server,'https://original.example');assert.equal(result.runs[0].terminal,false);
+});

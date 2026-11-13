@@ -4,8 +4,10 @@ import {randomBytes} from 'crypto';
 import {promises as fs} from 'fs';
 import * as path from 'path';
 import {AI_KEY_SECRET} from '../ai/aiKeyEnv';
-import {LocalPentagiRuntime, LocalProvider, LocalReport, localTarget, readReport, saveReport, sessionPaths} from './localPentagi';
-import {assessPentagi,assessmentMarkdown} from './pentagiAssessment';
+import {LocalPentagiRuntime, LocalProvider, LocalReport, localTarget, readReport, saveReport, sessionPaths, localAssessment} from './localPentagi';
+import {assessmentMarkdown} from './pentagiAssessment';
+import {AccessPolicy,accessKey,validateAccessPolicy} from './redTeamAccess';
+import {configureAccess} from './redTeamAccessHost';
 
 function alive(pid?:number) {if(!pid) return false; try {process.kill(pid,0);return true;} catch {return false;}}
 const providerOptions: Array<vscode.QuickPickItem & {provider:LocalProvider}> = [
@@ -27,6 +29,10 @@ export class LocalPentagiHost {
     async handle(action:string, workspace:string):Promise<Record<string,unknown>> {
         if(!this.root || !this.secrets) throw new Error('검사 환경 저장소를 사용할 수 없습니다.');
         let reports=await this.reports(workspace); let current=reports[0];
+        if(action==='localAccessConfigure') {
+            if(!await configureAccess(this.secrets,workspace,current?.target))return {cancelled:true};
+        }
+        if(action==='localAccessClear')await this.secrets.delete(accessKey(workspace));
         if(action==='localKey') {
             const choice=await vscode.window.showQuickPick(providerOptions,{title:'레드팀 모델 공급자 선택'});
             if(!choice) return {cancelled:true};
@@ -40,6 +46,10 @@ export class LocalPentagiHost {
             if((await this.reports()).some(r=>r.phase!=='removed')) throw new Error('다른 프로젝트의 검사 환경이 남아 있습니다. 해당 프로젝트에서 중단하거나 정리하세요. 로컬 검사는 한 번에 하나만 실행합니다.');
             const input=await vscode.window.showInputBox({title:'내 앱 레드팀 테스트',prompt:'로컬에서 실행 중인 내 테스트 앱 주소와 포트',value:'http://localhost:3000',ignoreFocusOut:true});
             if(!input) return {cancelled:true}; const target=localTarget(input.trim());
+            const storedAccess=await this.secrets.get(accessKey(workspace));
+            let accessPolicy:AccessPolicy|undefined;
+            try {if(storedAccess)accessPolicy=validateAccessPolicy(JSON.parse(storedAccess),target);}
+            catch {throw new Error('권한 검사 설정이 현재 대상과 맞지 않거나 손상되었습니다. 권한 검사 설정을 변경하거나 해제하세요.');}
             const choice=await vscode.window.showQuickPick(providerOptions,{title:'레드팀 검사 모델 공급자'});
             if(!choice) return {cancelled:true};
             let apiKey=await this.secrets.get(localKeyName(choice.provider)) || await this.secrets.get(AI_KEY_SECRET[choice.provider]);
@@ -49,7 +59,7 @@ export class LocalPentagiHost {
             }
             if(apiKey.trim().length>4096 || /[\r\n]/.test(apiKey)) throw new Error('API 키 형식을 확인하세요.');
             const approved=await vscode.window.showWarningMessage('PentAGI 레드팀 검사를 시작할까요?',{modal:true,detail:
-                `대상: ${target}\n모델: ${choice.label}\n\n내가 소유하거나 명시적으로 검사 권한을 받은 로컬 앱만 검사하세요. PentAGI EULA(https://github.com/vxcontrol/pentagi/blob/main/EULA.md)가 적용됩니다.\n\n공식 PentAGI·PostgreSQL·전용 Docker-in-Docker 이미지를 내려받고 검사 환경을 만듭니다. 중요: 입력한 대상은 localhost로 제한하지만, PentAGI 에이전트의 인터넷·네트워크 접근을 방화벽으로 대상에 한정하지는 않습니다. 프롬프트의 범위 지시는 강제 격리가 아닙니다. 운영·공유망이 아닌, 민감 데이터가 없는 격리된 테스트 환경에서만 진행하세요. Docker Desktop Linux 엔진에 메모리 6GB·CPU 2개, 디스크 여유 공간 25GB가 필요합니다. 전용 엔진은 Linux VM 안에서 privileged로 동작하지만 호스트 Docker 소켓과 프로젝트 소스는 전달하지 않습니다. PentAGI가 앱 응답을 선택한 모델 공급자에 보낼 수 있고, 해당 공급자 사용료가 발생합니다. 설치·버전 확인을 위해 PentAGI가 비식별 설치 요약을 업데이트 서비스에 보낼 수 있습니다.\n\n환경 준비는 최대 60분, 검사는 최대 30분입니다. 결과를 저장한 뒤 전용 컨테이너·볼륨·네트워크를 삭제하고 이미지 캐시는 유지합니다. VS Code를 닫아도 작업은 이어집니다.`},'EULA·범위를 확인했고 검사 시작');
+                `대상: ${target}\n모델: ${choice.label}\n\n내가 소유하거나 명시적으로 검사 권한을 받은 로컬 앱만 검사하세요. PentAGI EULA(https://github.com/vxcontrol/pentagi/blob/main/EULA.md)가 적용됩니다.\n\n공식 PentAGI·PostgreSQL·전용 Docker-in-Docker 이미지를 내려받고 검사 환경을 만듭니다. 검사 도구는 외부 연결이 없는 네트워크에서 실행하고 승인한 앱의 경로만 HTTP로 중계합니다. 최대 300개 요청, GET·HEAD·OPTIONS·POST만 허용합니다. 민감 데이터가 없는 테스트 앱을 사용하세요. 권한 검사 설정이 있으면 테스트 사용자별 소유 리소스와 비로그인·교차 접근을 GET 요청 6개로 대조합니다. 인증값은 모델에 전달하지 않습니다. Docker Desktop Linux 엔진에 메모리 6GB·CPU 2개, 디스크 여유 공간 50GB가 필요합니다. 전용 엔진은 Linux VM 안에서 privileged로 동작하지만 호스트 Docker 소켓과 프로젝트 소스는 전달하지 않습니다. PentAGI가 앱 응답을 선택한 모델 공급자에 보낼 수 있고, 해당 공급자 사용료가 발생합니다. 설치·버전 확인을 위해 PentAGI가 비식별 설치 요약을 업데이트 서비스에 보낼 수 있습니다.\n\n환경 준비는 최대 60분, 검사는 최대 30분입니다. 결과를 저장한 뒤 전용 컨테이너·볼륨·네트워크를 삭제하고 이미지 캐시는 유지합니다. VS Code를 닫아도 작업은 이어집니다.`},'EULA·범위를 확인했고 검사 시작');
             if(approved!=='EULA·범위를 확인했고 검사 시작') return {cancelled:true};
             // Serialize all windows at the filesystem boundary, after the slow native prompts.
             const lockPath=path.join(this.root,'start.lock');
@@ -76,7 +86,7 @@ export class LocalPentagiHost {
                     await new Promise<void>((resolve,reject)=>{child.once('spawn',resolve);child.once('error',()=>reject(new Error('검사 작업 프로세스를 시작하지 못했습니다.')));});
                     current.pid=child.pid; await saveReport(this.root,current);
                     child.stdin.on('error',()=>{});
-                    child.stdin.end(JSON.stringify({root:this.root,session,workspace,target,apiKey:apiKey.trim(),provider:choice.provider}));child.unref();
+                    child.stdin.end(JSON.stringify({root:this.root,session,workspace,target,apiKey:apiKey.trim(),provider:choice.provider,accessPolicy}));child.unref();
                 } catch {current.phase='cleanup_failed';current.outcome='failed';current.step='작업 시작 실패 · 환경 정리 필요';await saveReport(this.root,current);throw new Error(current.step);}
             } finally {await lock.close();await fs.unlink(lockPath);}
         } else if(action==='localStop') {
@@ -90,7 +100,7 @@ export class LocalPentagiHost {
                 await saveReport(this.root,current);
             }
         } else if(action==='localOpenReport') {
-            if(current) await vscode.window.showTextDocument(await vscode.workspace.openTextDocument({language:'markdown',content:assessmentMarkdown(assessPentagi(current.tasks,current.evidence,current.target),current)}),{preview:true});
+            if(current) await vscode.window.showTextDocument(await vscode.workspace.openTextDocument({language:'markdown',content:assessmentMarkdown(localAssessment(current),current)}),{preview:true});
         } else if(action==='localOpenRawReport') {
             if(current) await vscode.window.showTextDocument(await vscode.workspace.openTextDocument({language:'json',content:JSON.stringify(current,null,2)}),{preview:true});
         }
@@ -100,6 +110,6 @@ export class LocalPentagiHost {
             current.phase='cleanup_failed';current.outcome='interrupted';current.step='작업이 예기치 않게 종료되었습니다. 환경 정리가 필요합니다.';
             await saveReport(this.root,current);
         }
-        return {local:current||null,localHistory:reports.slice(1,20),localMode:true};
+        return {local:current||null,localHistory:reports.slice(1,20),localMode:true,accessConfigured:!!(await this.secrets.get(accessKey(workspace)))};
     }
 }

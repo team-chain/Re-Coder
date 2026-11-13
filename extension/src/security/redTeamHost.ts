@@ -20,28 +20,38 @@ export class RedTeamHost {
                 if (!this.localRoot) throw new Error('로컬 검사 저장소를 사용할 수 없습니다.');
                 return await new LocalPentagiHost(this.localRoot, this.secrets).handle(action, workspace);
             }
+            const key = this.key(workspace);
+            const connectionKey = `${SECRET}.${key}`;
             let connection: {server: string; token: string} | null = null;
             try {
-                connection = JSON.parse(await this.secrets.get(SECRET) || 'null');
-                if (connection && (typeof connection.server !== 'string' || typeof connection.token !== 'string')) throw new Error();
+                const scoped = await this.secrets.get(connectionKey);
+                connection = JSON.parse(scoped || await this.secrets.get(SECRET) || 'null');
+                if (connection && (typeof connection.server !== 'string' || typeof connection.token !== 'string' || !connection.token.trim() || connection.token.length>8192 || /[\r\n]/.test(connection.token))) throw new Error();
+                if (connection) {
+                    connection.server=serviceUrl(connection.server);
+                    // Preserve the existing connection, but bind it to this workspace before another
+                    // window can configure a different server. Never store credentials in Memento.
+                    if (!scoped) await this.secrets.store(connectionKey, JSON.stringify(connection));
+                }
             } catch {
                 // JSON parse errors may contain fragments of the stored credential.
                 if (action !== 'configure') throw new Error('PentAGI 연결 정보를 읽지 못했습니다. 연결 설정을 다시 입력하세요.');
                 connection = null;
             }
-            const key = this.key(workspace);
             const stored = this.state.get<Run[]>(key, []);
             if (!Array.isArray(stored)) throw new Error('레드팀 실행 기록을 읽지 못했습니다. 서버 실행 목록을 확인하세요.');
             let runs = stored;
             if (action === 'configure') {
-                if (runs.some(r => !r.terminal)) throw new Error('진행 중이거나 확인되지 않은 실행을 먼저 확인·중단하세요.');
-                const serverInput = await vscode.window.showInputBox({title: 'PentAGI 서버 연결', prompt: '직접 운영하는 PentAGI 기본 주소 (원격은 HTTPS)', value: connection?.server || 'https://localhost:8443', ignoreFocusOut: true});
+                const active = runs.find(r => !r.terminal);
+                const serverInput = await vscode.window.showInputBox({title: 'PentAGI 서버 연결', prompt: '직접 운영하는 PentAGI 기본 주소 (원격은 HTTPS)', value: active?.server || connection?.server || 'https://localhost:8443', ignoreFocusOut: true});
                 if (!serverInput) return {cancelled: true};
                 const server = serviceUrl(serverInput.trim());
+                if (active && server !== active.server) throw new Error('진행 중인 검사의 원래 서버로만 재연결할 수 있습니다. 먼저 해당 검사를 확인·중단하세요.');
                 const token = await vscode.window.showInputBox({title: 'PentAGI API 토큰', prompt: 'PentAGI Settings → API Tokens. VS Code 보안 저장소에만 보관합니다.', password: true, ignoreFocusOut: true});
                 if (!token) return {cancelled: true};
+                if(token.length>8192 || /[\r\n]/.test(token)) throw new Error('PentAGI API 토큰 형식을 확인하세요.');
                 const providers = await new PentagiClient(server, token).providers();
-                await this.secrets.store(SECRET, JSON.stringify({server, token}));
+                await this.secrets.store(connectionKey, JSON.stringify({server, token}));
                 return {configured: true, server, providers, runs};
             }
             if (!connection) return {configured: false, runs};
@@ -93,7 +103,7 @@ export class RedTeamHost {
                 await this.state.update(key, runs);
                 let evidence,reportError;
                 if(run.terminal){try{evidence=await client.evidence(run.id);}catch{reportError='상세 보고서를 받지 못했습니다. 마지막 작업 결과를 표시합니다. 상태 확인으로 다시 가져올 수 있습니다.';}}
-                return {configured: true, server: connection.server, runs, ...snapshot,evidence,reportError,assessment:run.terminal?assessPentagi(snapshot.tasks,evidence,run.target):undefined};
+                return {configured: true, server: connection.server, runs, ...snapshot,outcome:run.stopped?'cancelled':outcome,evidence,reportError,assessment:run.terminal?assessPentagi(snapshot.tasks,evidence,run.target):undefined};
             }
             return {configured: true, server: connection.server, providers: await client.providers(), runs};
         } finally { this.busy = false; }

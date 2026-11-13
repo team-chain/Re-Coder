@@ -106,11 +106,11 @@ export function assessPentagi(tasks:Array<{result:string}>=[],evidence:Array<{me
 
 export function assessmentMarkdown(a:PentagiAssessment,meta?:{target?:string;createdAt?:string;provider?:string;outcome?:string;phase?:string}):string {
     const clean=(s:string)=>s.replace(/[\r\n]/g,' ').replace(/[<>]/g,'');
-    const lines=['# ReCoder 레드팀 진단 보고서','','실행 완료와 보안 통과는 다릅니다. 아래는 모델이 제시한 근거이며 검토가 필요합니다.'];
+    const lines=['# ReCoder 레드팀 진단 보고서','','직접 HTTP 대조 결과와 AI가 제시한 후보를 구분해 표시합니다. 검사한 경로 외의 안전성을 보증하지 않습니다.'];
     if(meta)for(const [label,value] of [['대상',meta.target],['시작',meta.createdAt],['공급자',meta.provider],['실행 결과',meta.outcome],['환경 상태',meta.phase]])if(value)lines.push(`- ${label}: ${clean(value)}`);
     lines.push('','## 검사 범위');
     for(const c of a.checks)lines.push(`- ${c.kind}: ${c.status} — ${clean(c.reason)}`);
-    for(const f of a.findings){lines.push('',`## ${clean(f.title)}`,`경로: ${clean(f.route)}`,clean(f.observation),`조치: ${clean(f.remediation)}`);if(f.cvss)lines.push(`CVSS 3.1 (벡터로 계산, 영향은 검토 필요): ${f.cvss.score} · ${f.cvss.vector}`);
+    for(const f of a.findings){lines.push('',`## ${clean(f.title)}`,`경로: ${clean(f.route)}`,`근거: ${f.evidence==='http_observed'?'직접 HTTP 응답 대조':'AI 보고 · 독립 검증 전'}`,clean(f.observation),`조치: ${clean(f.remediation)}`);if(f.cvss)lines.push(`CVSS 3.1 (벡터로 계산, 영향은 검토 필요): ${f.cvss.score} · ${f.cvss.vector}`);
         for(const [label,text] of [['요청',f.request],['응답',f.response],['대조 요청',f.controlRequest],['대조 응답',f.controlResponse]]){const fence='`'.repeat(Math.max(3,...(text.match(/`+/g)||[]).map(x=>x.length+1)));lines.push('',label,fence+'text',text,fence);}}
     lines.push('','## 미검증·보고서 주의 사항',...a.warnings.map(x=>'- '+clean(x)),...a.limitations.map(x=>'- '+clean(x)));
     return lines.join('\n');

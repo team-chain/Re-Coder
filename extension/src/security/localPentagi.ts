@@ -4,6 +4,9 @@ import {promises as fs} from 'fs';
 import * as path from 'path';
 import {PentagiClient, PentagiFlow, PentagiTask, PentagiEvidence, pentagiOutcome, testTarget} from './pentagiClient';
 import {assessPentagi,PentagiAssessment,redactDiagnostic} from './pentagiAssessment';
+import {LOCAL_WORKER,SCOPE_NETWORK,prepareLocalScope,scopeEvents,RedTeamHttpEvent} from './localRedTeamScope';
+import {AccessPolicy,AccessResult,runAccessChecks,validateAccessPolicy,withAccessResult} from './redTeamAccess';
+import {ensureRedTeamCapacity} from './redTeamCapacity';
 
 // Official Docker Hub index digests; updates require an integration check against the upstream release.
 export const PENTAGI_IMAGES = {
@@ -21,9 +24,15 @@ export type LocalPhase = 'preparing'|'running'|'saving'|'cleaning'|'removed'|'cl
 export interface LocalReport {
     session: string; workspace: string; target: string; createdAt: string; updatedAt: string;
     phase: LocalPhase; step: string; pid?: number; server?: string; provider?: LocalProvider;
+    executionTarget?:string; isolationVerified?:boolean; httpEvents?:RedTeamHttpEvent[]; access?:AccessResult;
     outcome?: 'finished'|'failed'|'cancelled'|'timed_out'|'interrupted'|'needs_input'; error?: string;
     flow?: PentagiFlow; tasks?: PentagiTask[]; evidence?:PentagiEvidence[];
-    assessment?:PentagiAssessment;
+    assessment?:PentagiAssessment; evidenceUnavailable?:boolean;
+}
+export function localAssessment(report:LocalReport):PentagiAssessment {
+    const assessment=withAccessResult(assessPentagi(report.tasks,report.evidence,report.executionTarget||report.target),report.access);
+    if(report.evidenceUnavailable){assessment.status='incomplete';assessment.warnings.push('상세 보고서를 수집하지 못했습니다. 저장된 일부 근거만 확인할 수 있습니다.');}
+    return assessment;
 }
 export interface DockerOptions {env?: Record<string,string>; input?: string; timeout?: number; signal?: AbortSignal;}
 export type DockerRun = (args: string[], options?: DockerOptions) => Promise<string>;
@@ -73,7 +82,7 @@ export async function readReport(root: string, session: string): Promise<LocalRe
     }
     if (data.session !== session || !['preparing','running','saving','cleaning','removed','cleanup_failed'].includes(data.phase)) throw new Error('검사 기록 형식이 올바르지 않습니다.');
     // Recompute for historical journals too. Never trust a persisted model's score or verdict.
-    if(data.phase==='removed'||data.phase==='cleanup_failed')data.assessment=assessPentagi(data.tasks,data.evidence,data.target);
+    if(data.phase==='removed'||data.phase==='cleanup_failed')data.assessment=localAssessment(data);
     return data;
 }
 export function redactReport(report: LocalReport, secrets: string[]): LocalReport {
@@ -96,19 +105,19 @@ export class LocalPentagiRuntime {
     async cleanup(): Promise<void> {
         // Only exact resources created by this session AND bearing its owner label.
         // Never compose down, prune, glob names, remove shared images or touch target containers.
-        for (const suffix of ['app','bootstrap','engine','db']) {
+        for (const suffix of ['app','bootstrap','cache','engine','db']) {
             const name = this.name(suffix);
             const names = await this.run(['container','ls','-a','--filter',`label=${OWNER}=${this.session}`,'--format','{{.Names}}']);
             if (names.split(/\r?\n/).includes(name)) await this.run(['container','rm','-f','-v',name]);
         }
-        for (const suffix of ['engine-data','db-data','app-data']) {
+        for (const suffix of ['engine-data','db-data','app-data','cache-data']) {
             const name = this.name(suffix); if (await this.owned('volume',name)) await this.run(['volume','rm',name]);
         }
         for (const suffix of ['runtime','database']) {
             const name = this.name(suffix); if (await this.owned('network',name)) await this.run(['network','rm',name]);
         }
     }
-    async prepare(apiKey: string, provider: LocalProvider|'bedrock', progress: (step: string) => Promise<void>, managed?: ManagedPentagiOptions): Promise<{server: string; token: string}> {
+    async prepare(apiKey: string, provider: LocalProvider|'bedrock', progress: (step: string) => Promise<void>, managed?: ManagedPentagiOptions, target?:string): Promise<{server: string; token: string;executionTarget?:string;isolationVerified?:boolean}> {
         if(provider==='bedrock' && !managed) throw new Error('검사 관리형 실행 설정이 필요합니다.');
         await progress('Docker 확인');
         const endpoint=process.env.DOCKER_HOST || await this.run(['context','inspect','--format','{{(index .Endpoints "docker").Host}}']);
@@ -133,19 +142,31 @@ export class LocalPentagiRuntime {
         await this.run(['run',...common,'--name',this.name('db'),'--network',this.name('database'),'--network-alias','pgvector','--memory','768m','--pids-limit','256',
             '-e','POSTGRES_PASSWORD','-e','POSTGRES_DB=pentagidb','-v',`${this.name('db-data')}:/var/lib/postgresql/data`,PENTAGI_IMAGES.db], {env:{POSTGRES_PASSWORD:dbPassword}});
         await this.run(['run',...common,'--name',this.name('engine'),'--network',this.name('runtime'),'--network-alias','engine','--privileged','--memory','3g','--cpus','2','--pids-limit','2048',
-            '-e','DOCKER_TLS_CERTDIR=','-v',`${this.name('engine-data')}:/var/lib/docker`,PENTAGI_IMAGES.engine,'dockerd','--host=unix:///var/run/docker.sock','--host=tcp://0.0.0.0:2375','--tls=false',...(managed?['--dns=1.1.1.1']:[])]);
+            '-e','DOCKER_TLS_CERTDIR=','-v',`${this.name('engine-data')}:/var/lib/docker`,PENTAGI_IMAGES.engine,'dockerd','--host=unix:///var/run/docker.sock','--host=tcp://0.0.0.0:2375','--tls=false',
+            // Only this disposable local engine: avoid a second content-store copy
+            // of the large uncompressed toolbox archive. Never change the host daemon.
+            ...(managed?['--dns=1.1.1.1']:['--feature=containerd-snapshotter=false','--storage-driver=overlay2'])]);
         await this.until(async () => {await this.run(['exec',this.name('db'),'pg_isready','-U','postgres','-d','pentagidb']);}, progress, 'DB 시작 대기', 120000);
         await this.until(async () => {await this.run(['exec',this.name('engine'),'docker','info','--format','{{.ServerVersion}}']);}, progress, '검사 엔진 시작 대기', 120000);
+        let executionTarget:string|undefined;
         if(managed) await managed.prepareTarget(this.name('engine'));
+        else {
+            if(!target)throw new Error('검사 범위가 없습니다. 대상을 다시 선택하세요.');
+            await progress('대상 전용 네트워크 격리 확인');
+            executionTarget=await prepareLocalScope(this.name('engine'),target,this.run,progress);
+        }
         // No host Docker socket, no project directory mount. The nested engine owns all workers.
         const providerEnv:Record<string,string> = managed ? managed.bedrockEnv : provider === 'openai' ? {OPEN_AI_KEY:apiKey} : {ANTHROPIC_API_KEY:apiKey};
         const providerEnvArgs = Object.keys(providerEnv).flatMap(k=>['-e',k]);
         const env = {...providerEnv, DATABASE_URL:`postgres://postgres:${dbPassword}@pgvector:5432/pentagidb?sslmode=disable`, COOKIE_SIGNING_SALT:randomBytes(32).toString('hex')};
         const appArgs = ['--network',this.name('runtime'),'--memory','1536m','--cpus','2','--pids-limit','512','--user','root:root',
             ...providerEnvArgs,'-e','DATABASE_URL','-e','COOKIE_SIGNING_SALT','-e','DOCKER_HOST=tcp://engine:2375','-e','DOCKER_INSIDE=false','-e','DOCKER_NET_ADMIN=false',
-            // "host" here is the dedicated DinD network namespace, NOT the user's host.
-            // It preserves Docker Desktop's host.docker.internal DNS for nested workers.
-            '-e',`DOCKER_NETWORK=${managed?'recoder-isolated':'host'}`,
+            // Workers only reach the fixed-upstream relay inside the isolated network.
+            '-e',`DOCKER_NETWORK=${SCOPE_NETWORK}`,
+            ...(!managed?['-e',`DOCKER_DEFAULT_IMAGE=${LOCAL_WORKER}`,'-e',`DOCKER_DEFAULT_IMAGE_FOR_PENTEST=${LOCAL_WORKER}`,
+                '-e',`DOCKER_ALLOWED_IMAGES=${LOCAL_WORKER}`,'-e','DOCKER_IMAGE_SELECTION_MODE=fixed',
+                '-e','DUCKDUCKGO_ENABLED=false','-e','SPLOITUS_ENABLED=false','-e','SCRAPER_PRIVATE_URL=','-e','SCRAPER_PUBLIC_URL=',
+                '-e','TERMINAL_TOOL_TIMEOUT=120','-e','HTTP_CLIENT_TIMEOUT=120','-e','EXECUTION_MONITOR_ENABLED=true','-e','EXECUTION_MONITOR_TOTAL_TOOL_LIMIT=80']:[]),
             ...(managed?['-e',`DOCKER_DEFAULT_IMAGE=${managed.workerImage}`,'-e',`DOCKER_DEFAULT_IMAGE_FOR_PENTEST=${managed.workerImage}`,
                 '-e',`DOCKER_ALLOWED_IMAGES=${managed.workerImage}`,'-e','DOCKER_IMAGE_SELECTION_MODE=fixed',
                 '-e','BEDROCK_CONFIG_PATH=/opt/pentagi/recoder-bedrock.yml','--mount',`type=bind,src=${managed.configPath},dst=/opt/pentagi/recoder-bedrock.yml,readonly`,
@@ -183,8 +204,9 @@ export class LocalPentagiRuntime {
         if (!response.ok) throw new Error('PentAGI 임시 API 토큰 생성에 실패했습니다.');
         const body = await response.json() as {data?:{token?:string}};
         if (typeof body.data?.token !== 'string') throw new Error('PentAGI 임시 토큰 응답 형식이 올바르지 않습니다.');
-        return {server,token:body.data.token};
+        return {server,token:body.data.token,executionTarget,isolationVerified:!managed};
     }
+    async events() { return scopeEvents(this.name('engine'),this.run); }
     private async sql(input: string) {return this.run(['exec','-i',this.name('db'),'psql','-U','postgres','-d','pentagidb','-At','-v','ON_ERROR_STOP=1'],{input});}
     private async until(check: () => Promise<void>, progress: (s:string)=>Promise<void>, message: string, timeout: number) {
         const deadline = Date.now()+timeout;
@@ -195,14 +217,15 @@ export class LocalPentagiRuntime {
         throw new Error(`${message} 시간이 초과되었습니다. 검사 환경을 정리합니다.`);
     }
 }
-export interface LocalRequest {root:string; session:string; workspace:string; target:string; apiKey:string; provider:LocalProvider;}
+export interface LocalRequest {root:string; session:string; workspace:string; target:string; apiKey:string; provider:LocalProvider;accessPolicy?:AccessPolicy;}
 export async function executeLocalTest(request: LocalRequest): Promise<void> {
     const {root,session,workspace,apiKey,provider} = request;
     const paths = sessionPaths(root,session); const target = localTarget(request.target);
     const controller=new AbortController();
     const runtime = new LocalPentagiRuntime(session,(args,options)=>docker(args,{...options,signal:controller.signal}));
     const report: LocalReport = {session,workspace,target,provider,createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),pid:process.pid,phase:'preparing',step:'검사 환경 준비'};
-    const secrets=[apiKey];
+    if(request.accessPolicy)validateAccessPolicy(request.accessPolicy,target);
+    const secrets=[apiKey,...(request.accessPolicy?.users.map(u=>u.credential)||[])];
     const persist=()=>saveReport(root,redactReport(report,secrets));
     await persist(); // Ownership journal exists before Docker mutations.
     let client: PentagiClient | undefined; let lastSaved = 0;
@@ -214,19 +237,27 @@ export async function executeLocalTest(request: LocalRequest): Promise<void> {
         report.step=step; await persist();
     };
     try {
-        const connection = await runtime.prepare(apiKey,provider,progress); report.server=connection.server;
+        await ensureRedTeamCapacity(root);
+        const connection = await runtime.prepare(apiKey,provider,progress,undefined,target); report.server=connection.server;
+        if(!connection.isolationVerified||!connection.executionTarget)throw new Error('검사 네트워크 격리를 확인하지 못했습니다. 실행을 중단합니다.');
+        report.executionTarget=connection.executionTarget;report.isolationVerified=true;
         secrets.push(connection.token);
+        if(request.accessPolicy) {
+            report.access=await runAccessChecks(request.accessPolicy,controller.signal,progress);
+            await persist();
+        }
         client = new PentagiClient(connection.server,connection.token);
         const providers = await client.providers();
         if (!providers.includes(provider)) throw new Error(`PentAGI ${provider} 공급자가 준비되지 않았습니다.`);
         deadline=Date.now()+30*60*1000;
         await progress('검사 시작');
-        report.flow = await client.start(target,provider); report.phase='running'; await persist();
+        report.flow = await client.start(report.executionTarget,provider); report.phase='running'; await persist();
         while (true) {
             if (await cancelled()) {report.outcome='cancelled'; break;}
             if (Date.now()>deadline) {report.outcome='timed_out'; break;}
             const snapshot = await client.snapshot(report.flow.id);
             report.flow=snapshot.flow; report.tasks=snapshot.tasks; report.step=snapshot.flow.status==='created'?'검사 도구 준비':snapshot.flow.status==='waiting'?'입력 대기':'검사 중';
+            report.httpEvents=await runtime.events().catch(()=>report.httpEvents||[]);
             await persist(); lastSaved=Date.now();
             // No interactive reply channel is exposed here. Retain the partial
             // evidence and release paid resources instead of idling for 30 min.
@@ -246,13 +277,14 @@ export async function executeLocalTest(request: LocalRequest): Promise<void> {
         clearInterval(stopWatcher);
         if(client&&report.flow) {
             try {report.evidence=await client.evidence(report.flow.id);}
-            catch {report.error='상세 보고서를 가져오지 못했습니다. 마지막 저장된 작업 결과만 보관합니다.';}
+            catch {report.evidenceUnavailable=true;report.error='상세 보고서를 가져오지 못했습니다. 마지막 저장된 작업 결과만 보관합니다.';}
         }
         if (client && report.flow && !['finished','failed'].includes(report.flow.status)) {
             await client.finish(report.flow.id).catch(()=>{});
             try {const snapshot = await client.snapshot(report.flow.id); report.flow=snapshot.flow; report.tasks=snapshot.tasks;} catch {if (lastSaved) report.step='마지막으로 저장한 결과';}
         }
-        report.assessment=assessPentagi(report.tasks,report.evidence,target);
+        report.httpEvents=await runtime.events().catch(()=>report.httpEvents||[]);
+        report.assessment=localAssessment(report);
         report.phase='saving'; report.step='결과 저장';
         // If the final write fails, keep earlier snapshots; still stop paid work and remove credentials.
         let saved = true;

@@ -1,0 +1,57 @@
+{
+  "session": "rc-rt-fd12bb4b4202af5351236637",
+  "modelCalls": 0,
+  "stage": "passed",
+  "checks": [
+    "isolated runtime and temporary API authentication",
+    "configured provider discovery without model calls",
+    "actual allowed HTTP, forbidden path/method/traversal and engine access",
+    "actual request telemetry without query secrets",
+    "post-run inspection: no session-owned containers, volumes or networks"
+  ],
+  "startedAt": "2026-11-13T01:07:56.190Z",
+  "http": {
+    "allowed": 200,
+    "outside": 403,
+    "delete": 405,
+    "encodedTraversal": 403,
+    "offScope": "blocked"
+  },
+  "events": [
+    {
+      "id": 1,
+      "method": "GET",
+      "path": "/fixture/allowed",
+      "status": 200,
+      "durationMs": 14,
+      "blocked": false
+    },
+    {
+      "id": 2,
+      "method": "GET",
+      "path": "/outside",
+      "status": 403,
+      "durationMs": 0,
+      "blocked": true
+    },
+    {
+      "id": 3,
+      "method": "DELETE",
+      "path": "/fixture/delete",
+      "status": 405,
+      "durationMs": 0,
+      "blocked": true
+    },
+    {
+      "id": 4,
+      "method": "GET",
+      "path": "/fixture/%2e%2e/outside",
+      "status": 403,
+      "durationMs": 0,
+      "blocked": true
+    }
+  ],
+  "cleaned": true,
+  "completedAt": "2026-11-13T01:22:46.365Z",
+  "scope": "Actual local Docker runtime and HTTP enforcement; no AI flow or model accuracy validation."
+}
