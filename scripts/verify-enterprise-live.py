@@ -221,7 +221,9 @@ def _write(project: Path, arch: dict, files: dict[str, str]) -> None:
 def _summary(res: dict) -> dict:
     return {"status": res.get("status"), "seconds": res.get("seconds"), "output": res.get("output"),
             "checks": [f"{'✓' if c['ok'] else '✗'} {c['name']}" for c in res.get("checks") or []],
-            "failures": [{k: f.get(k) for k in ("kind", "service", "title", "detail")} for f in res.get("failures") or []],
+            #: 실패 원인을 알 수 있게 로그 끝부분도 싣는다(빌드 오류·서비스 로그) — 없으면 "빌드 실패" 한 줄만 남아 고칠 수 없다.
+            "failures": [{**{k: f.get(k) for k in ("kind", "service", "title", "detail")},
+                          "logs": str(f.get("logs") or "")[-1500:]} for f in res.get("failures") or []],
             "cleanup": res.get("cleanup", "ok")}
 
 
@@ -232,7 +234,7 @@ def fixture(work: Path) -> dict:
                                                        "tests": len(architecture.test_cases(arch))}}
     good = work / "good"
     _write(good, arch, FILES)
-    print("1/2 정상 프로젝트를 띄워 검증합니다(첫 실행은 이미지를 받느라 몇 분 걸립니다)…", flush=True)
+    print("1/3 정상 프로젝트를 띄워 검증합니다(첫 실행은 이미지를 받느라 몇 분 걸립니다)…", flush=True)
     res = compose_check.run(good, arch, timeout=1500)
     report["good"] = _summary(res)
     print(json.dumps(report["good"], ensure_ascii=False, indent=1), flush=True)
@@ -243,15 +245,28 @@ def fixture(work: Path) -> dict:
         'def list_orders(authorization: str = Header(default="")):\n    user = "anyone"')
     assert bad_files["services/orders/app/main.py"] != ORDERS
     _write(broken, arch, bad_files)
-    print("2/2 일부러 '로그인 없이 열린 API' 를 넣은 판을 검증합니다…", flush=True)
+    print("2/3 일부러 '로그인 없이 열린 API' 를 넣은 판을 검증합니다…", flush=True)
     res2 = compose_check.run(broken, arch, timeout=1500)
     report["broken"] = _summary(res2)
     issues = compose_check.issues(res2, arch, bad_files)
     report["broken"]["issues"] = [{k: i[k] for k in ("code", "file")} for i in issues]
     print(json.dumps(report["broken"], ensure_ascii=False, indent=1), flush=True)
     caught = any(i["code"] == "CONTRACT_TEST_FAILED" and i["file"] == "services/orders/app/main.py" for i in issues)
+    #: 개발 에이전트가 실제로 쓰는 경로 — 제안 파일을 검증 복사본에 펼쳐(비밀값 가림 포함) 띄운다.
+    #: 1/3 은 파일을 그대로 쓰므로 이 경로의 결함(복사본을 만들며 compose 의 DB 주소를 가려 버림)을 잡지 못했다.
+    import compose_kit
+    import generated_validation
+    print("3/3 개발 에이전트와 같은 경로(검증 복사본)로 정상 프로젝트를 검증합니다…", flush=True)
+    ops = [{"action": "create", "file": name, "content": content} for name, content in FILES.items()] + compose_kit.fixed_ops(arch)
+    empty = work / "generated"
+    empty.mkdir(parents=True, exist_ok=True)
+    res3 = generated_validation.verify_compose(empty, ops, arch, timeout=1500)
+    report["generation_path"] = _summary(res3)
+    print(json.dumps(report["generation_path"], ensure_ascii=False, indent=1), flush=True)
     report["verdict"] = {"good_passed": res.get("status") == "passed", "broken_caught": caught,
-                         "ok": res.get("status") == "passed" and res2.get("status") == "failed" and caught}
+                         "generation_path_passed": res3.get("status") == "passed",
+                         "ok": res.get("status") == "passed" and res2.get("status") == "failed" and caught
+                               and res3.get("status") == "passed"}
     return report
 
 

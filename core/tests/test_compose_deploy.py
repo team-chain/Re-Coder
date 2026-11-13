@@ -363,3 +363,34 @@ def test_local_preflight_does_not_block_multi_service_projects(tmp_path):
     (single / "server.js").write_text("require('express')().listen(3000)", encoding="utf-8")
     res = asyncio.run(routes.deploy_preflight(routes.DeployPreflightRequest(workspace_path=str(single), target="local")))
     assert "MISSING_DOCKERFILE" in {r["code"] for r in res["reasons"]} | {w["code"] for w in res["warnings"]}
+
+
+def test_first_deploy_failure_takes_new_containers_down_and_names_busy_port(tmp_path):
+    """실제 Docker 에서 확인한 것 — 첫 배포가 실패하면 죽은 서비스가 계속 재시작한 채 남았고, 포트 충돌은 '시작 못 함' 으로만 보였다."""
+    ws = project(tmp_path)
+    docker = Docker()
+    real = docker.__call__
+    calls = []
+
+    def run(args, timeout):
+        calls.append(list(args))
+        if "up" in args and "--no-build" in args:
+            return subprocess.CompletedProcess(args, 1, "", "Error response from daemon: failed to set up container networking: "
+                                               "failed to bind host port 127.0.0.1:3000/tcp: address already in use")
+        return real(args, timeout)
+
+    res = asyncio.run(D.deploy(ws, scan=scanner(), docker=run, http=http))
+    assert res["status"] == "failed" and res["stage"] == "deploy" and res["rolled_back"] is False
+    assert "포트 3000 를 이미 다른 프로그램이" in res["message"] and "내렸습니다" in res["message"]
+    assert "끄고 다시 배포" in res["diagnosis"]["fix"]
+    downs = [c for c in calls if "down" in c]
+    assert downs and "--rmi" in downs[-1] and "-v" not in downs[-1] and "--volumes" not in downs[-1]  # 데이터 볼륨은 지우지 않는다
+    assert D.history(ws)[0]["status"] == "failed" and not D.history(ws)[0]["pins"]
+
+
+def test_single_app_port_notice_matches_actual_binding(monkeypatch):
+    from agents.deploy_agent import local_port_reason
+    monkeypatch.delenv("RECODER_LOCAL_BIND", raising=False)
+    assert "이 PC 에서만" in local_port_reason(3000) and "다른 기기" not in local_port_reason(3000)
+    monkeypatch.setenv("RECODER_LOCAL_BIND", "0.0.0.0")
+    assert "다른 기기" in local_port_reason(3000)

@@ -392,3 +392,80 @@ def test_deployed_ports_are_local_only_by_default():
     for s in public:
         assert f'"${{RECODER_LOCAL_BIND:-127.0.0.1}}:{s['port']}:{s['port']}"' in text or \
             f"${{RECODER_LOCAL_BIND:-127.0.0.1}}:{s['port']}:{s['port']}" in text
+
+
+def test_service_waiting_on_failed_dependency_is_not_blamed(tmp_path):
+    """실제 Docker 에서 확인한 것 — orders 가 죽으면 그것을 기다리던 gateway 도 '시작 못 함' 으로 나온다. gateway 코드는 고칠 대상이 아니다."""
+    a = small_arch()
+
+    def ps(rest):
+        rows = [{"Service": "gateway", "State": "created", "Health": ""},
+                {"Service": "orders", "State": "restarting", "Health": ""},
+                {"Service": "orders-db", "State": "running", "Health": "healthy"},
+                {"Service": "cache", "State": "running", "Health": "healthy"}]
+        return subprocess.CompletedProcess(rest, 0, json.dumps(rows), "")
+
+    docker = FakeDocker(4000, up=(1, "", "dependency failed to start: container orders is unhealthy"), ps=ps,
+                        logs=(0, 'Traceback\n  File "/app/app/main.py", line 1\nModuleNotFoundError: x', ""))
+    res = C.run(_workspace(tmp_path, a), a, docker=docker, http=_http_for({}), project="p9")
+    assert {f["service"] for f in res["failures"] if f["kind"] == "service_down"} == {"gateway", "orders"}
+    files = {"services/orders/app/main.py": "y", "services/gateway/src/server.js": "z"}
+    found = C.issues(res, a, files)
+    errors = [i for i in found if i["severity"] == "error"]
+    assert {i["file"] for i in errors if i["code"] == "COMPOSE_SERVICE_DOWN"} == {"services/orders/app/main.py"}
+    waiting = next(i for i in found if i["code"] == "COMPOSE_WAITING_ON_DEPENDENCY")
+    assert waiting["severity"] == "warning" and "orders" in waiting["message"] and waiting["file"].startswith("services/gateway/")
+    # 의존 대상이 멀쩡한데 스스로 못 뜬 서비스는 그대로 오류다
+    res2 = {"status": "failed", "failures": [{"kind": "service_down", "service": "gateway", "title": "gateway 시작 못 함", "detail": "", "logs": "", "state": "created"}]}
+    assert [i["code"] for i in C.issues(res2, a, files)] == ["COMPOSE_SERVICE_DOWN"]
+
+
+def test_build_failure_blames_the_manifest_of_the_failed_step():
+    """실제 Docker(BuildKit) 출력 모양 — 다른 서비스의 빌드 줄이 섞여 있어도 실패한 단계의 명령으로 고칠 파일을 고른다."""
+    a = small_arch()
+    log = ('#23 [gateway build 4/6] RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi\n#23 CANCELED\n------\n'
+           ' > [orders 4/6] RUN pip install --no-cache-dir -r requirements.txt:\n0.7 ERROR: No matching distribution found for nope==9\n------\n'
+           'target orders: failed to solve: process "/bin/sh -c pip install" did not complete successfully: exit code: 1')
+    res = {"status": "failed", "failures": [{"kind": "build", "service": "orders", "title": "orders 이미지 빌드 실패", "detail": "", "logs": log}]}
+    files = {"services/orders/app/main.py": "x", "services/orders/requirements.txt": "nope==9", "services/gateway/package.json": "{}",
+             "services/gateway/src/server.js": "y"}
+    assert C.issues(res, a, files)[0]["file"] == "services/orders/requirements.txt"
+    npm = {"status": "failed", "failures": [{"kind": "build", "service": "gateway", "title": "t", "detail": "",
+                                             "logs": " > [gateway build 4/6] RUN if [ -f package-lock.json ]; then npm ci --no-audit; else npm install; fi:\nnpm error 404"}]}
+    assert C.issues(npm, a, files)[0]["file"] == "services/gateway/package.json"
+    other = {"status": "failed", "failures": [{"kind": "build", "service": "orders", "title": "t", "detail": "", "logs": " > [orders 6/6] RUN useradd app:\nboom"}]}
+    assert C.issues(other, a, files)[0]["file"] == "services/orders/app/main.py"
+
+
+def test_verification_copy_keeps_compose_database_urls_intact(tmp_path):
+    """실제 Docker 에서 찾은 결함 — 검증 복사본을 만들 때 비밀값 가림이 compose 의 `postgres://app:${X_PASSWORD}@db` 를
+    `postgres://app:[MASKED]@db` 로 바꿔서, 서비스가 DB 인증에 실패하고 다중 서비스 생성 검증이 항상 실패했다."""
+    import context_gate
+    import generated_validation as G
+
+    a = small_arch()
+    seen = {}
+
+    class Capture(FakeDocker):
+        def __call__(self, args, timeout):
+            if "up" in args and "-f" in args:
+                seen["compose"] = Path(args[args.index("-f") + 1]).read_text(encoding="utf-8")
+                seen["app"] = (Path(args[args.index("-f") + 1]).parent / "services/orders/app/main.py").read_text(encoding="utf-8")
+            return super().__call__(args, timeout)
+
+    app = 'import os\nURL = f"postgresql://{user}:{password}@{host}/app"\nLEAK = "postgres://app:s3cretPassw0rd@db:5432/app"\n'
+    ops = K.fixed_ops(a) + [{"file": "services/orders/app/main.py", "content": app, "action": "create"}]
+    root = tmp_path / "ws"
+    root.mkdir()
+    G.verify_compose(root, ops, a, docker=Capture(4000), http=_http_for({("GET", "/health"): 200}))
+    assert "postgres://app:${ORDERS_DB_PASSWORD}@orders-db:5432/orders_db" in seen["compose"] and "[MASKED]" not in seen["compose"]
+    # AI 가 쓴 코드: 변수로 조립한 주소는 그대로, 진짜 비밀번호 글자만 가린다
+    assert 'f"postgresql://{user}:{password}@{host}/app"' in seen["app"]
+    assert "s3cretPassw0rd" not in seen["app"] and "postgres://app:[MASKED]@db:5432/app" in seen["app"]
+    keep = ['`postgres://${user}:${pass}@${host}:5432/db`', "mongodb://root:$MONGO_PW@mongo:27017", "redis://:${CACHE_PASSWORD}@cache:6379/0",
+            '"mysql://%s:%s@%s/db"', "postgres://user:<password>@host/db", "postgres://db:5432/app"]
+    assert [context_gate.scrub_build_source(t) for t in keep] == keep
+    mask = {"redis://:hunter2secret@cache:6379/0": "redis://:[MASKED]@cache:6379/0",
+            "amqp://guest:guest@mq:5672": "amqp://guest:[MASKED]@mq:5672",
+            "postgres://app:${PW}real@db/app": "postgres://app:[MASKED]@db/app"}
+    assert {t: context_gate.scrub_build_source(t) for t in mask} == mask
