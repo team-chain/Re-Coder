@@ -35,6 +35,7 @@ import { runEnrollCommand } from './gateway/enroll';
 import { DiscordController } from './discord/DiscordController';
 import { managedPermissions } from './cloud/managedPermissions';
 import { initializePortableTools, recoverPortableTools } from './runtime/portableTools';
+import { ui } from './ui/dialogs';
 
 // ---------------------------------------------------------------------------
 // Activate
@@ -46,8 +47,8 @@ export function activate(context: vscode.ExtensionContext): void {
     initActiveProject(context);
     initializePortableTools(context.globalStorageUri.fsPath,message=>{void vscode.window.setStatusBarMessage('ReCoder · '+message,15000);});
     context.subscriptions.push(vscode.commands.registerCommand('recoder.repairTools',async()=>{
-        try{await recoverPortableTools();vscode.window.showInformationMessage('실행 도구 준비 상태를 복구했습니다. ReCoder Core를 다시 시작하면 공식 도구를 다시 준비합니다.');}
-        catch(e){vscode.window.showErrorMessage(e instanceof Error?e.message:'실행 도구 복구 실패');}
+        try{await recoverPortableTools();ui.showInformationMessage('실행 도구 준비 상태를 복구했습니다. ReCoder Core를 다시 시작하면 공식 도구를 다시 준비합니다.');}
+        catch(e){ui.showErrorMessage(e instanceof Error?e.message:'실행 도구 복구 실패');}
     }));
 
     // ── Core service instances ──────────────────────────────────────────────
@@ -80,7 +81,7 @@ export function activate(context: vscode.ExtensionContext): void {
             activeBridge = new BridgeClient(context);
             context.subscriptions.push(activeBridge);
             activeBridge.connect();
-            vscode.window.showInformationMessage('ReCoder Bridge 재연결 시도');
+            ui.showInformationMessage('ReCoder Bridge 재연결 시도');
         }),
     );
 
@@ -211,7 +212,7 @@ export function activate(context: vscode.ExtensionContext): void {
             latestTerminalError = request;
             if (terminalErrorNoticeOpen) { return; }
             terminalErrorNoticeOpen = true;
-            void vscode.window.showWarningMessage(
+            void ui.showWarningMessage(
                 '터미널에서 오류를 감지했습니다. ReCoder 에러 분석 화면에서 원인과 수정안을 확인할 수 있습니다.', '열기',
             ).then((choice) => {
                 terminalErrorNoticeOpen = false;
@@ -267,7 +268,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('recoder.runWithRecoder', async () => {
             await ensureCoreRunning(coreManager, sidebarProvider);
 
-            const command = await vscode.window.showInputBox({
+            const command = await ui.showInputBox({
                 prompt: 'Enter command to run with ReCoder monitoring',
                 placeHolder: 'e.g. python main.py',
                 value: getDefaultRunCommand(activeProjectPath() || undefined),
@@ -333,23 +334,23 @@ export function activate(context: vscode.ExtensionContext): void {
                     { createIfNone: true },
                 );
                 if (!session?.accessToken) {
-                    vscode.window.showWarningMessage('GitHub 인증이 취소되었습니다.');
+                    ui.showWarningMessage('GitHub 인증이 취소되었습니다.');
                     return;
                 }
                 const result = await apiClient.setGithubToken(session.accessToken);
                 if (result.status === 'ok') {
-                    vscode.window.showInformationMessage(
+                    ui.showInformationMessage(
                         `GitHub 연결 완료: ${result.user ?? session.account.label}`,
                     );
                     // 진단 갱신 — github_ready chip 즉시 반영
                     sidebarProvider.triggerDiagnostics();
                 } else {
-                    vscode.window.showErrorMessage(
+                    ui.showErrorMessage(
                         `GitHub 토큰 등록 실패: ${result.message ?? 'unknown error'}`,
                     );
                 }
             } catch (err) {
-                vscode.window.showErrorMessage(
+                ui.showErrorMessage(
                     `GitHub 로그인 실패: ${err instanceof Error ? err.message : String(err)}`,
                 );
             }
@@ -361,7 +362,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('recoder.githubLogout', async () => {
             await ensureCoreRunning(coreManager, sidebarProvider);
             const result = await apiClient.githubLogout();
-            vscode.window.showInformationMessage(
+            ui.showInformationMessage(
                 result.status === 'ok'
                     ? 'GitHub 로그아웃 완료'
                     : `로그아웃 실패: ${result.message ?? 'unknown'}`,
@@ -374,18 +375,18 @@ export function activate(context: vscode.ExtensionContext): void {
         try{
             const metadata=(await coreManager.getManagedAwsConnection())?.metadata;
             const status=metadata?null:await apiClient.getAwsStatus().catch(()=>null);
-            const account=metadata?.account||status?.identity?.account||await vscode.window.showInputBox({title:'AWS 권한 정책 · 계정 번호',prompt:'AWS 콘솔의 12자리 계정 번호. 액세스 키가 아닙니다.',validateInput:v=>/^\d{12}$/.test(v)?null:'12자리 계정 번호를 입력하세요.'});
+            const account=metadata?.account||status?.identity?.account||await ui.showInputBox({title:'AWS 권한 정책 · 계정 번호',prompt:'AWS 콘솔의 12자리 계정 번호. 액세스 키가 아닙니다.',validateInput:v=>/^\d{12}$/.test(v)?null:'12자리 계정 번호를 입력하세요.'});
             if(!account)return;
-            const region=metadata?.region||status?.region||await vscode.window.showInputBox({title:'AWS 권한 정책 · 리전',value:'us-east-1'});if(!region)return;
+            const region=metadata?.region||status?.region||await ui.showInputBox({title:'AWS 권한 정책 · 리전',value:'us-east-1'});if(!region)return;
             const policies=managedPermissions(account,region);
-            const choice=await vscode.window.showQuickPick([{label:'실행용 정책',description:'설치 후 계속 사용',key:'runtime'},{label:'최초 설치용 정책',description:'관리자 설치 또는 일시 부여 후 제거',key:'bootstrap'}],{title:`관리형 AWS 권한 · ${account} · ${region}`});if(!choice)return;
+            const choice=await ui.showQuickPick([{label:'실행용 정책',description:'설치 후 계속 사용',key:'runtime'},{label:'최초 설치용 정책',description:'관리자 설치 또는 일시 부여 후 제거',key:'bootstrap'}],{title:`관리형 AWS 권한 · ${account} · ${region}`});if(!choice)return;
             await vscode.window.showTextDocument(await vscode.workspace.openTextDocument({language:'json',content:JSON.stringify(policies[choice.key as 'runtime'|'bootstrap'],null,2)}),{preview:true});
-            vscode.window.showInformationMessage('기존 AWS 연결을 그대로 사용합니다. IAM 관리자가 필요한 권한만 추가하면 됩니다. 최초 설치용 정책은 환경 설치 완료 후 제거하세요.');
-        }catch(e){vscode.window.showErrorMessage(e instanceof Error?e.message:'AWS 권한 정책을 만들지 못했습니다.');}
+            ui.showInformationMessage('기존 AWS 연결을 그대로 사용합니다. IAM 관리자가 필요한 권한만 추가하면 됩니다. 최초 설치용 정책은 환경 설치 완료 후 제거하세요.');
+        }catch(e){ui.showErrorMessage(e instanceof Error?e.message:'AWS 권한 정책을 만들지 못했습니다.');}
     }));
     context.subscriptions.push(vscode.commands.registerCommand('recoder.awsBrowserLogin', async () => {
         const currentRegion=await apiClient.getAwsStatus().then(s=>s.region||'').catch(()=>'');
-        const region = await vscode.window.showInputBox({title:'AWS 계정 연결',prompt:'로그인과 관리형 작업에 사용할 AWS 리전',value:currentRegion,placeHolder:'예: ap-northeast-2',ignoreFocusOut:true,
+        const region = await ui.showInputBox({title:'AWS 계정 연결',prompt:'로그인과 관리형 작업에 사용할 AWS 리전',value:currentRegion,placeHolder:'예: ap-northeast-2',ignoreFocusOut:true,
             validateInput:v=>/^(?:af|ap|ca|eu|il|me|mx|sa|us)-(?!gov|iso)[a-z]+-\d$/.test(v)?null:'예: ap-northeast-2'});
         if(!region)return false;
         try {
@@ -397,10 +398,10 @@ export function activate(context: vscode.ExtensionContext): void {
                     const env=await coreManager.browserAwsEnvironment();
                     await apiClient.connectAwsBrowser({endpoint:env.AWS_CONTAINER_CREDENTIALS_FULL_URI,token:env.AWS_CONTAINER_AUTHORIZATION_TOKEN,region,account:env.RECODER_AWS_ACCOUNT_ID});
                     await coreManager.enableBrowserAwsLogin();sidebarProvider.triggerDiagnostics();
-                    vscode.window.showInformationMessage('AWS 계정이 연결되었습니다. 임시 자격증명은 자동 갱신됩니다.');return true;
+                    ui.showInformationMessage('AWS 계정이 연결되었습니다. 임시 자격증명은 자동 갱신됩니다.');return true;
                 }finally{subscription.dispose();}
             });
-        }catch(error){vscode.window.showErrorMessage(`AWS 로그인 실패: ${error instanceof Error?error.message:'다시 시도하세요.'}`);return false;}
+        }catch(error){ui.showErrorMessage(`AWS 로그인 실패: ${error instanceof Error?error.message:'다시 시도하세요.'}`);return false;}
     }));
 
     // ── Command: AWS Credentials Configure (native input boxes) ─────────────
@@ -410,7 +411,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('recoder.awsConfigure', async () => {
             await ensureCoreRunning(coreManager, sidebarProvider);
 
-            const accessKey = await vscode.window.showInputBox({
+            const accessKey = await ui.showInputBox({
                 title: 'AWS 자격증명 (1/3)',
                 prompt: 'AWS Access Key ID',
                 placeHolder: 'AKIA...',
@@ -419,7 +420,7 @@ export function activate(context: vscode.ExtensionContext): void {
             });
             if (!accessKey) { return; }
 
-            const secret = await vscode.window.showInputBox({
+            const secret = await ui.showInputBox({
                 title: 'AWS 자격증명 (2/3)',
                 prompt: 'AWS Secret Access Key',
                 password: true,
@@ -428,7 +429,7 @@ export function activate(context: vscode.ExtensionContext): void {
             });
             if (!secret) { return; }
 
-            const region = await vscode.window.showInputBox({
+            const region = await ui.showInputBox({
                 title: 'AWS 자격증명 (3/3)',
                 prompt: 'AWS Region',
                 value: 'ap-northeast-2',
@@ -450,7 +451,7 @@ export function activate(context: vscode.ExtensionContext): void {
                         });
                     } catch (err) {
                         //: 잘못된 키는 Core 가 4xx 로 거절한다 — VS Code 의 "명령 실패" 대신 이유를 보여 준다.
-                        vscode.window.showErrorMessage(`AWS 자격증명 검증 실패: ${err instanceof Error ? err.message : String(err)}`);
+                        ui.showErrorMessage(`AWS 자격증명 검증 실패: ${err instanceof Error ? err.message : String(err)}`);
                         return;
                     }
                     if (result.ready) {
@@ -464,12 +465,12 @@ export function activate(context: vscode.ExtensionContext): void {
                         // 보여줄 수 있으므로, 즉시 다시 실행해 AWS Deploy Ready를 갱신한다.
                         sidebarProvider.triggerDiagnostics();
                         const acct = result.identity?.account ?? 'unknown';
-                        vscode.window.showInformationMessage(
+                        ui.showInformationMessage(
                             `AWS 연결 완료 (account ${acct}, region ${region.trim()})`,
                         );
                         sidebarProvider.triggerDiagnostics();
                     } else {
-                        vscode.window.showErrorMessage(
+                        ui.showErrorMessage(
                             `AWS 자격증명 검증 실패: ${result.message ?? 'STS 호출 실패'}`,
                         );
                     }
@@ -481,7 +482,7 @@ export function activate(context: vscode.ExtensionContext): void {
     // ── Command: AWS Credentials Clear ──────────────────────────────────────
     context.subscriptions.push(
         vscode.commands.registerCommand('recoder.awsClear', async () => {
-            const confirm = await vscode.window.showWarningMessage(
+            const confirm = await ui.showWarningMessage(
                 'VS Code 보안 금고에 저장된 AWS 자격증명을 삭제하시겠습니까?',
                 { modal: true },
                 '삭제',
@@ -494,14 +495,14 @@ export function activate(context: vscode.ExtensionContext): void {
                 let coreCleared = false;
                 try { await apiClient.clearAws(); coreCleared = true; } catch { /* 아래에서 재시작 */ }
                 if (coreCleared) {
-                    vscode.window.showInformationMessage('AWS 자격증명을 삭제하고 Core 의 AWS 연결을 해제했습니다.');
+                    ui.showInformationMessage('AWS 자격증명을 삭제하고 Core 의 AWS 연결을 해제했습니다.');
                 } else {
                     await coreManager.restart();
-                    vscode.window.showWarningMessage('보안 금고의 AWS 자격증명은 삭제했지만 Core 가 응답하지 않아 Core 를 다시 시작했습니다. 터미널이나 다른 창에서 띄운 Core 를 쓰는 중이면 그 Core 를 직접 종료하세요.');
+                    ui.showWarningMessage('보안 금고의 AWS 자격증명은 삭제했지만 Core 가 응답하지 않아 Core 를 다시 시작했습니다. 터미널이나 다른 창에서 띄운 Core 를 쓰는 중이면 그 Core 를 직접 종료하세요.');
                 }
             } catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
-                vscode.window.showErrorMessage(`AWS 자격증명을 삭제하지 못했습니다: ${msg}`);
+                ui.showErrorMessage(`AWS 자격증명을 삭제하지 못했습니다: ${msg}`);
             }
             sidebarProvider.triggerDiagnostics();
         })
@@ -524,14 +525,14 @@ export function activate(context: vscode.ExtensionContext): void {
             const needsAws = !aws.ready;
 
             if (!needsGithub && !needsAws) {
-                vscode.window.showInformationMessage('이미 GitHub & AWS 모두 연결되어 있습니다.');
+                ui.showInformationMessage('이미 GitHub & AWS 모두 연결되어 있습니다.');
                 return;
             }
 
             const targets: string[] = [];
             if (needsGithub) { targets.push('GitHub'); }
             if (needsAws) { targets.push('AWS'); }
-            const start = await vscode.window.showInformationMessage(
+            const start = await ui.showInformationMessage(
                 `다음 항목을 설정합니다: ${targets.join(', ')}`,
                 { modal: true },
                 '시작',
@@ -545,7 +546,7 @@ export function activate(context: vscode.ExtensionContext): void {
                 await vscode.commands.executeCommand('recoder.awsConfigure');
             }
 
-            vscode.window.showInformationMessage('초기 설정 완료. 사이드바의 ready chip 을 확인하세요.');
+            ui.showInformationMessage('초기 설정 완료. 사이드바의 ready chip 을 확인하세요.');
         })
     );
 
@@ -561,7 +562,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('recoder.ai.switch', async (provider?: unknown) => {
             if (provider === undefined) {
                 const keys = await storedAiKeys(context);
-                const pick = await vscode.window.showQuickPick((['anthropic', 'openai'] as const).map(value => ({
+                const pick = await ui.showQuickPick((['anthropic', 'openai'] as const).map(value => ({
                     label: value === 'anthropic' ? 'Claude' : 'GPT', value,
                     description: keys[value] ? '연결됨' : '키 연결 필요',
                 })), { title: 'ReCoder: AI 바꾸기 (Claude / GPT)' });
@@ -569,7 +570,7 @@ export function activate(context: vscode.ExtensionContext): void {
                 provider = pick.value;
             }
             const changed = await sidebarProvider.changeAiProvider(provider as 'anthropic' | 'openai');
-            if (changed) { vscode.window.showInformationMessage(`ReCoder: ${provider === 'anthropic' ? 'Claude' : 'GPT'}로 바꿨습니다.`); }
+            if (changed) { ui.showInformationMessage(`ReCoder: ${provider === 'anthropic' ? 'Claude' : 'GPT'}로 바꿨습니다.`); }
             return changed;
         }),
     );
@@ -585,7 +586,7 @@ export function activate(context: vscode.ExtensionContext): void {
             const keys = ['economyProvider', 'economyModel', 'compatibleBaseUrl', 'compatibleModel', 'anthropicModel', 'openaiModel', 'prices',
                 'openaiFastModel', 'anthropicFastModel', 'compatibleFastModel', 'autoRecommend', 'lockSensitive', 'retryWithComplex'];
             if (!keys.some((k) => e.affectsConfiguration(`recoder.ai.${k}`)) || recentRoutingWrite()) { return; }
-            const pick = await vscode.window.showInformationMessage('ReCoder: AI 공급자 설정이 바뀌었습니다. Core를 다시 시작해야 적용됩니다.', 'Core 다시 시작');
+            const pick = await ui.showInformationMessage('ReCoder: AI 공급자 설정이 바뀌었습니다. Core를 다시 시작해야 적용됩니다.', 'Core 다시 시작');
             if (pick) { await vscode.commands.executeCommand('recoder.restartCore'); }
         }),
     );
@@ -594,7 +595,7 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(
         vscode.commands.registerCommand('recoder.selectProject', async () => {
             try { await pickProjectFolder(); }
-            catch (err) { vscode.window.showErrorMessage(`ReCoder: ${err instanceof Error ? err.message : String(err)}`); }
+            catch (err) { ui.showErrorMessage(`ReCoder: ${err instanceof Error ? err.message : String(err)}`); }
         })
     );
 
@@ -613,7 +614,7 @@ export function activate(context: vscode.ExtensionContext): void {
                 return true;
             } catch {
                 const message = 'Core 연결을 다시 시작하지 못했습니다. 연결 상태를 확인해 주세요.';
-                vscode.window.showErrorMessage(`ReCoder Core 재시작 실패: ${message}`);
+                ui.showErrorMessage(`ReCoder Core 재시작 실패: ${message}`);
                 sidebarProvider.postMessage('core.error', { message });
                 return false;
             }
@@ -634,7 +635,7 @@ export function activate(context: vscode.ExtensionContext): void {
             pollingService.suspendAutoRecovery();
             await coreManager.shutdown();
             sidebarProvider.postMessage('core.stopped', {});
-            vscode.window.showInformationMessage('ReCoder Core stopped.');
+            ui.showInformationMessage('ReCoder Core stopped.');
         })
     );
 
@@ -684,7 +685,7 @@ export function activate(context: vscode.ExtensionContext): void {
             try {
                 await restoreRecoderViews();
             } catch (err) {
-                void vscode.window.showErrorMessage(`ReCoder 위치 복원 실패: ${String(err)}`);
+                void ui.showErrorMessage(`ReCoder 위치 복원 실패: ${String(err)}`);
             }
         })
     );
@@ -730,7 +731,7 @@ async function ensureCoreRunning(
         await sidebarProvider.ensureConnection();
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        vscode.window.showErrorMessage(`ReCoder Core 시작 실패: ${msg}`);
+        ui.showErrorMessage(`ReCoder Core 시작 실패: ${msg}`);
         sidebarProvider.postMessage('core.error', { message: msg });
     }
 }

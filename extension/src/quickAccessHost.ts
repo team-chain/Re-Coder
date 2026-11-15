@@ -7,6 +7,7 @@ import {
     QUICK_SLOTS, QUICK_TARGETS, QuickSlot, QuickTarget, SLOT_COMMAND, TARGET_BY_ID,
     resolveQuickAccess, slotKeyLabel, wheelKeyLabel,
 } from './quickAccess';
+import { ui } from './ui/dialogs';
 
 const SECTION = 'recoder';
 const KEY = 'quickAccess';
@@ -253,18 +254,18 @@ export function registerQuickAccess(context: vscode.ExtensionContext, deps: Quic
         vscode.commands.registerCommand('recoder.quickWheel.edit', () => { if (wheelOpen) openEdit(); }),
         vscode.commands.registerCommand('recoder.quickAccess.enableInTerminal', async () => {
             if (wheelWorksInTerminal()) {
-                void vscode.window.showInformationMessage('이미 터미널에서도 Alt+Q 로 빠른 이동 휠이 열립니다.');
+                void ui.showInformationMessage('이미 터미널에서도 Alt+Q 로 빠른 이동 휠이 열립니다.');
                 return;
             }
-            const ok = await vscode.window.showInformationMessage(
+            const ok = await ui.showInformationMessage(
                 '터미널에서 Alt+Q 와 휠의 방향키를 셸 대신 ReCoder 가 받도록 사용자 설정(terminal.integrated.commandsToSkipShell)에 더합니다. 셸의 Alt+Q 기능은 쓸 수 없게 됩니다(방향키는 휠이 떠 있을 때만).',
                 { modal: true }, '더하기');
             if (ok !== '더하기') return;
             try {
                 await enableWheelInTerminal();
-                void vscode.window.showInformationMessage('이제 터미널에서도 Alt+Q 로 빠른 이동 휠이 열립니다.');
+                void ui.showInformationMessage('이제 터미널에서도 Alt+Q 로 빠른 이동 휠이 열립니다.');
             } catch (err) {
-                void vscode.window.showErrorMessage(`설정을 바꾸지 못했습니다: ${err instanceof Error ? err.message : String(err)}`);
+                void ui.showErrorMessage(`설정을 바꾸지 못했습니다: ${err instanceof Error ? err.message : String(err)}`);
             }
         }),
         { dispose: () => setWheelOpen(false) },
@@ -275,7 +276,7 @@ export function registerQuickAccess(context: vscode.ExtensionContext, deps: Quic
             const id = currentQuickAccess().slots[slot];
             const target = id ? TARGET_BY_ID.get(id) : undefined;
             if (target) { deps.open(target); return; }
-            const pick = await vscode.window.showInformationMessage(
+            const pick = await ui.showInformationMessage(
                 `빠른 이동 ${slotKeyLabel(slot)} 칸에 지정된 기능이 없습니다.`, '지정하기');
             if (pick) openEdit(slot);
         }));

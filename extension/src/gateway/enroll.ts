@@ -10,6 +10,7 @@ import * as https from 'https';
 import * as http from 'http';
 import { URL } from 'url';
 import { buildDiscordLinkCommand } from './discordLink';
+import { ui } from '../ui/dialogs';
 
 export const SECRET_TOKEN = 'recoder.studentToken';
 export const SECRET_STUDENT_ID = 'recoder.studentId';
@@ -61,7 +62,7 @@ function postJson(
 export async function enrollWithCode(context: vscode.ExtensionContext, code: string): Promise<boolean> {
     const base = getGatewayUrl();
     if (!base) {
-        vscode.window.showErrorMessage('ReCoder: 게이트웨이 URL이 설정되지 않았습니다 (recoder.gateway.url).');
+        ui.showErrorMessage('ReCoder: 게이트웨이 URL이 설정되지 않았습니다 (recoder.gateway.url).');
         return false;
     }
     try {
@@ -94,16 +95,16 @@ export async function enrollWithCode(context: vscode.ExtensionContext, code: str
                         }
                     });
             } else {
-                vscode.window.showInformationMessage(
+                ui.showInformationMessage(
                     'ReCoder: 연결 완료 — 이제 AWS 키 없이 AI를 사용할 수 있습니다. (Core 재시작 시 적용)',
                 );
             }
             return true;
         }
-        vscode.window.showErrorMessage(`ReCoder 발급 실패: ${json.message || json.error || `HTTP ${status}`}`);
+        ui.showErrorMessage(`ReCoder 발급 실패: ${json.message || json.error || `HTTP ${status}`}`);
         return false;
     } catch (err) {
-        vscode.window.showErrorMessage(`ReCoder 게이트웨이 연결 실패: ${err}`);
+        ui.showErrorMessage(`ReCoder 게이트웨이 연결 실패: ${err}`);
         return false;
     }
 }
@@ -112,7 +113,7 @@ export async function enrollWithCode(context: vscode.ExtensionContext, code: str
 export async function ensureEnrolled(context: vscode.ExtensionContext): Promise<void> {
     if (!getGatewayUrl()) { return; }
     if (await getStudentToken(context)) { return; }
-    const code = await vscode.window.showInputBox({
+    const code = await ui.showInputBox({
         title: 'ReCoder 연결',
         prompt: '반 코드를 입력하세요 (강사에게 받은 enroll 코드). 입력하면 AWS 설정 없이 AI를 쓸 수 있습니다.',
         ignoreFocusOut: true,
@@ -124,16 +125,16 @@ export async function ensureEnrolled(context: vscode.ExtensionContext): Promise<
 /** 명령 핸들러: 수동 (재)발급. */
 export async function runEnrollCommand(context: vscode.ExtensionContext): Promise<void> {
     if (!getGatewayUrl()) {
-        vscode.window.showErrorMessage('ReCoder: 먼저 설정 recoder.gateway.url 을 지정하세요.');
+        ui.showErrorMessage('ReCoder: 먼저 설정 recoder.gateway.url 을 지정하세요.');
         return;
     }
     if (await getStudentToken(context)) {
-        const choice = await vscode.window.showWarningMessage(
+        const choice = await ui.showWarningMessage(
             '이미 게이트웨이에 연결돼 있습니다. 다시 발급할까요?', '다시 발급', '취소',
         );
         if (choice !== '다시 발급') { return; }
     }
-    const code = await vscode.window.showInputBox({
+    const code = await ui.showInputBox({
         title: 'ReCoder 연결', prompt: '반 코드를 입력하세요', ignoreFocusOut: true,
     });
     if (code) { await enrollWithCode(context, code.trim()); }

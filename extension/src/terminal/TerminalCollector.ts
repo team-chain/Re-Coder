@@ -4,6 +4,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { TerminalOutput } from '../types';
 import { ApiClient } from '../core/ApiClient';
+import { ui } from '../ui/dialogs';
 
 const execFileAsync = promisify(execFile);
 
@@ -291,7 +292,7 @@ export class TerminalCollector {
     // -----------------------------------------------------------------------
 
     async promptManualInput(): Promise<string | null> {
-        const result = await vscode.window.showInputBox({
+        const result = await ui.showInputBox({
             prompt: '에러 로그를 붙여넣으세요 (긴 내용은 Ctrl+V)',
             placeHolder: 'Error: ...',
             ignoreFocusOut: true,

@@ -3,6 +3,7 @@ import { createHash } from 'crypto';
 import { PentagiClient, PentagiRejectedRequest, pentagiOutcome, serviceUrl, testTarget } from './pentagiClient';
 import {assessPentagi} from './pentagiAssessment';
 import { LocalPentagiHost } from './localPentagiHost';
+import { ui } from '../ui/dialogs';
 
 type Run = { id?: string; target: string; provider: string; server: string; createdAt: string; uncertain?: boolean; stopped?: boolean; terminal?: boolean };
 const SECRET = 'recoder.pentagi.connection.v1';
@@ -10,15 +11,20 @@ export class RedTeamHost {
     private busy = false;
     constructor(private secrets?: vscode.SecretStorage, private state?: vscode.Memento, private localRoot?: string) {}
     private key(workspace: string) { return `security.redteam.${createHash('sha256').update(workspace).digest('hex')}`; }
-    async handle(action: string, workspace: string): Promise<Record<string, unknown>> {
+    async handle(action: string, workspace: string, options?: Record<string, unknown>): Promise<Record<string, unknown>> {
         if (!this.secrets || !this.state) throw new Error('보안 저장소를 사용할 수 없습니다.');
         if (!vscode.workspace.isTrusted || !workspace) throw new Error('신뢰할 수 있는 프로젝트를 먼저 여세요.');
+        //: 미리 받기 제안은 사용자가 답할 때까지 기다린다 — 그동안 상태 확인을 막지 않는다.
+        if (action === 'localPrewarmOffer') {
+            if (!this.localRoot) return {skipped: true};
+            return await new LocalPentagiHost(this.localRoot, this.secrets).handle(action, workspace);
+        }
         if (this.busy) throw new Error('이전 레드팀 요청이 끝난 뒤 다시 시도하세요.');
         this.busy = true;
         try {
             if (action.startsWith('local')) {
                 if (!this.localRoot) throw new Error('로컬 검사 저장소를 사용할 수 없습니다.');
-                return await new LocalPentagiHost(this.localRoot, this.secrets).handle(action, workspace);
+                return await new LocalPentagiHost(this.localRoot, this.secrets).handle(action, workspace, options);
             }
             const key = this.key(workspace);
             const connectionKey = `${SECRET}.${key}`;
@@ -43,11 +49,11 @@ export class RedTeamHost {
             let runs = stored;
             if (action === 'configure') {
                 const active = runs.find(r => !r.terminal);
-                const serverInput = await vscode.window.showInputBox({title: 'PentAGI 서버 연결', prompt: '직접 운영하는 PentAGI 기본 주소 (원격은 HTTPS)', value: active?.server || connection?.server || 'https://localhost:8443', ignoreFocusOut: true});
+                const serverInput = await ui.showInputBox({title: 'PentAGI 서버 연결', prompt: '직접 운영하는 PentAGI 기본 주소 (원격은 HTTPS)', value: active?.server || connection?.server || 'https://localhost:8443', ignoreFocusOut: true});
                 if (!serverInput) return {cancelled: true};
                 const server = serviceUrl(serverInput.trim());
                 if (active && server !== active.server) throw new Error('진행 중인 검사의 원래 서버로만 재연결할 수 있습니다. 먼저 해당 검사를 확인·중단하세요.');
-                const token = await vscode.window.showInputBox({title: 'PentAGI API 토큰', prompt: 'PentAGI Settings → API Tokens. VS Code 보안 저장소에만 보관합니다.', password: true, ignoreFocusOut: true});
+                const token = await ui.showInputBox({title: 'PentAGI API 토큰', prompt: 'PentAGI Settings → API Tokens. VS Code 보안 저장소에만 보관합니다.', password: true, ignoreFocusOut: true});
                 if (!token) return {cancelled: true};
                 if(token.length>8192 || /[\r\n]/.test(token)) throw new Error('PentAGI API 토큰 형식을 확인하세요.');
                 const providers = await new PentagiClient(server, token).providers();
@@ -60,12 +66,12 @@ export class RedTeamHost {
                 if (runs.some(r => !r.terminal)) throw new Error('진행 중이거나 확인되지 않은 실행이 있습니다. 먼저 상태를 확인하세요.');
                 const providers = await client.providers();
                 if (!providers.length) throw new Error('PentAGI에서 AI 공급자를 먼저 설정하세요.');
-                const provider = await vscode.window.showQuickPick(providers, {title: '레드팀 검사에 사용할 PentAGI 모델 공급자'});
+                const provider = await ui.showQuickPick(providers, {title: '레드팀 검사에 사용할 PentAGI 모델 공급자'});
                 if (!provider) return {cancelled: true};
-                const input = await vscode.window.showInputBox({title: '레드팀 테스트 대상', prompt: 'PentAGI 컨테이너에서 접근 가능한 테스트 앱 주소. localhost는 해당 컨테이너 자신입니다.', placeHolder: 'http://host.docker.internal:3000', ignoreFocusOut: true});
+                const input = await ui.showInputBox({title: '레드팀 테스트 대상', prompt: 'PentAGI 컨테이너에서 접근 가능한 테스트 앱 주소. localhost는 해당 컨테이너 자신입니다.', placeHolder: 'http://host.docker.internal:3000', ignoreFocusOut: true});
                 if (!input) return {cancelled: true};
                 const target = testTarget(input.trim());
-                const approved = await vscode.window.showWarningMessage(`이 테스트 앱에 레드팀 검사를 실행할까요?`, {modal: true,
+                const approved = await ui.showWarningMessage(`이 테스트 앱에 레드팀 검사를 실행할까요?`, {modal: true,
                     detail: `대상: ${target}\n서버: ${connection.server}\n모델: ${provider}\n\n소유하거나 검사 권한이 있는 테스트 앱만 선택하세요. PentAGI 실행 환경의 네트워크 격리는 운영자가 설정해야 하며, 프롬프트만으로 범위를 강제할 수 없습니다. 테스트 데이터와 모델 API 비용이 발생할 수 있습니다. ReCoder를 닫아도 서버 작업은 계속됩니다.`}, '범위를 확인했고 실행');
                 if (approved !== '범위를 확인했고 실행') return {cancelled: true};
                 // Persist BEFORE a non-idempotent request: never retry an uncertain creation.
@@ -83,10 +89,10 @@ export class RedTeamHost {
             const run = runs[0];
             if (run && run.server !== connection.server) throw new Error('실행을 생성한 PentAGI 서버에 다시 연결하세요.');
             if (action === 'recover') {
-                const id = await vscode.window.showInputBox({title: '실행 복구', prompt: 'PentAGI 실행 목록에서 해당 검사의 Flow ID를 확인해 입력하세요. 새 검사를 생성하지 않습니다.'});
+                const id = await ui.showInputBox({title: '실행 복구', prompt: 'PentAGI 실행 목록에서 해당 검사의 Flow ID를 확인해 입력하세요. 새 검사를 생성하지 않습니다.'});
                 if (!id || !run) return {cancelled: true};
                 const snapshot = await client.snapshot(id.trim());
-                const confirmed = await vscode.window.showInformationMessage(`이 실행을 연결할까요? ${snapshot.flow.title}`, {modal: true, detail: `ID: ${snapshot.flow.id}\n생성: ${snapshot.flow.createdAt}\n원래 대상: ${run.target}`}, '이 실행 연결');
+                const confirmed = await ui.showInformationMessage(`이 실행을 연결할까요? ${snapshot.flow.title}`, {modal: true, detail: `ID: ${snapshot.flow.id}\n생성: ${snapshot.flow.createdAt}\n원래 대상: ${run.target}`}, '이 실행 연결');
                 if (!confirmed) return {cancelled: true};
                 run.id = snapshot.flow.id; run.uncertain = false; await this.state.update(key, runs);
             }

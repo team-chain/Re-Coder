@@ -99,6 +99,8 @@ def state(workspace: str | Path) -> dict:
         item = dict(saved.get(key) or {})
         steps[key] = {"key": key, "title": TITLES[key], "status": item.get("status") or "todo",
                       "summary": item.get("summary") or "", "at": item.get("at") or ""}
+        if isinstance(item.get("url"), str) and item["url"].startswith("http://localhost:"):
+            steps[key]["url"] = item["url"]  # 로컬 실행 주소 — 공격 테스트 대상 자동 입력
     if steps["build"]["status"] == "todo" and _has_code(root):
         steps["build"].update(status="done", summary="프로젝트에 코드가 있습니다")
     if arch and steps["verify"]["status"] == "todo":
@@ -123,3 +125,58 @@ def state(workspace: str | Path) -> dict:
     nxt = next((s["key"] for s in order if s["status"] in ("todo", "failed", "stale")), "")
     return {"available": True, "multi": multi, "stack": bool(arch), "services": len((arch or {}).get("services") or []),
             "databases": len((arch or {}).get("databases") or []), "steps": order, "next": nxt}
+
+
+_PUBLISHED = __import__("re").compile(r"(?:0\.0\.0\.0|127\.0\.0\.1|\[::\]|::):(\d{2,5})->(\d{1,5})/tcp")
+
+
+def local_apps(workspace: str | Path, *, docker=None, http=None) -> dict:
+    """이 PC 에서 지금 실행 중인 이 프로젝트의 앱 주소 — 사람이 포트·URL 을 찾아 적지 않게 한다.
+
+    ReCoder 로컬 실행이 만든 컨테이너(다중 서비스는 compose 프로젝트, 단일 앱은 작업 폴더 이름)만 고르고,
+    DB 는 뺀다. 각 주소는 실제로 HTTP 응답이 오는지 확인한다. 이 프로젝트 것이 없으면 다른 실행 중 앱을 따로 보여 준다.
+    """
+    root = Path(workspace)
+    try:
+        import compose_check
+        import compose_deploy
+        from deployment_inputs import workspace_container_name
+    except Exception:  # noqa: BLE001
+        return {"apps": [], "others": [], "reason": "Core 구성 요소를 불러오지 못했습니다."}
+    docker = docker or compose_check._docker
+    http = http or compose_check._http
+    out = docker(["ps", "--format", '{{.Names}}|{{.Ports}}|{{.Label "com.docker.compose.project"}}|{{.Label "com.docker.compose.service"}}'], 15)
+    if out.returncode != 0:
+        return {"apps": [], "others": [], "reason": "Docker 가 실행 중이 아니거나 응답하지 않습니다."}
+    arch = compose_deploy.load(root) if root.is_dir() else None
+    project = compose_deploy.project_name(root) if arch else ""
+    single = workspace_container_name(str(root))
+    databases = {d.get("name") for d in (arch or {}).get("databases") or []}
+    public = {s.get("name") for s in (arch or {}).get("services") or [] if s.get("public")}
+    mine, others, seen = [], [], set()
+    for line in (out.stdout or "").splitlines():
+        parts = (line.split("|") + ["", "", "", ""])[:4]
+        name, ports, compose_project, service = (p.strip() for p in parts)
+        hosts = []
+        for host, _inner in _PUBLISHED.findall(ports):
+            if host not in hosts:
+                hosts.append(host)
+        if not hosts:
+            continue
+        ours = (project and compose_project == project) or name == single
+        label = service or name
+        if ours and service in databases:
+            continue
+        for host in hosts:
+            url = f"http://localhost:{host}"
+            if url in seen:
+                continue
+            seen.add(url)
+            item = {"name": label, "url": url, "public": bool(service in public) if arch else True}
+            (mine if ours else others).append(item)
+    for item in mine + others[:6]:
+        status, _ = http("GET", item["url"].replace("localhost", "127.0.0.1") + "/", None)
+        item["reachable"] = status is not None
+    mine.sort(key=lambda a: (not a.get("reachable"), not a.get("public"), a["name"]))
+    others = sorted(others[:6], key=lambda a: (not a.get("reachable"), a["name"]))
+    return {"apps": mine, "others": others, "reason": "" if mine else "이 프로젝트의 실행 중인 앱을 찾지 못했습니다 — 로컬 실행을 먼저 하세요."}

@@ -28,6 +28,7 @@ import * as vscode from 'vscode';
 import WebSocket from 'ws';
 import * as path from 'path';
 import { buildBridgeWebSocketUrl } from './bridgeEndpoint';
+import { ui } from '../ui/dialogs';
 
 interface BridgeMessage {
     type: string;
@@ -255,7 +256,7 @@ export class BridgeClient implements vscode.Disposable {
                 // 어떤 필드든 채워진 걸 우선 사용.
                 const detail = msg.error || msg.message || 'unknown error';
                 this.output.appendLine(`[bridge] error(${msg.filename}): ${detail}`);
-                vscode.window.showErrorMessage(
+                ui.showErrorMessage(
                     `ReCoder Bridge: ${detail}`,
                 );
                 return;
@@ -282,7 +283,7 @@ export class BridgeClient implements vscode.Disposable {
 
         const root = this._getWorkspaceRoot();
         if (!root) {
-            vscode.window.showErrorMessage(
+            ui.showErrorMessage(
                 'ReCoder Bridge: 워크스페이스가 열려있지 않습니다. 폴더를 열고 다시 시도하세요.',
             );
             return;
@@ -446,7 +447,7 @@ export class BridgeClient implements vscode.Disposable {
         if (!filename) { return; }
         const root = this._getWorkspaceRoot();
         if (!root) {
-            vscode.window.showErrorMessage('ReCoder Bridge: 워크스페이스가 열려있지 않습니다.');
+            ui.showErrorMessage('ReCoder Bridge: 워크스페이스가 열려있지 않습니다.');
             return;
         }
         const safeName = this._sanitizeFilename(filename);
@@ -466,7 +467,7 @@ export class BridgeClient implements vscode.Disposable {
             vscode.window.setStatusBarMessage(`ReCoder: ${safeName} 삭제됨`, 4000);
         } catch (err) {
             this.output.appendLine(`[bridge] delete failed: ${err}`);
-            vscode.window.showErrorMessage(`ReCoder: ${safeName} 삭제 실패 — ${err}`);
+            ui.showErrorMessage(`ReCoder: ${safeName} 삭제 실패 — ${err}`);
         }
     }
 
@@ -487,7 +488,7 @@ export class BridgeClient implements vscode.Disposable {
                 .getConfiguration('recoder.bridge')
                 .get<boolean>('allowAutoRun', false);
             if (!allowAuto) {
-                const pick = await vscode.window.showWarningMessage(
+                const pick = await ui.showWarningMessage(
                     `ReCoder 브리지가 받은 "${session.filename}" 를 터미널에서 실행하려고 합니다. ` +
                     `원격에서 전달된 코드입니다. 실행할까요?`,
                     { modal: true },
@@ -594,7 +595,7 @@ export class BridgeClient implements vscode.Disposable {
                 this.output.appendLine(`[bridge] auto_run: terminal ${cmd}`);
             } catch (err) {
                 this.output.appendLine(`[bridge] auto_run terminal fallback failed: ${err}`);
-                vscode.window.showWarningMessage(
+                ui.showWarningMessage(
                     `ReCoder: ${session.filename} 자동 실행 실패 — 수동으로 열어주세요.`,
                 );
             }

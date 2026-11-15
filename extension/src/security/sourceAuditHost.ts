@@ -4,6 +4,7 @@ import * as path from 'path';
 import {createHash,randomBytes} from 'crypto';
 import {ApiClient} from '../core/ApiClient';
 import {AUDIT_REVISION,auditFiles,auditSource,AuditResult} from './managedAudit';
+import { ui } from '../ui/dialogs';
 
 interface AuditState {phase:string;stage:string;createdAt?:string;finishedAt?:string;calls?:number;provider?:string;model?:string;stale?:boolean;error?:string;report?:AuditResult}
 const digest=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -44,7 +45,7 @@ export class SourceAuditHost {
             const revision=(await fs.readFile(path.join(this.assets,'REVISION'),'utf8')).trim();
             if(revision!==AUDIT_REVISION)throw new Error('감사 문서 버전이 일치하지 않습니다. 확장을 업데이트하세요.');
             const guide=await fs.readFile(path.join(this.assets,'SKILL.md'),'utf8');
-            const approved=await vscode.window.showInformationMessage('현재 AI 연결로 코드 감사를 진행할까요?',{modal:true,detail:
+            const approved=await ui.showInformationMessage('현재 AI 연결로 코드 감사를 진행할까요?',{modal:true,detail:
                 `${sources.files.length}개 파일 · 제외 ${sources.skipped.length}개\n${sources.files.slice(0,30).map(f=>f.path).join('\n')}${sources.files.length>30?'\n…':''}\n\nDevelop에서 사용하는 AI에 선택된 소스가 전달됩니다. 파일을 변경하거나 앱을 실행하지 않습니다. 최대 20회 모델 호출·15분이며 기존 모델 사용료가 발생할 수 있습니다. .env·키 파일·의존성·빌드 출력은 제외합니다. 하드코딩한 모든 비밀값을 자동으로 찾는다고 보장하지는 않습니다.`},'검토한 파일 감사');
             if(approved!=='검토한 파일 감사'||job.stop){await this.save(workspace,{...start,phase:'cancelled',stage:'감사를 취소했습니다.'});this.active=undefined;return this.states.get(workspace)!;}
             await this.save(workspace,{...start,phase:'running',stage:'소스 구조 분석 시작',calls:0});

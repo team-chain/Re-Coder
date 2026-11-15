@@ -14,6 +14,7 @@ import { CommitPreview, previewCommit, commitSelected } from './githubCommit';
 import { DiscordWebhook } from './discordWebhook';
 import { DiscordBotToken, normalizeBotToken as normalizeToken } from './discordBotToken';
 import { activeProjectPath, pickProjectFolder, projectFolders, selectActiveProject } from '../activeProject';
+import { ui } from '../ui/dialogs';
 
 const exec = promisify(execFile);
 type Send = (type: string, payload: unknown) => void;
@@ -249,7 +250,7 @@ export class CanvasHost {
                 const cluster = String(p.cluster || ''), service = String(p.service || ''), region = String(p.region || '');
                 if (!/^[A-Za-z0-9_-]{1,255}$/.test(cluster) || !/^[A-Za-z0-9_-]{1,255}$/.test(service)) throw new Error('중지할 ECS 서비스를 확인하지 못했습니다.');
                 const action = '서비스 중지';
-                const choice = await vscode.window.showWarningMessage(`${cluster}/${service} 의 실행 태스크를 0개로 줄입니다. 공개 주소가 멈추고 과금이 멈춥니다. 서비스 설정은 남아 다음 배포 때 다시 뜹니다.`, { modal: true }, action);
+                const choice = await ui.showWarningMessage(`${cluster}/${service} 의 실행 태스크를 0개로 줄입니다. 공개 주소가 멈추고 과금이 멈춥니다. 서비스 설정은 남아 다음 배포 때 다시 뜹니다.`, { modal: true }, action);
                 if (choice !== action) { send('canvas.ecs.stopResult', { requestId, cancelled: true }); return; }
                 const result = await this.api.stopEcsService({ ecs_cluster: cluster, ecs_service: service, aws_region: region, approved: true });
                 send('canvas.ecs.stopResult', { requestId, ...result });
@@ -479,7 +480,7 @@ export class CanvasHost {
         if (!bot) return false;
         if (type === 'canvas.discord.connectToken') {
             if (!workspace) throw new Error('먼저 프로젝트 폴더를 여세요.');
-            const raw = await vscode.window.showInputBox({ password: true, ignoreFocusOut: true, title: '내 Discord 봇 연결',
+            const raw = await ui.showInputBox({ password: true, ignoreFocusOut: true, title: '내 Discord 봇 연결',
                 prompt: 'Discord Developer Portal → 내 앱 → Bot → Reset Token 으로 받은 토큰을 붙여넣으세요. 토큰은 VS Code 보안 저장소에만 저장되고, 메시지는 아직 보내지 않습니다.',
                 placeHolder: 'MTIz…', validateInput: v => { try { normalizeToken(v); return undefined; } catch (e) { return (e as Error).message; } } });
             if (raw === undefined) { send('canvas.discord.cancelled', {requestId}); return true; }
@@ -556,7 +557,7 @@ export class CanvasHost {
         }
         if (type === 'canvas.discord.connectWebhook') {
             if (!workspace || !this.webhook) throw new Error('먼저 프로젝트 폴더를 여세요.');
-            const url = await vscode.window.showInputBox({ password: true, ignoreFocusOut: true, title: 'Discord 알림 연결', prompt: '채널 설정 → 연동 → 웹후크에서 복사한 URL을 붙여넣으세요. 메시지는 아직 보내지 않습니다.', placeHolder: 'https://discord.com/api/webhooks/…' });
+            const url = await ui.showInputBox({ password: true, ignoreFocusOut: true, title: 'Discord 알림 연결', prompt: '채널 설정 → 연동 → 웹후크에서 복사한 URL을 붙여넣으세요. 메시지는 아직 보내지 않습니다.', placeHolder: 'https://discord.com/api/webhooks/…' });
             if (url === undefined) { send('canvas.discord.cancelled', {requestId}); return; }
             if (activeProjectPath() !== workspace) throw new Error('프로젝트가 바뀌었습니다. 새 프로젝트에서 다시 연결하세요.');
             const state = await this.webhook.connect(workspace, url);

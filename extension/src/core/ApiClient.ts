@@ -887,6 +887,13 @@ export class ApiClient {
         return resp.data;
     }
 
+    /** 지금 이 PC 에서 실행 중인 이 프로젝트의 앱 주소(응답 확인 포함) — 사람이 포트·URL 을 적지 않게. */
+    async getLocalApps(workspacePath: string): Promise<object> {
+        const resp = await this.request<object>('GET', `/api/project/local-apps?workspace_path=${encodeURIComponent(workspacePath)}`);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '실행 중인 앱을 확인하지 못했습니다.'); }
+        return resp.data;
+    }
+
     async recordJourney(workspacePath: string, step: 'redteam', status: 'done' | 'failed' | 'cancelled', summary: string): Promise<void> {
         const resp = await this.request<object>('POST', '/api/project/journey/record', { workspace_path: workspacePath, step, status, summary });
         if (!resp.success) { throw new Error(resp.error ?? '진행 상태를 남기지 못했습니다.'); }

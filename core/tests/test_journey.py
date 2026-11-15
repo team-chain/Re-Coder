@@ -83,3 +83,54 @@ def test_code_scan_and_generation_record_their_steps(tmp_path):
     code_agent._record_journey(str(ws), "", {"ops": [{"file": "a"}], "verification": {"kind": "compose", "status": "failed", "output": "검사 3/5"}})
     data = journey.load(ws)
     assert data["build"]["status"] == "done" and data["verify"]["status"] == "failed" and "검사 3/5" in data["verify"]["summary"]
+
+
+def test_local_url_is_offered_to_the_attack_step_only_when_it_is_a_localhost_address(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "app.py").write_text("print(1)\n", encoding="utf-8")
+    journey.record(ws, "local", "done", "로컬 컨테이너 실행", url="http://localhost:8080")
+    local = next(s for s in journey.state(ws)["steps"] if s["key"] == "local")
+    assert local["url"] == "http://localhost:8080"
+    journey.record(ws, "local", "done", "x", url="https://example.com")
+    assert "url" not in next(s for s in journey.state(ws)["steps"] if s["key"] == "local")
+
+
+def test_local_apps_finds_this_projects_running_services_and_skips_databases(tmp_path):
+    import subprocess
+    import compose_deploy
+    ws = tmp_path / "shop"
+    ws.mkdir()
+    arch = {"services": [{"name": "gateway", "public": True}, {"name": "orders", "public": False}], "databases": [{"name": "orders-db"}]}
+    proj = compose_deploy.project_name(ws)
+    lines = "\n".join([
+        f"{proj}-gateway-1|0.0.0.0:8080->80/tcp, [::]:8080->80/tcp|{proj}|gateway",
+        f"{proj}-orders-1|0.0.0.0:8081->3000/tcp|{proj}|orders",
+        f"{proj}-orders-db-1|0.0.0.0:5432->5432/tcp|{proj}|orders-db",
+        "other-app|127.0.0.1:3000->3000/tcp||",
+        "no-ports|||",
+    ])
+    calls = []
+    def docker(args, timeout):
+        return subprocess.CompletedProcess(args, 0, lines, "")
+    def http(method, url, body):
+        calls.append(url)
+        return (None, "") if "8081" in url else (200, "ok")
+    import compose_deploy as cd
+    orig = cd.load
+    cd.load = lambda root: arch
+    try:
+        res = journey.local_apps(ws, docker=docker, http=http)
+    finally:
+        cd.load = orig
+    assert [a["url"] for a in res["apps"]] == ["http://localhost:8080", "http://localhost:8081"]
+    assert res["apps"][0] == {"name": "gateway", "url": "http://localhost:8080", "public": True, "reachable": True}
+    assert res["apps"][1]["reachable"] is False
+    assert [a["url"] for a in res["others"]] == ["http://localhost:3000"]
+    assert all("5432" not in u for u in calls), "databases are never probed"
+
+
+def test_local_apps_reports_docker_down_without_guessing(tmp_path):
+    import subprocess
+    res = journey.local_apps(tmp_path, docker=lambda a, t: subprocess.CompletedProcess(a, 1, "", "x"), http=lambda *a: (200, ""))
+    assert res["apps"] == [] and "Docker" in res["reason"]

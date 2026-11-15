@@ -7,6 +7,7 @@
  */
 import * as vscode from 'vscode';
 import { SidebarProvider } from './SidebarProvider';
+import { registerDialogWebview } from '../ui/dialogs';
 
 export class ReCoderPanel {
     public static readonly viewType = 'recoder.workspace';
@@ -22,10 +23,13 @@ export class ReCoderPanel {
         const webview = this._panel.webview;
         webview.html = this._sidebarProvider.getWorkspacePanelHtml(webview);
         this._sidebarProvider.attachWorkspacePanel(webview);
+        //: 큰 작업 화면이 보이면 확인·입력·선택을 그 안 대화창으로 띄운다(Windows 기본 팝업 대신).
+        const dialogs = registerDialogWebview(webview, () => this._panel.visible);
 
         if (hideSidebar) { this._hideSidebar(); }
 
         this._panel.onDidDispose(() => {
+            dialogs.dispose();
             this._sidebarProvider.detachWorkspacePanel(webview);
             ReCoderPanel._current = undefined;
         });

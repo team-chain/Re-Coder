@@ -45,7 +45,9 @@ import { CanvasHost } from './canvasHost';
 import { workingChanges } from './homeChanges';
 import { DiscordWebhook } from './discordWebhook';
 import { DiscordBotToken } from './discordBotToken';
+import { handleDialogMessage, registerDialogWebview } from '../ui/dialogs';
 import { activeProjectPath, activeProjectUri, isInsideProjectRoot, onDidChangeActiveProject, projectFolders, selectActiveProject, useExternalProject } from '../activeProject';
+import { ui } from '../ui/dialogs';
 
 /**
  * Core 의 ReadyStatus enum 값("ok" | "partial" | "fail")을 Webview 가 기대하는
@@ -262,6 +264,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 void this.handleMessage(message, webviewView.webview);
             }
         );
+        //: 확인·입력·선택을 이 화면 안 대화창으로 띄운다(Windows 기본 팝업 대신).
+        const dialogs = registerDialogWebview(webviewView.webview, () => webviewView.visible);
 
         this.connectAndDiagnose();
 
@@ -286,6 +290,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         setTimeout(() => this._openWorkspaceFromSidebar(), 100);
 
         webviewView.onDidDispose(() => {
+            dialogs.dispose();
             this._canvasHosts.get(webviewView.webview)?.dispose();
             this._canvasHosts.delete(webviewView.webview);
             if (this._view === webviewView) {
@@ -868,6 +873,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         message: { type: string; payload: unknown },
         requestWebview?: vscode.Webview,
     ): Promise<void> {
+        if (handleDialogMessage(message)) { return; }
         const p = (message.payload ?? {}) as { requestId?: unknown; id?: unknown };
         if (/^(canvas\.graph|code\.|chat\.)/.test(message.type)) {
             console.info(`[ReCoder] request ${message.type} id=${String(p.requestId ?? p.id ?? '')}`);
@@ -1032,7 +1038,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                             //: 그래도 안 되면(미설치 등) 안내 + 다운로드 링크.
                             const ready = await this.healDocker('fix');
                             if (!ready) {
-                                const selected = await vscode.window.showInformationMessage(
+                                const selected = await ui.showInformationMessage(
                                     'Docker 를 자동으로 시작하지 못했습니다. Docker Desktop 이 설치돼 있는지 확인해 주세요.',
                                     'Docker Desktop 다운로드',
                                 );
@@ -1160,7 +1166,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 break;
             }
             case 'security.redteam': {
-                const p = payload as { action: string; requestId: string; mode?: 'audit'|'redteam'|'scans' };
+                const p = payload as { action: string; requestId: string; mode?: 'audit'|'redteam'|'scans'; options?: Record<string, unknown> };
                 const workspace = activeProjectPath();
                 try {
                     if (!['configure', 'start', 'status', 'stop', 'recover', 'localStart', 'localStatus', 'localStop', 'localCleanup', 'localOpenReport', 'localOpenRawReport', 'localKey', 'localAccessConfigure', 'localAccessClear', 'localPrewarm', 'localPrewarmStop', 'localPrewarmOffer', 'localCacheClear', 'managedStatus', 'managedLogin', 'managedSetup', 'managedPermissions', 'managedStart', 'managedAuditStart', 'managedScansStart', 'managedStop', 'managedReport'].includes(p.action)) throw new Error('지원하지 않는 요청입니다.');
@@ -1171,7 +1177,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                         this.postMessageToWebview(requestWebview,'security.redteamResult',{requestId:p.requestId,workspace,...result});break;
                     }
                     this._redTeam ??= new RedTeamHost(this._secrets, this._globalState, this._storageUri ? vscode.Uri.joinPath(this._storageUri, 'redteam').fsPath : undefined);
-                    const result = await this._redTeam.handle(p.action, workspace);
+                    const result = await this._redTeam.handle(p.action, workspace, p.options && typeof p.options === 'object' ? p.options : undefined);
                     this.postMessageToWebview(requestWebview, 'security.redteamResult', { requestId: p.requestId, workspace, ...result });
                 } catch (err) {
                     this.postMessageToWebview(requestWebview, 'security.redteamResult', { requestId: p.requestId, workspace, error: err instanceof Error ? err.message : String(err) });
@@ -1474,7 +1480,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     if (!p.region || !p.cluster || !p.service) { throw new Error('중지할 서비스를 다시 고르세요.'); }
                     //: 3.0.2 — 운영 중인 서비스를 한 번 클릭으로 끄지 않는다. 배포 캔버스의 중지와 같은 확인 창.
                     const action = '서비스 중지';
-                    const choice = await vscode.window.showWarningMessage(
+                    const choice = await ui.showWarningMessage(
                         `${p.cluster}/${p.service} (${p.region}) 의 실행 태스크를 0개로 줄입니다. 공개 주소가 멈추고 실행 요금이 멈춥니다. 서비스 설정은 남아 다음 배포 때 다시 뜹니다.`,
                         { modal: true }, action,
                     );
@@ -1778,7 +1784,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             case 'fetchIncidents': {
                 const { host, sshKeyPath } = payload as { host: string; sshKeyPath: string };
                 try {
-                    const actorToken = await vscode.window.showInputBox({
+                    const actorToken = await ui.showInputBox({
                         prompt: 'Ops 승인자 자격증명을 입력하세요 (서버에 SSH 로 접속해 상태를 읽습니다)',
                         password: true,
                         ignoreFocusOut: true,
@@ -1794,7 +1800,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             case 'analyzeIncident': {
                 const { alertId } = payload as { alertId: string };
                 try {
-                    const actorToken = await vscode.window.showInputBox({
+                    const actorToken = await ui.showInputBox({
                         prompt: '1차 Ops 승인자 자격증명을 입력하세요',
                         password: true,
                         ignoreFocusOut: true,
@@ -1813,7 +1819,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 const proposal = this._state.proposals.find(
                     (p) => (p as ResponseProposal).proposal_id === proposalId
                 ) as ResponseProposal | undefined;
-                const actorToken = await vscode.window.showInputBox({
+                const actorToken = await ui.showInputBox({
                     prompt: approved
                         ? '2차 Ops 승인자 자격증명을 입력하세요'
                         : '거부 처리할 Ops 승인자 자격증명을 입력하세요',
@@ -1915,14 +1921,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 } catch (err) {
                     //: 저장 실패(설정 파일 잠김·문법 오류 등) — 화면이 낙관적으로 바꾼 칸을 되돌리고 이유를 알린다.
                     this.postMessageToWebview(requestWebview, 'quickAccess.state', currentQuickAccess());
-                    void vscode.window.showErrorMessage(`빠른 이동 설정을 저장하지 못했습니다: ${err instanceof Error ? err.message : String(err)}`);
+                    void ui.showErrorMessage(`빠른 이동 설정을 저장하지 못했습니다: ${err instanceof Error ? err.message : String(err)}`);
                 }
                 break;
             }
             case 'quickAccess.reset': {
                 try { await resetQuickAccess(); } catch (err) {
                     this.postMessageToWebview(requestWebview, 'quickAccess.state', currentQuickAccess());
-                    void vscode.window.showErrorMessage(`빠른 이동 설정을 되돌리지 못했습니다: ${err instanceof Error ? err.message : String(err)}`);
+                    void ui.showErrorMessage(`빠른 이동 설정을 되돌리지 못했습니다: ${err instanceof Error ? err.message : String(err)}`);
                 }
                 break;
             }
@@ -2364,7 +2370,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 const region = (p.region ?? '').trim();
                 //: 3.0.2 — IAM 역할·정책을 만들거나 고치므로 확인 창에서 승인한 뒤에만 보낸다.
                 const roleAction = '역할 만들기';
-                const roleChoice = await vscode.window.showWarningMessage(
+                const roleChoice = await ui.showWarningMessage(
                     `${profile ? `프로필 ${profile}` : '지금 연결된 자격증명'}으로 AWS 계정에 배포 전용 IAM 역할(recoder-deploy-role)을 만들거나 권한을 맞춥니다. `
                     + '이후 ReCoder 는 그 역할의 임시 자격증명만 씁니다. 계속하시겠습니까?',
                     { modal: true }, roleAction,
@@ -2653,7 +2659,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 const { file, content, targetFolder, projectRoot } = (payload ?? {}) as { file?: string; content?: string; targetFolder?: string; projectRoot?: string };
                 const resolved = this._resolveWriteRoot(targetFolder ?? '', projectRoot ?? '');
                 //: diff 실패는 생성 턴의 실패가 아니다 — code.error 로 보내면 진행 중인 다른 생성 턴이 실패로 뒤집혔다.
-                if (!resolved) { void vscode.window.showErrorMessage('변경 비교를 열 수 없습니다: 대상 폴더가 워크스페이스에 없습니다.'); break; }
+                if (!resolved) { void ui.showErrorMessage('변경 비교를 열 수 없습니다: 대상 폴더가 워크스페이스에 없습니다.'); break; }
                 await this.handleCodeDiff(this._joinFolder(resolved.relFolder, file ?? ''), content ?? '', resolved.root);
                 break;
             }
@@ -2737,6 +2743,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 break;
             }
+            case 'journey.localApps': {
+                //: 공격 테스트 대상 — 실행 중인 이 프로젝트 앱을 찾아 보여 준다(직접 입력 대신 고르기).
+                const root = activeProjectPath();
+                try {
+                    if (!root) { this.postMessageToWebview(requestWebview, 'journey.localApps', { apps: [], others: [], reason: '프로젝트 폴더가 열려 있지 않습니다.' }); break; }
+                    this.postMessageToWebview(requestWebview, 'journey.localApps', await this._apiClient.getLocalApps(root));
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'journey.localApps', { apps: [], others: [], reason: err instanceof Error ? err.message : String(err) });
+                }
+                break;
+            }
             case 'map.contract': {
                 //: 3.1 계약 대조 — Core 가 없거나 계약이 없으면 패널을 그리지 않는다(구조 지도는 그대로).
                 try {
@@ -2810,7 +2827,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     this.postMessageToWebview(requestWebview, 'models.compareError', { message: '요청과 비교할 공급자 두 개를 고르세요.' });
                     break;
                 }
-                const ok = await vscode.window.showWarningMessage(
+                const ok = await ui.showWarningMessage(
                     '같은 요청을 두 AI 공급자에 각각 보냅니다. AI 요금이 두 번 들고, 끝날 때까지 몇 분 걸릴 수 있습니다. 파일은 바꾸지 않습니다.',
                     { modal: true }, '비교 시작');
                 if (ok !== '비교 시작') { this.postMessageToWebview(requestWebview, 'models.compareError', { message: '' }); break; }
@@ -2969,7 +2986,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                     if (!root || !id) { break; }
                     const safe = id.replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '..').join('/');
                     const target = vscode.Uri.joinPath(root, safe);
-                    if (!fs.existsSync(target.fsPath)) { void vscode.window.showInformationMessage(`${safe} 은(는) 아직 적용하지 않은 새 파일입니다.`); break; }
+                    if (!fs.existsSync(target.fsPath)) { void ui.showInformationMessage(`${safe} 은(는) 아직 적용하지 않은 새 파일입니다.`); break; }
                     const at = Number.isInteger(line) && (line as number) > 0 ? new vscode.Position((line as number) - 1, 0) : undefined;
                     await vscode.window.showTextDocument(target, at ? { selection: new vscode.Range(at, at) } : undefined);
                 } catch (err) {
@@ -2999,7 +3016,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             this._codegenProviderRegistered = true;
         }
         const root = rootOverride ?? activeProjectUri();
-        if (!root) { void vscode.window.showErrorMessage('변경 비교를 열 수 없습니다: 워크스페이스가 열려 있지 않습니다.'); return; }
+        if (!root) { void ui.showErrorMessage('변경 비교를 열 수 없습니다: 워크스페이스가 열려 있지 않습니다.'); return; }
         const safe = file.replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter((seg) => seg && seg !== '..').join('/');
         if (!safe) { return; }
         const fileUri = vscode.Uri.joinPath(root, safe);
@@ -3015,7 +3032,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const leftUri = exists ? fileUri : vscode.Uri.parse('recoder-codegen:/empty');
             await vscode.commands.executeCommand('vscode.diff', leftUri, proposedUri, `ReCoder 제안: ${safe}`);
         } catch (err) {
-            void vscode.window.showErrorMessage(`변경 비교(diff)를 열지 못했습니다: ${err instanceof Error ? err.message : String(err)}`);
+            void ui.showErrorMessage(`변경 비교(diff)를 열지 못했습니다: ${err instanceof Error ? err.message : String(err)}`);
         }
     }
 

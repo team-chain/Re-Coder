@@ -27,6 +27,7 @@ import { canvasStyles } from './components/canvas/styles';
 import { THEME_CSS } from './components/shell/theme';
 import { BrandLogo, Glyph } from './components/shell/parts';
 import { HomeBento } from './components/shell/HomeBento';
+import Dialogs from "./components/ui/Dialogs";
 import JourneyBar from './components/JourneyBar';
 
 // ---------------------------------------------------------------------------
@@ -405,6 +406,12 @@ export const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
   const showReview = useCallback(() => onSelectMode("code"), [onSelectMode]);
   //: 코드 생성(자기 입력칸이 있다) · 배포 캔버스 · 로컬 Docker(아래쪽 조작부가 있다)에서는 아래 요청창을 감춘다.
   const dock = !["code", "hub:develop", "hub:deploy", "deploy", "ship"].includes(view);
+  //: 화면 안 다른 부품이 "그 단계 화면으로 가기" 를 요청할 때(예: 공격 테스트 → 로컬 실행).
+  useEffect(() => {
+    const go = (e: Event) => { const v = (e as CustomEvent<string>).detail; if (typeof v === "string") onSelectMode(v as ViewMode); };
+    window.addEventListener("recoder:go", go);
+    return () => window.removeEventListener("recoder:go", go);
+  }, [onSelectMode]);
   return (
     <div className="rc-workspace rc-app">
       <style>{THEME_CSS}{`
@@ -573,7 +580,7 @@ const App: React.FC = () => {
 
   // 개발 대화와 설계·변경 검토는 코드 생성·수정 화면에서 함께 진행한다.
   if (isWorkspacePanel) {
-    return <WorkspaceLayout
+    return <><Dialogs /><WorkspaceLayout
       view={view}
       externalTurn={externalTurn}
       diagnostics={diagnostics}
@@ -592,11 +599,12 @@ const App: React.FC = () => {
       }}
       postMessage={postMessage}
       hostLost={hostLost}
-    />;
+    /></>;
   }
 
   return <div className="rc-app" style={{ height: "100vh", background: "var(--rc-bg, var(--vscode-sideBar-background, #1e1e1e))" }}>
     <style>{THEME_CSS}</style>
+    <Dialogs />
     <Hero onOpenWorkspace={() => postMessage("openWorkbench")} />
     <StatusBadge diagnostics={diagnostics} coreStatus={coreHealth?.status ?? null} pending={diagnosticsPending} error={diagnosticsError} expanded={showDiagnostics} onToggle={() => setShowDiagnostics(v => !v)} />
     {showDiagnostics && <DiagnosticsPanel diagnostics={diagnostics} />}

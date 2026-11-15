@@ -2,12 +2,13 @@ import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {useVSCodeApi} from '../hooks/useVSCodeApi';
 import {ManagedRedTeamPanel} from './ManagedRedTeamPanel';
 import {RedTeamRunView} from './RedTeamRunView';
+import {RedTeamStart} from './RedTeamStart';
 import {redTeamPollDelay,REDTEAM_STATUS_TIMEOUT} from './redTeamPolling';
 import type {RedTeamHttpEvent} from '../../src/security/pentagiAssessmentTypes';
 import type {PentagiAssessment} from '../../src/security/pentagiAssessmentTypes';
 interface LocalReport {isolationVerified?:boolean;httpEvents?:RedTeamHttpEvent[];session:string;target:string;createdAt:string;updatedAt?:string;phase:string;step:string;provider?:string;outcome?:string;error?:string;assessment?:PentagiAssessment;flow?:{status:string};tasks?:Array<{id:string;title:string;status:string;result:string}>;evidence?:Array<{id:string;type:string;message:string;result:string}>}
 interface EngineCache {warm:boolean;prewarm:{phase:string;step:string;error?:string}|null}
-interface State {engine?:EngineCache;outcome?:string;accessConfigured?:boolean;reportError?:string;assessment?:PentagiAssessment;localMode?:boolean;local?:LocalReport;localHistory?:LocalReport[];configured?: boolean; server?: string; runs?: Array<{id?: string; target: string; createdAt: string; uncertain?: boolean; stopped?: boolean; terminal?: boolean}>; flow?: {id: string; title: string; status: string}; tasks?: Array<{id: string; title: string; status: string; result: string}>}
+interface State {keys?:{openai?:boolean;anthropic?:boolean};engine?:EngineCache;outcome?:string;accessConfigured?:boolean;reportError?:string;assessment?:PentagiAssessment;localMode?:boolean;local?:LocalReport;localHistory?:LocalReport[];configured?: boolean; server?: string; runs?: Array<{id?: string; target: string; createdAt: string; uncertain?: boolean; stopped?: boolean; terminal?: boolean}>; flow?: {id: string; title: string; status: string}; tasks?: Array<{id: string; title: string; status: string; result: string}>}
 const STATUS: Record<string,string> = {created:'실행 준비',running:'검사 중',waiting:'입력 대기 또는 중단',finished:'실행 완료 · 결과 검토 필요',failed:'실행 실패'};
 const OUTCOME:Record<string,string>={finished:'검사 완료',failed:'검사 실패',cancelled:'검사 중단',timed_out:'실행 시간 제한으로 중단',interrupted:'작업 종료 확인 필요',needs_input:'추가 입력 필요 · 전체 검사 미완료'};
 export const RedTeamPanel: React.FC = () => {
@@ -17,18 +18,19 @@ export const RedTeamPanel: React.FC = () => {
 /** 검사 도구(약 17GB) 보관 상태 — 처음 한 번 받아 두면 다음 테스트는 다운로드 없이 시작한다. */
 export const EngineCacheRow: React.FC<{engine:EngineCache;busy:boolean;blocked:boolean;send:(action:string)=>void}> = ({engine,busy,blocked,send}) => {
  const p=engine.prewarm;
- if(p?.phase==='running')return <div className="rc-security-actions" data-testid="redteam-cache" data-state="running"><p role="status">검사 도구 미리 받는 중 · {p.step}</p><button className="rc-btn" disabled={busy} onClick={()=>send('localPrewarmStop')}>미리 받기 중단</button></div>;
- if(engine.warm)return <p data-testid="redteam-cache" data-state="warm">검사 도구 준비됨 — 다음 테스트는 도구 다운로드 없이 시작합니다.</p>;
+ if(p?.phase==='running')return <div className="rc-security-actions" data-testid="redteam-cache" data-state="running"><p role="status">검사 도구 받는 중 · {p.step}</p><button className="rc-btn" disabled={busy} onClick={()=>send('localPrewarmStop')}>중단</button></div>;
+ if(engine.warm)return <p data-testid="redteam-cache" data-state="warm">검사 도구 준비됨 · 바로 시작</p>;
  return <div className="rc-security-actions" data-testid="redteam-cache" data-state="cold">
-  <p>처음 테스트는 검사 도구(약 17GB)를 받느라 오래 걸립니다. 미리 받아 두면 다음부터 바로 시작합니다. 모델 키나 실행 중인 앱은 쓰지 않습니다.</p>
-  <button className="rc-btn" disabled={busy||blocked} onClick={()=>send('localPrewarm')}>검사 도구 미리 받기</button>
+  <p>첫 테스트는 검사 도구(17GB)를 받느라 오래 걸려요.</p>
+  <button className="rc-btn" disabled={busy||blocked} onClick={()=>send('localPrewarm')}>미리 받기</button>
   {p&&p.phase!=='done'&&<p role={p.phase==='failed'?'alert':undefined}>{p.step}{p.error?` · ${p.error}`:''}</p>}
  </div>;
 };
 const LegacyRedTeamPanel: React.FC = () => {
  const {postMessage,useMessage}=useVSCodeApi(); const [state,setState]=useState<State>({}); const [busy,setBusy]=useState(false); const [error,setError]=useState('');
  const pending=useRef(''),lastAction=useRef(''),failures=useRef(0); const [serial,setSerial]=useState(0);const [localMode,setLocalMode]=useState(true);
- const send=useCallback((action:string)=>{if(pending.current)return; const id=`redteam-${Date.now()}-${Math.random()}`;pending.current=id;lastAction.current=action;setBusy(true);postMessage('security.redteam',{action,requestId:id});},[postMessage]);
+ const send=useCallback((action:string,options?:Record<string,unknown>)=>{if(pending.current)return; const id=`redteam-${Date.now()}-${Math.random()}`;pending.current=id;lastAction.current=action;setBusy(true);postMessage('security.redteam',{action,requestId:id,...(options?{options}:{})});},[postMessage]);
+ const [starting,setStarting]=useState(false);
  useMessage(useCallback(msg=>{if(msg.type==='canvas.projectChanged'){pending.current='';failures.current=0;setError('');setState({});setBusy(false);send(localMode?'localStatus':'status');return;}if(msg.type!=='security.redteamResult')return;const p=msg.payload as State & {requestId:string;error?:string;cancelled?:boolean};if(p.requestId!==pending.current)return;pending.current='';setBusy(false);if(p.error){failures.current++;setError(p.error);}else{failures.current=0;setError('');if(!p.cancelled)setState(p);}setSerial(n=>n+1);},[send,localMode]));
  useEffect(()=>{send(localMode?'localStatus':'status');},[send,localMode]);
  const run=state.runs?.[0];
@@ -38,16 +40,19 @@ const LegacyRedTeamPanel: React.FC = () => {
  useEffect(()=>{if(busy)return;const retry=error?redTeamPollDelay(lastAction.current,failures.current):undefined;if(error&&retry===undefined)return;if(!error&&(localMode?!localActive&&!prewarming:!run?.id||run.terminal))return;const timer=setTimeout(()=>{if(typeof document==='undefined'||document.visibilityState==='visible')send(localMode?'localStatus':'status');else setSerial(n=>n+1);},retry??3000);return()=>clearTimeout(timer);},[busy,run?.id,run?.terminal,error,serial,send,localMode,localActive,prewarming]);
  if(localMode)return <div className="rc-security-detail" aria-busy={busy}>
   <h3>내 앱 레드팀 테스트</h3>
-  <p>로컬 앱을 선택하면 검사 전용 PentAGI Docker 환경을 자동으로 준비합니다. 검사 도구는 승인한 앱의 경로만 접근하도록 격리합니다.</p>
+  <p>실행 중인 내 앱을 격리된 환경에서 AI가 공격해 봅니다.</p>
   <div className="rc-security-actions">
    <button className="rc-btn" disabled={busy||localActive} onClick={()=>send('localAccessConfigure')}>{state.accessConfigured?'권한 검사 설정 변경':'인증·권한 검사 설정'}</button>
    {state.accessConfigured&&<button className="rc-btn" disabled={busy||localActive} onClick={()=>send('localAccessClear')}>권한 검사 설정 해제</button>}
-   <button className="rc-btn p" disabled={busy||prewarming||!!local&&local.phase!=='removed'} onClick={()=>send('localStart')}>{local?'다시 테스트':'레드팀 테스트 시작'}</button>
+   <button className="rc-btn p" disabled={busy||prewarming||!!local&&local.phase!=='removed'} onClick={()=>setStarting(true)}>{local?'다시 테스트':'레드팀 테스트 시작'}</button>
 
    {local?.phase==='cleanup_failed'&&<button className="rc-btn" disabled={busy} onClick={()=>send('localCleanup')}>환경 정리 재시도</button>}
    {local&&<button className="rc-btn" disabled={busy} onClick={()=>send('localOpenReport')}>저장된 보고서</button>}
    <button className="rc-btn" disabled={busy} onClick={()=>send('localStatus')}>상태 확인</button>
   </div>
+  {starting&&<RedTeamStart keys={state.keys} ready={state.engine?.warm} onCancel={()=>setStarting(false)}
+    onGoLocal={()=>{setStarting(false);window.dispatchEvent(new CustomEvent('recoder:go',{detail:'ship'}));}}
+    onStart={(target,provider)=>{setStarting(false);send('localStart',{target,provider,agreed:true});}}/>}
   {state.engine&&<EngineCacheRow engine={state.engine} busy={busy} blocked={localActive} send={send}/>}
   <p role="status" aria-live="polite">{busy?'요청 처리 중…':local?`${local.outcome?OUTCOME[local.outcome]+' · ':''}${local.step}`:'대상 선택 → 환경 준비 → 검사 → 결과 저장 · 환경 삭제'}</p>
   {(error||local?.error)&&<p role="alert" className="rc-security-error">{error||local?.error}</p>}

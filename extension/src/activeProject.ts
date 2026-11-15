@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import { ui } from './ui/dialogs';
 
 /**
  * 배포·보안 화면이 대상으로 삼는 "현재 프로젝트".
@@ -183,7 +184,7 @@ export async function pickProjectFolder(): Promise<'selected' | 'added' | 'uncha
         items.push({ label: `$(folder) ${path.basename(p)}`, description: p === active ? '현재 프로젝트' : '워크스페이스 밖', detail: p, value: p });
     }
     items.push({ label: '$(folder-opened) 다른 폴더 선택…', description: '이 폴더로 바꿉니다(창은 그대로)', value: '' });
-    const pick = await vscode.window.showQuickPick(items, { title: 'ReCoder: 배포할 프로젝트 폴더', placeHolder: '배포·보안 검사 대상 폴더를 고르세요' });
+    const pick = await ui.showQuickPick(items, { title: 'ReCoder: 배포할 프로젝트 폴더', placeHolder: '배포·보안 검사 대상 폴더를 고르세요' });
     if (!pick) { return 'unchanged'; }
     if (pick.value) {
         if (normalize(pick.value) === normalize(active)) { return 'unchanged'; }

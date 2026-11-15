@@ -22,6 +22,7 @@ import { activeProjectPath } from '../activeProject';
 import { CoreManager } from '../core/CoreManager';
 import { ApiClient } from '../core/ApiClient';
 import { PollingService } from '../core/PollingService';
+import { ui } from '../ui/dialogs';
 
 /**
  * 이미지 참조에서 컨테이너 이름을 만든다.
@@ -181,7 +182,7 @@ export abstract class WorkbenchHost {
                 }
                 //: 3.0.2 — 저장소를 만들고 이 폴더를 올리는 작업이라 확인 창에서 승인한 뒤에만.
                 const repoAction = '만들고 올리기';
-                const repoChoice = await vscode.window.showWarningMessage(
+                const repoChoice = await ui.showWarningMessage(
                     `GitHub 에 ${p.private ? '비공개' : '공개'} 저장소 ${String(p.name)} 을(를) 만들고 이 폴더(${wsPath})의 커밋을 올립니다. 계속하시겠습니까?`,
                     { modal: true }, repoAction,
                 );
@@ -219,7 +220,7 @@ export abstract class WorkbenchHost {
                 }
                 //: 3.0.2 — Actions Secret 은 같은 이름이 있으면 덮어쓴다. 확인 창에서 승인한 뒤에만.
                 const secretAction = 'Secret 저장';
-                const secretChoice = await vscode.window.showWarningMessage(
+                const secretChoice = await ui.showWarningMessage(
                     `${String(p.repo)} 저장소의 GitHub Actions Secret ${String(p.name)} 을(를) 저장합니다. 같은 이름의 Secret 이 있으면 새 값으로 바뀝니다. 계속하시겠습니까?`,
                     { modal: true }, secretAction,
                 );
@@ -259,7 +260,7 @@ export abstract class WorkbenchHost {
                 const force = p.force === true;
                 const branch = String((p.branch as string) || '').trim();
                 const pushAction = force ? '강제 push 계속' : 'push';
-                const pushChoice = await vscode.window.showWarningMessage(
+                const pushChoice = await ui.showWarningMessage(
                     pushConfirmText(wsPath, branch, force), { modal: true }, pushAction,
                 );
                 if (pushChoice !== pushAction) {
@@ -268,7 +269,7 @@ export abstract class WorkbenchHost {
                 }
                 if (force) {
                     const forceAction = '원격 기록 덮어쓰기';
-                    const forceChoice = await vscode.window.showWarningMessage(
+                    const forceChoice = await ui.showWarningMessage(
                         `강제 push 는 원격 브랜치${branch ? ` ${branch}` : ''}의 기록을 지금 로컬 기록으로 바꿉니다. 다른 사람이 올린 커밋이 사라질 수 있습니다(원격이 마지막으로 본 상태와 다르면 Core 가 --force-with-lease 로 거절합니다). 정말 덮어쓰시겠습니까?`,
                         { modal: true }, forceAction,
                     );
@@ -378,7 +379,7 @@ export abstract class WorkbenchHost {
                     let r = await this._apiClient.approveDockerfile(proposalId, true);
                     if (r.status === 'exists') {
                         //: 내용이 다른 Dockerfile 이 이미 있다 — 묻지 않고 "저장됨"으로 보이면 옛 파일로 배포된다.
-                        const choice = await vscode.window.showWarningMessage(
+                        const choice = await ui.showWarningMessage(
                             '프로젝트에 내용이 다른 Dockerfile 이 이미 있습니다. 새 초안으로 바꿀까요? (기존 파일은 Dockerfile.recoder-prev 로 보관)',
                             { modal: true }, '바꾸기');
                         if (choice !== '바꾸기') {
@@ -446,7 +447,7 @@ export abstract class WorkbenchHost {
                     const planId = (plan as unknown as { plan_id?: string }).plan_id || '';
                     //: 3.0.2 — 사용자가 본 적 없는 플랜을 승인하지 않는다. 플랜 요약을 확인 창에 보여 주고 고른 것만 실행한다.
                     const deployAction = '배포 실행';
-                    const deployChoice = await vscode.window.showWarningMessage(
+                    const deployChoice = await ui.showWarningMessage(
                         describeLocalPlan(plan), { modal: true }, deployAction,
                     );
                     if (deployChoice !== deployAction) {
@@ -518,7 +519,7 @@ export abstract class WorkbenchHost {
                     let r = await this._apiClient.approveGithubActions(proposalId, true);
                     if (r.status === 'exists') {
                         //: 내용이 다른 워크플로가 이미 있다 — 덮어쓸지 묻는다(기존 파일은 .recoder-prev 로 보관).
-                        const choice = await vscode.window.showWarningMessage(
+                        const choice = await ui.showWarningMessage(
                             `프로젝트에 내용이 다른 워크플로 파일${r.path ? `(${r.path})` : ''}이 이미 있습니다. 새 초안으로 바꿀까요? (기존 파일은 .recoder-prev 로 보관)`,
                             { modal: true }, '바꾸기');
                         if (choice === '바꾸기') { r = await this._apiClient.approveGithubActions(proposalId, true, true); }
@@ -551,7 +552,7 @@ export abstract class WorkbenchHost {
                     }
                     //: 3.0.2 — 요금이 나오는 배포는 확인 창에서 승인한 뒤에만.
                     const ecsAction = '배포 시작';
-                    const ecsChoice = await vscode.window.showWarningMessage(
+                    const ecsChoice = await ui.showWarningMessage(
                         `${(p.aws_region as string) || '기본 리전'} 의 ECS ${(p.ecs_cluster as string) || 'recoder-cluster'}/${(p.ecs_service as string) || 'recoder-app'} 에 `
                         + `${(p.image_name as string) || 'recoder-app'}:${(p.tag as string) || 'latest'} 을(를) 배포합니다. Fargate 태스크가 떠 있는 동안 AWS 요금이 발생합니다. 계속하시겠습니까?`,
                         { modal: true }, ecsAction,

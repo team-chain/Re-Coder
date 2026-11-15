@@ -12,6 +12,7 @@ import {
     AI_KEY_SECRET, AI_PROVIDERS, AI_PROVIDER_STATE, AiKeyContext, AiKeyProvider, AiRoutingSettings, EconomyProvider,
     aiKeyEnv as baseAiKeyEnv, currentAiProvider, isAiKeyProvider, isEconomyProvider, storedAiKeys, validateCompatibleUrl,
 } from './aiKeyEnv';
+import { ui } from '../ui/dialogs';
 export { AI_PROVIDER_STATE, AiKeyProvider, currentAiProvider, isAiKeyProvider, isEconomyProvider, storedAiKeys };
 
 export const AI_PROVIDER_LABEL: Record<AiKeyProvider, string> = {
@@ -92,7 +93,7 @@ export function recentRoutingWrite(now = Date.now()): boolean { return now - rou
 /** OpenAI 호환 주소를 묻고 설정에 저장한다. 취소하면 false. */
 async function askCompatibleUrl(): Promise<boolean> {
     const cfg = vscode.workspace.getConfiguration('recoder.ai');
-    const url = await vscode.window.showInputBox({
+    const url = await ui.showInputBox({
         title: 'ReCoder: OpenAI 호환 API 주소',
         prompt: 'OpenAI 형식(chat/completions)을 지원하는 API 주소입니다. 예: https://api.deepseek.com',
         value: cfg.get<string>('compatibleBaseUrl', '') || 'https://api.deepseek.com',
@@ -108,7 +109,7 @@ async function askCompatibleUrl(): Promise<boolean> {
 /** 키 입력 상자 — 저장했으면 true. */
 async function askKey(context: Ctx, target: AiKeyProvider, makeDefault: boolean): Promise<boolean> {
     if (target === 'compatible' && !await askCompatibleUrl()) { return false; }
-    const key = await vscode.window.showInputBox({
+    const key = await ui.showInputBox({
         title: `ReCoder: ${AI_PROVIDER_LABEL[target]} 연결`,
         prompt: `API 키를 붙여넣으세요. 키는 VS Code 보안 저장소에만 저장되고, AI 요청은 이 키로 ${VENDOR[target]}에 직접 전송되며 요금은 해당 계정에 청구됩니다.`,
         placeHolder: target === 'anthropic' ? 'sk-ant-…' : 'sk-…',
@@ -119,7 +120,7 @@ async function askKey(context: Ctx, target: AiKeyProvider, makeDefault: boolean)
     if (key === undefined) {
         // A notification may stay unanswered after it disappears. Cancellation
         // must release the provider switch immediately, independently of it.
-        void vscode.window.showInformationMessage('API 키가 없으면 발급 페이지에서 만들 수 있습니다.', '키 발급 페이지 열기').then(open => {
+        void ui.showInformationMessage('API 키가 없으면 발급 페이지에서 만들 수 있습니다.', '키 발급 페이지 열기').then(open => {
             if (open) { void vscode.env.openExternal(vscode.Uri.parse(KEY_PAGE[target])).then(undefined, () => undefined); }
         }, () => undefined);
         return false;
@@ -138,7 +139,7 @@ export async function runEconomyCommand(context: Ctx, provider?: EconomyProvider
     let chosen: EconomyProvider | undefined = provider;
     if (chosen === undefined) {
         const keys = await storedAiKeys(context);
-        const pick = await vscode.window.showQuickPick((['', 'fast', 'compatible', 'anthropic', 'openai'] as EconomyProvider[]).map((value) => ({
+        const pick = await ui.showQuickPick((['', 'fast', 'compatible', 'anthropic', 'openai'] as EconomyProvider[]).map((value) => ({
             label: ECONOMY_LABEL[value],
             description: [value === current ? '현재 사용 중' : '', isAiKeyProvider(value) && !keys[value] ? '키 입력 필요' : ''].filter(Boolean).join(' · '),
             value,
@@ -159,7 +160,7 @@ export async function runEconomyCommand(context: Ctx, provider?: EconomyProvider
     if (chosen === current && !keyAdded) { return false; }
     routingWriteAt = Date.now();
     await cfg.update('economyProvider', chosen, vscode.ConfigurationTarget.Global);
-    vscode.window.showInformationMessage(`ReCoder: 절약 등급 공급자를 ${ECONOMY_LABEL[chosen]}(으)로 바꿨습니다. Core를 다시 시작합니다.`);
+    ui.showInformationMessage(`ReCoder: 절약 등급 공급자를 ${ECONOMY_LABEL[chosen]}(으)로 바꿨습니다. Core를 다시 시작합니다.`);
     return true;
 }
 
@@ -171,7 +172,7 @@ export async function runAiConnectCommand(context: Ctx, provider?: AiKeyProvider
     let chosen: AiKeyProvider | 'aws' | undefined = provider;
     if (!chosen) {
         const current = await currentAiProvider(context);
-        const pick = await vscode.window.showQuickPick([
+        const pick = await ui.showQuickPick([
             { label: AI_PROVIDER_LABEL.anthropic, description: current === 'anthropic' ? '현재 사용 중' : 'Claude API 키', value: 'anthropic' as const },
             { label: AI_PROVIDER_LABEL.openai, description: current === 'openai' ? '현재 사용 중' : 'OpenAI API 키', value: 'openai' as const },
             { label: AI_PROVIDER_LABEL.compatible, description: current === 'compatible' ? '현재 사용 중' : 'API 주소 + 키', value: 'compatible' as const },
@@ -183,11 +184,11 @@ export async function runAiConnectCommand(context: Ctx, provider?: AiKeyProvider
     if (chosen === 'aws') {
         if (!await currentAiProvider(context)) { return false; }
         await clearAiKeys(context);
-        vscode.window.showInformationMessage('ReCoder: API 키를 삭제했습니다. AWS 계정 또는 게이트웨이로 AI를 연결합니다.');
+        ui.showInformationMessage('ReCoder: API 키를 삭제했습니다. AWS 계정 또는 게이트웨이로 AI를 연결합니다.');
         return true;
     }
     const target = chosen;
     if (!await askKey(context, target, true)) { return false; }
-    vscode.window.showInformationMessage(`ReCoder: ${AI_PROVIDER_LABEL[target]} 키를 저장했습니다. Core를 다시 시작해 연결을 확인합니다.`);
+    ui.showInformationMessage(`ReCoder: ${AI_PROVIDER_LABEL[target]} 키를 저장했습니다. Core를 다시 시작해 연결을 확인합니다.`);
     return true;
 }

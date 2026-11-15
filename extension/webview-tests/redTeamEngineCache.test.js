@@ -137,7 +137,7 @@ test('with the toolbox already kept, the free-space floor drops from 50GB to 20G
 
 test('tool store row tells the user what to expect in each state',()=>{
  const html=e=>renderToStaticMarkup(React.createElement(EngineCacheRow,{busy:false,blocked:false,send:()=>{},engine:e}));
- assert.match(html({warm:false,prewarm:null}),/약 17GB.*검사 도구 미리 받기/s);
- assert.match(html({warm:false,prewarm:{phase:'running',step:'검사 도구 설치'}}),/미리 받는 중 · 검사 도구 설치.*미리 받기 중단/s);
- assert.match(html({warm:true,prewarm:{phase:'done',step:''}}),/다운로드 없이 시작/);
+ assert.match(html({warm:false,prewarm:null}),/17GB.*미리 받기/s);
+ assert.match(html({warm:false,prewarm:{phase:'running',step:'검사 도구 설치'}}),/받는 중 · 검사 도구 설치.*중단/s);
+ assert.match(html({warm:true,prewarm:{phase:'done',step:''}}),/준비됨 · 바로 시작/);
 });

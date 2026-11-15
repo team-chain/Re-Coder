@@ -5382,7 +5382,8 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
                 port = next(iter(plan.ports), "")
                 journey.record(workspace_for_build, "local", "done" if success else "failed",
                                (f"로컬 컨테이너 실행 — http://localhost:{port}" if success and port else
-                                "로컬 컨테이너 실행" if success else "로컬 배포 실패 — 결과의 로그를 확인하세요"))
+                                "로컬 컨테이너 실행" if success else "로컬 배포 실패 — 결과의 로그를 확인하세요"),
+                               url=f"http://localhost:{port}" if success and port else "")
             except Exception:  # noqa: BLE001 - 기록 실패가 배포 결과를 막지 않는다
                 pass
         _plan_workspaces.pop(request.plan_id, None)
@@ -5559,6 +5560,15 @@ async def project_journey(workspace_path: str) -> dict:
     if not workspace_path:
         return {"available": False, "reason": "작업 폴더가 없습니다."}
     return await asyncio.to_thread(journey.state, workspace_path)
+
+
+@router.get("/api/project/local-apps")
+async def project_local_apps(workspace_path: str) -> dict:
+    """지금 이 PC 에서 실행 중인 이 프로젝트의 앱 주소(응답 확인 포함) — 공격 테스트 대상 자동 선택용. 읽기만 한다."""
+    import journey
+    if not workspace_path:
+        return {"apps": [], "others": [], "reason": "작업 폴더가 없습니다."}
+    return await asyncio.to_thread(journey.local_apps, workspace_path)
 
 
 @router.post("/api/project/journey/record")

@@ -6,7 +6,18 @@ import {ManagedJobs,ManagedRun} from './managedJobs';
 import {projectBundle} from './managedBundle';
 import {validateManagedInput} from './managedPentagiWorker';
 import {ManagedMode,ManagedReport} from './managedReport';
+import { ui } from '../ui/dialogs';
+import {promises as fs} from 'fs';
+import * as path from 'path';
 
+/** Dockerfile 의 EXPOSE 첫 포트 — 사람이 포트를 찾아 적지 않게. 없거나 애매하면 undefined(그때만 묻는다). */
+export async function dockerfilePort(workspace:string):Promise<number|undefined> {
+    try {
+        const text=await fs.readFile(path.join(workspace,'Dockerfile'),'utf8');
+        const ports=[...text.matchAll(/^\s*EXPOSE\s+(\d{2,5})(?:\/tcp)?\b/gim)].map(m=>Number(m[1])).filter(p=>p>0&&p<=65535);
+        return new Set(ports).size===1?ports[0]:undefined;
+    } catch {return undefined;}
+}
 export class ManagedSecurityHost {
     private busy=false;
     constructor(private core:CoreManager,private state:vscode.Memento,private runtimeDir:string){}
@@ -26,7 +37,7 @@ export class ManagedSecurityHost {
             try{setup=await jobs.status();}
             catch(e){if(e instanceof AwsRequestError&&/AccessDenied|Unauthorized/.test(e.code))return {managed:true,connected:true,account:metadata.account,region:metadata.region,ready:false,stackStatus:'PERMISSION_REQUIRED',runs,permissionMessage:'연결된 AWS 사용자에 관리형 실행 권한이 없습니다. AWS 권한 보기에서 이 계정·리전에 맞춘 설치용·실행용 정책을 확인하세요.'};throw e;}
             if(action==='managedReport'){
-                const selected=await vscode.window.showQuickPick(runs.filter(r=>(r.mode||'redteam')===mode).map(r=>({label:`${r.createdAt} · ${r.mode||'redteam'} · ${r.status}`,description:r.id,run:r})),{title:'보안 검사 보고서'});
+                const selected=await ui.showQuickPick(runs.filter(r=>(r.mode||'redteam')===mode).map(r=>({label:`${r.createdAt} · ${r.mode||'redteam'} · ${r.status}`,description:r.id,run:r})),{title:'보안 검사 보고서'});
                 if(!selected)return {cancelled:true};
                 const result=await jobs.refresh(selected.run);
                 if(!result.report)throw new Error('저장된 보고서가 없거나 보관 기한이 지났습니다.');
@@ -34,7 +45,7 @@ export class ManagedSecurityHost {
             }
             if(action==='managedSetup'&&!setup.ready){
                 if(setup.stackStatus!=='NOT_CREATED')throw new Error(`검사 환경 상태: ${setup.stackStatus}. 준비가 끝난 뒤 상태를 확인하세요.`);
-                const accepted=await vscode.window.showWarningMessage('AWS에 관리형 검사 환경을 준비할까요?',{modal:true,detail:
+                const accepted=await ui.showWarningMessage('AWS에 관리형 검사 환경을 준비할까요?',{modal:true,detail:
                     `계정 ${metadata.account} · ${metadata.region}\n\n검사 전용 CodeBuild·IAM 역할·비공개 S3 저장소·DynamoDB 작업 잠금·로그를 만듭니다. 작업마다 CodeBuild·Bedrock 사용료와 저장·요청 비용이 발생합니다. 동시 작업 1개, 작업당 최대 60분입니다. 소스 사본은 1일, 결과·로그는 7일 뒤 만료합니다. 저장소는 스택 삭제 시에도 남습니다. 다른 배포 리소스의 권한은 작업 역할에 주지 않습니다.`},'비용·권한 확인 후 준비');
                 if(accepted!=='비용·권한 확인 후 준비')return {cancelled:true};await jobs.provision();setup={ready:false,stackStatus:'CREATE_IN_PROGRESS'};
             }
@@ -42,13 +53,14 @@ export class ManagedSecurityHost {
                 if(!setup.ready)throw new Error('관리형 검사 환경을 먼저 준비하세요.');
                 if(runs.some(r=>!r.terminal))throw new Error('진행 중이거나 실행 여부가 확인되지 않은 작업이 있습니다. 먼저 상태를 확인하세요.');
                 const mode=action==='managedAuditStart'?'audit':action==='managedScansStart'?'scans':'redteam';
-                const portText=mode!=='redteam'?'3000':await vscode.window.showInputBox({title:'검사 사본의 앱 포트',value:'3000',prompt:'Dockerfile로 실행할 앱의 컨테이너 포트',validateInput:v=>/^\d+$/.test(v)&&+v>0&&+v<=65535?null:'1~65535 포트 번호를 입력하세요.'});if(!portText)return {cancelled:true};
-                const model=mode==='scans'?'사용 안 함':await vscode.window.showInputBox({title:'검사용 Bedrock 모델',value:'global.anthropic.claude-sonnet-4-6',prompt:mode==='audit'?'구조화 출력을 지원하며 연결된 계정에서 사용할 수 있는 Claude 모델 또는 inference profile ID':'연결된 계정에서 사용할 수 있는 Claude 모델 또는 inference profile ID'});if(!model)return {cancelled:true};
+                const detected=mode==='redteam'?await dockerfilePort(workspace):undefined;
+                const portText=mode!=='redteam'?'3000':detected?String(detected):await ui.showInputBox({title:'검사 사본의 앱 포트',value:'3000',prompt:'Dockerfile로 실행할 앱의 컨테이너 포트',validateInput:v=>/^\d+$/.test(v)&&+v>0&&+v<=65535?null:'1~65535 포트 번호를 입력하세요.'});if(!portText)return {cancelled:true};
+                const model=mode==='scans'?'사용 안 함':await ui.showInputBox({title:'검사용 Bedrock 모델',value:'global.anthropic.claude-sonnet-4-6',prompt:mode==='audit'?'구조화 출력을 지원하며 연결된 계정에서 사용할 수 있는 Claude 모델 또는 inference profile ID':'연결된 계정에서 사용할 수 있는 Claude 모델 또는 inference profile ID'});if(!model)return {cancelled:true};
                 const request=validateManagedInput({id:'rc-rt-'+randomBytes(12).toString('hex'),mode,port:Number(portText),model:model.trim()});
                 const bundle=await projectBundle(workspace,this.runtimeDir,request);
                 await vscode.window.showTextDocument(await vscode.workspace.openTextDocument({language:'plaintext',content:`AWS 업로드 검토 · ${metadata.account} · ${metadata.region}\nSHA256 ${bundle.digest}\n${bundle.files.length}개 파일 · ${bundle.bytes} bytes\n.env·키 파일·숨김 폴더·node_modules는 제외합니다. 소스 안에 직접 쓴 비밀값이 없는지 검토하세요.\n\n${bundle.files.join('\n')}`}),{preview:true});
                 const scope=mode==='audit'?'소스를 내 AWS 저장소와 Bedrock에 전송해 읽기 전용 감사를 합니다. 최대 100개 파일·160KB 범위를 읽고 제외 범위를 보고합니다. 최대 20개 분석 요청이며 일시적 연결·서비스 오류는 요청당 최대 2회 재시도합니다. 실행 검증을 하지 않습니다.':mode==='scans'?'소스를 내 AWS 저장소에 올려 시크릿·의존성·Dockerfile을 검사합니다. Dockerfile이 있으면 격리된 엔진에서 빌드하고 이미지를 검사합니다. 외부 의존성 다운로드가 발생하며 운영 DB·환경변수·자격증명은 전달하지 않습니다. AI 모델은 사용하지 않습니다.':'소스를 내 AWS 저장소에 올리고 Dockerfile의 빌드 명령을 실행합니다. 앱 실행과 검사는 격리된 사본만 대상으로 합니다. 운영 DB·환경변수·자격증명은 전달하지 않습니다. 앱 응답 일부는 Amazon Bedrock으로 전송됩니다.';
-                const accepted=await vscode.window.showWarningMessage(mode==='audit'?'이 프로젝트 사본으로 AI 코드 감사를 시작할까요?':mode==='scans'?'이 프로젝트 사본으로 기본 보안 검사를 시작할까요?':'이 프로젝트 사본으로 레드팀 검사를 시작할까요?',{modal:true,detail:
+                const accepted=await ui.showWarningMessage(mode==='audit'?'이 프로젝트 사본으로 AI 코드 감사를 시작할까요?':mode==='scans'?'이 프로젝트 사본으로 기본 보안 검사를 시작할까요?':'이 프로젝트 사본으로 레드팀 검사를 시작할까요?',{modal:true,detail:
                     `${metadata.account} · ${metadata.region}\n${bundle.files.length}개 파일 · ${(bundle.bytes/1024/1024).toFixed(1)}MB\n모델: ${request.model||'사용 안 함'}\n\n${scope} 컴퓨팅 및 선택한 모델 비용이 발생하며 달러 기준 자동 상한은 없습니다. VS Code를 닫아도 최대 60분간 작업이 이어질 수 있습니다.\n${mode==='redteam'?'PentAGI EULA: https://github.com/vxcontrol/pentagi/blob/main/EULA.md':mode==='audit'?'Cloudflare security-audit MIT 기반 ReCoder 어댑터 · 전체 감사 인증이 아닙니다.':''}`},'범위·업로드·비용에 동의하고 검사');
                 if(accepted!=='범위·업로드·비용에 동의하고 검사')return {cancelled:true};
                 const run:ManagedRun={id:request.id,mode,submission:'uploading',createdAt:new Date().toISOString(),digest:bundle.digest,files:bundle.files.length,bytes:bundle.bytes,status:'SUBMITTING',uncertain:true};

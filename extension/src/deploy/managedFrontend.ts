@@ -8,6 +8,7 @@ import {ManagedJobs,ManagedRun} from '../security/managedJobs';
 import {bundleSources,zipFiles,Bundle} from '../security/managedBundle';
 import {frontendRequest,frontendManifest,FrontendRequest,FrontendManifest} from '../security/managedFrontendWorker';
 import {buildFrontend,FrontendProject,BuildOutcome} from './frontendBuild';
+import { ui } from '../ui/dialogs';
 
 const hash=(x:Buffer|string)=>createHash('sha256').update(x).digest('hex');
 export async function frontendBundle(workspace:string,runtime:string,request:FrontendRequest):Promise<Bundle>{
@@ -48,12 +49,12 @@ export class ManagedFrontendHost {
             let connection;
             try{connection=await this.core.getManagedAwsConnection();}
             catch(error){
-                const local=await vscode.window.showWarningMessage('AWS 연결 상태를 확인하지 못했습니다. 기존 로컬 빌드는 사용할 수 있습니다.','내 PC에서 빌드');
+                const local=await ui.showWarningMessage('AWS 연결 상태를 확인하지 못했습니다. 기존 로컬 빌드는 사용할 수 있습니다.','내 PC에서 빌드');
                 if(local!=='내 PC에서 빌드')throw error;
                 return buildFrontend(workspace,project,progress);
             }
             if(!connection)return buildFrontend(workspace,project,progress);
-            const choice=await vscode.window.showQuickPick([
+            const choice=await ui.showQuickPick([
                 {label:'AWS에서 빌드',description:'내 PC에 Node.js·Docker 설치 없이 실행',cloud:true},
                 {label:'내 PC에서 빌드',description:'기존 npm / Docker 실행 사용',cloud:false},
             ],{title:'배포할 화면 빌드'});
@@ -67,7 +68,7 @@ export class ManagedFrontendHost {
             if(prior&&!prior.terminal){
                 const refreshed=await jobs.refresh(prior,false);prior=refreshed.run;await this.state.update(key,prior);
                 if(!prior.terminal){
-                    const action=await vscode.window.showWarningMessage('이 프로젝트의 이전 빌드가 진행 중이거나 실행 여부를 확인 중입니다.',{modal:true,detail:'중복 빌드를 만들지 않습니다. 중단 요청 후 실제 종료를 확인한 다음 다시 시도하세요.'},'이전 빌드 중단 요청');
+                    const action=await ui.showWarningMessage('이 프로젝트의 이전 빌드가 진행 중이거나 실행 여부를 확인 중입니다.',{modal:true,detail:'중복 빌드를 만들지 않습니다. 중단 요청 후 실제 종료를 확인한 다음 다시 시도하세요.'},'이전 빌드 중단 요청');
                     if(action==='이전 빌드 중단 요청')await jobs.stop(prior);
                     throw new Error('이전 빌드가 종료된 후 다시 배포를 준비하세요.');
                 }
@@ -75,7 +76,7 @@ export class ManagedFrontendHost {
             }
             let setup=await jobs.status();
             if(!setup.ready&&setup.stackStatus==='NOT_CREATED'){
-                const approved=await vscode.window.showWarningMessage('내 AWS에 화면 빌드 환경을 만들까요?',{modal:true,detail:`${metadata.account} · ${metadata.region}\n전용 CodeBuild·IAM·비공개 S3·작업 잠금·로그를 만듭니다. 빌드 사용료와 저장·요청 비용이 발생합니다. 실행은 최대 60분, 동시 1개입니다. 소스는 1일, 결과·로그는 7일 후 만료되며 스택 삭제 시 저장소는 보존됩니다.`},'환경 만들기');
+                const approved=await ui.showWarningMessage('내 AWS에 화면 빌드 환경을 만들까요?',{modal:true,detail:`${metadata.account} · ${metadata.region}\n전용 CodeBuild·IAM·비공개 S3·작업 잠금·로그를 만듭니다. 빌드 사용료와 저장·요청 비용이 발생합니다. 실행은 최대 60분, 동시 1개입니다. 소스는 1일, 결과·로그는 7일 후 만료되며 스택 삭제 시 저장소는 보존됩니다.`},'환경 만들기');
                 if(approved!=='환경 만들기')throw new Error('빌드 환경 설치를 취소했습니다.');
                 await jobs.provision();setup={ready:false,stackStatus:'CREATE_IN_PROGRESS'};
             }
@@ -91,7 +92,7 @@ export class ManagedFrontendHost {
                 const request=frontendRequest({id:'rc-rt-'+randomBytes(12).toString('hex'),projectDir:project.projectDir,outDir:project.outDir,script:project.script||'build'});
                 stage('업로드할 프로젝트 사본 준비');const bundle=await frontendBundle(workspace,this.runtime,request);
                 await vscode.window.showTextDocument(await vscode.workspace.openTextDocument({language:'plaintext',content:`AWS 화면 빌드 업로드 검토\n${metadata.account} · ${metadata.region}\nSHA256 ${bundle.digest}\n${bundle.files.length}개 파일\n.env·숨김 설정·키 파일·node_modules 제외. 직접 작성된 비밀값은 제외를 보장하지 않습니다.\n\n${bundle.files.join('\n')}`}),{preview:true});
-                const approved=await vscode.window.showWarningMessage('이 프로젝트 사본을 AWS에서 빌드할까요?',{modal:true,detail:`${metadata.account} · ${metadata.region}\n${bundle.files.length}개 파일 · ${(bundle.bytes/1024/1024).toFixed(1)}MB\n${project.projectDir||'루트'}: npm run ${request.script}\n\n의존성과 npm 스크립트를 독립 컨테이너에서 실행합니다. AWS 자격증명·로컬 .env·비공개 npm 인증은 전달하지 않습니다. 공개 API 주소 등 필수 설정은 소스의 공개 설정으로 준비하세요. CodeBuild 사용료가 발생하며 확장을 닫아도 최대 60분까지 실행될 수 있습니다. 이 단계는 빌드만 수행하며 실제 배포는 다음 화면에서 승인합니다.`},'업로드·비용 확인 후 빌드');
+                const approved=await ui.showWarningMessage('이 프로젝트 사본을 AWS에서 빌드할까요?',{modal:true,detail:`${metadata.account} · ${metadata.region}\n${bundle.files.length}개 파일 · ${(bundle.bytes/1024/1024).toFixed(1)}MB\n${project.projectDir||'루트'}: npm run ${request.script}\n\n의존성과 npm 스크립트를 독립 컨테이너에서 실행합니다. AWS 자격증명·로컬 .env·비공개 npm 인증은 전달하지 않습니다. 공개 API 주소 등 필수 설정은 소스의 공개 설정으로 준비하세요. CodeBuild 사용료가 발생하며 확장을 닫아도 최대 60분까지 실행될 수 있습니다. 이 단계는 빌드만 수행하며 실제 배포는 다음 화면에서 승인합니다.`},'업로드·비용 확인 후 빌드');
                 if(approved!=='업로드·비용 확인 후 빌드'||cancel.isCancellationRequested)throw new Error('빌드를 취소했습니다.');
                 let run:ManagedRun={id:request.id,createdAt:new Date().toISOString(),digest:bundle.digest,files:bundle.files.length,bytes:bundle.bytes,status:'SUBMITTING',uncertain:true,submission:'uploading'};
                 await this.state.update(key,run);
