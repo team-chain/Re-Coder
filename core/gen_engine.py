@@ -280,6 +280,31 @@ def _decode_json_string(s: str, start: int) -> str:
         return text
 
 
+def _unwrap_field(text: str, field: str) -> tuple[str, bool]:
+    """AI 가 글 대신 JSON({"summary": …, "<field>": "…"})으로 답했을 때 그 필드의 글만 꺼낸다 → (글, 응답이 온전했는가).
+
+    실기기 2026-11-15(Claude Sonnet 5.5, 서비스 5개짜리 요청): 약속(contracts) 문서를 글자 그대로 이어 받는 단계에서
+    모델이 설계 단계 형식대로 JSON 으로 답했고, 그 응답을 "파일 내용이 아니다" 로 통째로 버려서 세 번 연속 진행이 없다고
+    멈췄다. 응답 길이 한도에서 잘려 JSON 이 닫히지 않았어도 필드 문자열을 끝까지 풀어 쓴다. JSON 이 아니면 그대로 돌려준다.
+    """
+    raw = text or ""
+    body = re.sub(r"^\s*```[\w.+-]*[ \t]*\n", "", raw, count=1)
+    if not body.lstrip().startswith("{"):
+        return raw, False
+    try:
+        data = json.loads(re.sub(r"\n?```\s*$", "", body.strip()))
+    except ValueError:
+        data = None
+    if isinstance(data, dict):
+        value = data.get(field)
+        return (value, True) if isinstance(value, str) and value.strip() else (raw, False)
+    m = re.search(rf'"{re.escape(field)}"\s*:\s*"', body)
+    if not m:
+        return raw, False
+    inner = _decode_json_string(body, m.end())
+    return (inner, False) if inner.strip() else (raw, False)
+
+
 def is_wrapped(path: str, text: str) -> bool:
     """파일 내용이 AI 응답 형식(JSON)으로 싸여 있거나 그 흔적이 남았는가."""
     if not isinstance(text, str) or not text.strip():
@@ -725,10 +750,13 @@ class LargeGeneration:
   의존성 순서로 나열하세요. root package.json/Dockerfile/.dockerignore/README, 로그인·회원가입, DB 초기화 등 실행에 필요한 파일을
   빠뜨리지 마세요. 파일 수는 줄이지 말고 실제로 필요한 만큼 모두 적으세요.""" + ("""
   (이 앱은 위 아키텍처 계약을 따릅니다 — 파일은 서비스 폴더 아래에 두고, Dockerfile·docker-compose.yml·.env.example 은
-  목록에 넣지 마세요. 서비스마다 package.json 또는 requirements.txt 와 /health 를 구현할 진입 파일을 넣으세요.)""" if multi else "")
+  목록에 넣지 마세요. 서비스마다 package.json 또는 requirements.txt 와 /health 를 구현할 진입 파일을 넣으세요.
+  contracts 에는 위 계약의 서비스·DB·환경 변수·API 표를 다시 옮겨 적지 말고, 계약에 없는 세부(요청·응답 필드, 테이블 열,
+  상태 전이, 패키지 버전)만 간결하게 적으세요 — 계약은 ReCoder 가 약속 문서에 그대로 붙입니다.)""" if multi else "")
         files: list[dict] = []
         try:
-            resp = self.call(header, PLAN_SCHEMA, "generate_code_manifest", 6000, agent="planner")
+            #: 서비스가 여럿이면 약속 문서가 길다 — 한도를 넉넉히 줘서 "나눠 받기" 로 넘어가는 일을 줄인다(게이트웨이는 스스로 깎는다).
+            resp = self.call(header, PLAN_SCHEMA, "generate_code_manifest", STREAM_MAX_TOKENS if multi else 6000, agent="planner")
             data = ca._extract_json(resp.text)
             summary = str(data.get("summary") or "").strip()
             contracts = str(data.get("contracts") or "").strip()
@@ -743,9 +771,20 @@ class LargeGeneration:
                              {"type": "object", "properties": {"summary": {"type": "string"}}, "required": ["summary"]},
                              "summarize_request", 512, agent="planner")
             summary = str(ca._extract_json(resp.text).get("summary") or "").strip()
+            #: 설계 단계 지시("아래 JSON 만 주세요")를 그대로 붙이면 "글자 그대로 쓰라" 는 지시와 부딪힌다 —
+            #: 약속 문서만 글로 쓰라는 지시를 따로 준다(그래도 JSON 으로 오면 unwrap_field 가 글만 꺼낸다).
+            contracts_prompt = self.context_prompt + (_arch().contract_text(arch) if multi else "") + """
+
+[대규모 생성 1단계 — 약속 문서] 이 요청은 파일이 많아 여러 에이전트가 나눠 만듭니다. 지금은 **파일 사이의 약속(contracts) 문서만**
+평범한 글(마크다운)로 씁니다. JSON 으로 감싸지 말고, 파일 목록과 파일 내용도 쓰지 마세요(파일 목록은 다음 단계에서 따로 받습니다).
+약속 문서에 적을 것: API 경로/메서드/요청/응답/인증 필드, DB 테이블/열/타입, 모듈 export 이름과 시그니처, 페이지 경로,
+환경 변수 이름, 통화·금액 단위, 주문/결제 상태 전이, 패키지 이름·버전, 화면 공용 컴포넌트의 props·훅이 돌려주는 필드·공용 타입.
+다른 에이전트가 이 문서만 보고 서로 맞는 코드를 씁니다. 필요한 만큼만 간결하게 쓰세요.""" + ("""
+(위 아키텍처 계약의 서비스·DB 이름, 환경 변수, 포트, API 를 그대로 따르고 다시 길게 옮겨 적지 마세요. 계약에 없는 세부만 정하세요.)"""
+                                                                             if multi else "")
             contracts = self.write_in_parts(
-                header + "\n\n지금은 파일 목록 없이 contracts(파일 사이의 약속) 문서만 씁니다.",
-                "파일 사이의 약속(contracts) 문서", agent="planner", operation="generate_code_contracts")
+                contracts_prompt, "파일 사이의 약속(contracts) 문서", agent="planner",
+                operation="generate_code_contracts", unwrap_field="contracts")
             more = True
         if multi:
             #: 약속 문서에 계약을 넣어 둔다 — 파일 목록 이어 받기·파일 작성·교정이 모두 같은 이름·변수를 본다.
@@ -1208,7 +1247,7 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
 
     # ── 3. 이어 쓰기 ──
     def write_in_parts(self, base_prompt: str, label: str, *, agent: str = "", operation: str = "generate_code_file_part",
-                       path: str = "", lean: bool = False) -> str:
+                       path: str = "", lean: bool = False, unwrap_field: str = "") -> str:
         """한 응답에 다 들어가지 않는 내용을 **글자 그대로** 이어 받는다(AI 가 지시를 지킨다고 기대하지 않는다).
 
         · 내용은 JSON 이 아니라 그대로 받는다 — 이스케이프로 길이가 늘지 않고, 응답 길이 한도에서 끊겨도 받은 만큼 쓴다.
@@ -1244,6 +1283,11 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
             resp = self.call(p, None, operation, STREAM_MAX_TOKENS, agent=agent, raw=True)
             text = str(getattr(resp, "text", "") or "")
             meta = getattr(resp, "metadata", None) or {}
+            if unwrap_field:
+                #: 글 대신 JSON 으로 답한 경우 — 그 필드의 글만 쓴다. 온전한 JSON 이면 다 쓴 것이다.
+                text, whole = _unwrap_field(text, unwrap_field)
+                if whole and END_MARKER not in text:
+                    text = text.rstrip("\n") + "\n" + END_MARKER
             piece, done, intact = _stream_piece(name, text)
             #: 끊겼는가 — 공급자가 알려 주면 그대로, 모르면 응답이 길면 끊긴 것으로 본다.
             known = meta.get("truncated")

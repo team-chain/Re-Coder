@@ -212,3 +212,44 @@ def test_파일_목록이_잘리면_약속은_조각으로_목록은_페이지�
     assert set(CONTENT) <= {op["file"] for op in result["ops"]}
     assert "GET /api/products" in CutManifest.calls[-1]  # 이어 받은 약속을 목록 요청에 넣었다
     assert len(CutManifest.summaries) == 1
+
+
+def test_약속을_JSON으로_답해도_글만_꺼내_이어_받는다(monkeypatch, tmp_path):
+    """실기기 2026-11-15(Sonnet 5.5, 서비스 5개 요청): 약속 문서를 이어 받는 단계에서 모델이 설계 형식 그대로
+    {"summary", "contracts"} JSON 으로 답했고, 그 응답을 통째로 버려 "더 진행되지 않았습니다" 로 생성이 멈췄다."""
+    long_text = "".join(f"- GET /api/items/{i} → 200 목록\n" for i in range(400))
+    whole = json.dumps({"summary": "쇼핑몰", "contracts": long_text}, ensure_ascii=False)
+
+    class JsonContracts(Router):
+        manifests = []
+        contract_prompts = []
+
+        def call(self, request, agent=None, operation=None):
+            if operation == "summarize_request":
+                return type("R", (), {"text": json.dumps({"summary": "쇼핑몰"}), "model_used": "m", "provider": "p"})()
+            if operation == "generate_code_manifest":
+                JsonContracts.manifests.append(request.prompt)
+                if len(JsonContracts.manifests) == 1:
+                    raise CUT
+                return type("R", (), {"text": json.dumps({"files": MANIFEST["files"], "more": False}), "model_used": "m", "provider": "p"})()
+            if operation == "generate_code_contracts":
+                JsonContracts.contract_prompts.append(request.prompt)
+                n = len(JsonContracts.contract_prompts)
+                if n == 1:  # 길이 한도에서 잘린 JSON
+                    return type("R", (), {"text": whole[:6000], "model_used": "m", "provider": "p", "metadata": {"truncated": True}})()
+                rest = long_text[long_text.index("- GET /api/items/150"):]  # 일부 겹쳐서 이어 쓴다
+                return type("R", (), {"text": json.dumps({"contracts": rest}, ensure_ascii=False), "model_used": "m", "provider": "p",
+                                      "metadata": {"truncated": False}})()
+            return super().call(request, agent, operation)
+
+    monkeypatch.setattr(ca, "get_router", lambda r=JsonContracts(): r)
+    result = ca.generate_code("쇼핑몰", decisions=[DECISION], project_root=str(tmp_path))
+    assert set(CONTENT) <= {op["file"] for op in result["ops"]}
+    assert len(JsonContracts.contract_prompts) == 2, "세 번 헛돌지 않고 두 번에 끝난다"
+    listing = JsonContracts.manifests[-1]
+    assert "- GET /api/items/0 →" in listing and "- GET /api/items/399 →" in listing  # 약속 전체가 다음 단계로 갔다
+    assert listing.count("- GET /api/items/200 →") == 1, "겹친 줄을 두 번 넣지 않는다"
+    assert '"contracts"' not in listing and '{"summary"' not in listing  # JSON 껍데기는 남지 않는다
+    # 약속 문서 요청에는 "JSON 만 주세요" 가 없다(글자 그대로 쓰라는 지시와 부딪혔다)
+    assert "아래 JSON 만 주세요" not in JsonContracts.contract_prompts[0]
+    assert "JSON 으로 감싸지 말고" in JsonContracts.contract_prompts[0]
