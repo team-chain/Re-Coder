@@ -235,6 +235,8 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
   const { postMessage, useMessage } = useVSCodeApi();
 
   const [step, setStep] = useState<Step>("idle");
+  //: 4.0 — 서비스·DB 가 여럿인 프로젝트(ReCoder 계약 compose)는 Dockerfile 을 새로 만들지 않고 compose 로 함께 실행한다.
+  const [stack, setStack] = useState<{ multi: boolean; stack: boolean; services: number; databases: number } | null>(null);
   const stepRef = useRef<Step>("idle");
   stepRef.current = step;
   const [progress,setProgress]=useState<DeploymentActivityEvent|null>(null);
@@ -297,6 +299,10 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
     useCallback((msg) => {
       const { type, payload } = msg;
 
+      if (type === "journey.state") {
+        const j = (payload ?? {}) as { available?: boolean; multi?: boolean; stack?: boolean; services?: number; databases?: number };
+        setStack(j.available && j.multi ? { multi: true, stack: !!j.stack, services: j.services ?? 0, databases: j.databases ?? 0 } : null);
+      }
       if (type === "infra.workspaceFile") {
         const f = payload as { fileType?: string; path?: string; content?: string; error?: string };
         setWorkspaceFile(f.error || typeof f.content !== "string" || !f.fileType || !f.path
@@ -643,6 +649,8 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
     });
   }, [postMessage]);
 
+  useEffect(() => { postMessage("journey.get"); }, [postMessage]);
+
   const rerunRef = useRef<() => void>();
   const createPlanRef = useRef<() => void>();
   rerunRef.current = handleDeploy;
@@ -779,7 +787,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
   const canSwitchFileTab = ["idle", "preview", "saved", "done", "error"].includes(step);
   const securityScanEnabled = canRunSecurityScan(step);
   const settingsBlocked = step === "planReady" && planBlockedBySettings(plan);
-  const primaryDisabled = (!canSwitchFileTab && step !== "scanDone" && step !== "planReady")
+  const primaryDisabled = (!!stack && !stack.stack && step === "idle") || (!canSwitchFileTab && step !== "scanDone" && step !== "planReady")
     || (existingConflict !== null && step === "preview") || settingsBlocked || (step === "planReady" && settingsBusy);
   const activeContent = matchesTab ? proposal!.content : null;
   const tabFileType = INFRA_FILE_TYPE_BY_TAB[activeFileTab];
@@ -820,7 +828,26 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
         </div>
       )}
 
+      {stack && (
+        <div data-testid="ship-stack" style={{ marginBottom: 12, padding: "12px 14px", borderRadius: 10, border: "1px solid var(--rc-line2, #2a2f36)", background: "var(--rc-solid, transparent)", lineHeight: 1.6 }}>
+          {stack.stack ? <>
+            <b style={{ fontSize: 13 }}>다중 서비스 프로젝트 — 서비스 {stack.services}개 · DB {stack.databases}개</b>
+            <div style={{ color: "var(--vscode-descriptionForeground)", fontSize: 11.5 }}>
+              설계도(아키텍처 계약)에서 만든 <code>docker-compose.yml</code> 과 서비스별 Dockerfile 로 함께 실행합니다. 새로 만들 파일은 없습니다.
+              실행 계획을 확인하고 승인하면 비밀값 검사 → 서비스별 Dockerfile·이미지 검사 → 빌드 → DB 부터 차례로 시작 → 연결·통합 테스트 순서로 진행하고,
+              새 버전이 뜨지 않으면 직전 버전으로 되돌립니다. 데이터(DB)는 유지됩니다.
+            </div>
+          </> : <>
+            <b style={{ fontSize: 13 }}>여러 서비스로 된 compose 프로젝트</b>
+            <div style={{ color: "var(--vscode-descriptionForeground)", fontSize: 11.5 }}>
+              ReCoder 설계도로 만든 프로젝트가 아니어서 함께 검증·배포할 수 없습니다. 프로젝트 폴더에서 <code>docker compose up --build</code> 로 실행하거나,
+              개발 화면에서 다시 만들면 ReCoder 가 검증한 compose 로 함께 실행할 수 있습니다.
+            </div>
+          </>}
+        </div>
+      )}
       {/* ── 인프라 파일 — 제목 · 파일 종류(3.0.3) ── */}
+      {!stack && <>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
         <div className="rc-sec" style={{ margin: 0 }}>인프라 파일</div>
         <div className="rc-seg" role="group" aria-label="파일 종류">
@@ -927,6 +954,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
       })()}
 
       <DeploymentActivity target="docker" event={progress}/>
+      </>}
       {/* ── Loading spinner ── */}
       {(step === "generating" || step === "saving" || step === "scanning" || step === "planning" || step === "deploying") && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, color: "#888" }}>
@@ -1147,7 +1175,9 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
         <button
           onClick={() => {
             if (primaryDisabled) return;
-            if (step === "idle") {
+            if (step === "idle" && stack?.stack) {
+              handleCreatePlan();
+            } else if (step === "idle") {
               handleGenerateInfraFile();
             } else if (step === "preview" && proposal && matchesTab) {
               if (proposal.approval_level <= 1) {
@@ -1192,7 +1222,9 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
           }}
         >
           <Icon name="check" size={16} />
-          {step === "idle"
+          {step === "idle" && stack?.stack
+            ? `서비스 ${stack.services}개 · DB ${stack.databases}개 실행 계획 보기`
+            : step === "idle"
             ? `${activeFileLabel} 생성`
             : step === "preview"
             ? `저장 Level ${proposal?.approval_level ?? 1}`
@@ -1208,7 +1240,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
         </button>
 
         {/* 보안 스캔 button */}
-        {activeFileTab === "dockerfile" && <button
+        {activeFileTab === "dockerfile" && !stack && <button
           onClick={() => {
             if (!securityScanEnabled) { return; }
             if (step === "preview" && proposal && matchesTab) {

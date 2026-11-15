@@ -880,6 +880,18 @@ export class ApiClient {
     }
 
     /** 3.1 계약 대조 — 설계도(architecture.json)와 실제 코드의 차이. 읽기만 한다. */
+    /** 4.0 진행 흐름 — 만들기 → 검증 → 보안 검사 → 로컬 실행 → 공격 테스트 → 운영 배포. */
+    async getJourney(workspacePath: string): Promise<object> {
+        const resp = await this.request<object>('GET', `/api/project/journey?workspace_path=${encodeURIComponent(workspacePath)}`);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '진행 상태를 불러오지 못했습니다.'); }
+        return resp.data;
+    }
+
+    async recordJourney(workspacePath: string, step: 'redteam', status: 'done' | 'failed' | 'cancelled', summary: string): Promise<void> {
+        const resp = await this.request<object>('POST', '/api/project/journey/record', { workspace_path: workspacePath, step, status, summary });
+        if (!resp.success) { throw new Error(resp.error ?? '진행 상태를 남기지 못했습니다.'); }
+    }
+
     async getArchitectureCheck(workspacePath: string): Promise<object> {
         const resp = await this.request<object>('GET', `/api/architecture/check?workspace_path=${encodeURIComponent(workspacePath)}`);
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '계약 대조를 불러오지 못했습니다.'); }

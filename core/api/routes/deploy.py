@@ -4927,6 +4927,12 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
             if compose_deploy.load(workspace_for_build):
                 #: 3.1 여러 서비스로 된 프로젝트 — 서비스별 보안 게이트 → 빌드 → 이미지 검사 → compose 기동·검증 → 기록·롤백.
                 stack = await compose_deploy.deploy(workspace_for_build, scan=_execute_scan, progress=report_progress)
+                try:
+                    import journey
+                    journey.record(workspace_for_build, "local", "done" if stack.get("status") == "success" else "failed",
+                                   str(stack.get("message") or "")[:240], url=stack.get("url") or "")
+                except Exception:  # noqa: BLE001
+                    pass
                 _deployment_plans.pop(request.plan_id, None)
                 _plans_pending_image_scan.pop(request.plan_id, None)
                 _plan_workspaces.pop(request.plan_id, None)
@@ -5370,6 +5376,15 @@ async def execute_deployment(request: ExecuteRequest) -> dict:
         _deployment_records[record.deployment_id] = record
         _save_records()
         del _deployment_plans[request.plan_id]
+        if plan.method == DeployMethod.LOCAL_DOCKER and workspace_for_build:
+            try:
+                import journey
+                port = next(iter(plan.ports), "")
+                journey.record(workspace_for_build, "local", "done" if success else "failed",
+                               (f"로컬 컨테이너 실행 — http://localhost:{port}" if success and port else
+                                "로컬 컨테이너 실행" if success else "로컬 배포 실패 — 결과의 로그를 확인하세요"))
+            except Exception:  # noqa: BLE001 - 기록 실패가 배포 결과를 막지 않는다
+                pass
         _plan_workspaces.pop(request.plan_id, None)
         _plans_pending_image_scan.pop(request.plan_id, None)
 
@@ -5528,6 +5543,32 @@ class StackRollbackRequest(BaseModel):
     workspace_path: str
     deployment_id: str = ""
     approved: bool = False
+
+
+class JourneyRecordRequest(BaseModel):
+    workspace_path: str = Field(min_length=1, max_length=4096)
+    step: str = Field(pattern=r"^[a-z]{3,16}$")
+    status: str = Field(pattern=r"^(done|failed|cancelled)$")
+    summary: str = Field(default="", max_length=300)
+
+
+@router.get("/api/project/journey")
+async def project_journey(workspace_path: str) -> dict:
+    """4.0 진행 흐름 — 만들기 → 검증 → 보안 검사 → 로컬 실행 → 공격 테스트 → 운영 배포. 읽기만 한다."""
+    import journey
+    if not workspace_path:
+        return {"available": False, "reason": "작업 폴더가 없습니다."}
+    return await asyncio.to_thread(journey.state, workspace_path)
+
+
+@router.post("/api/project/journey/record")
+async def project_journey_record(body: JourneyRecordRequest) -> dict:
+    """확장이 직접 보는 결과(레드팀 공격 테스트)만 남긴다. 다른 단계는 Core 가 실제 결과로 남긴다."""
+    import journey
+    if body.step not in journey.CLIENT_STEPS or not Path(body.workspace_path).is_dir():
+        raise HTTPException(status_code=400, detail="기록할 수 없는 단계입니다.")
+    await asyncio.to_thread(journey.record, body.workspace_path, body.step, body.status, body.summary)
+    return {"ok": True}
 
 
 @router.get("/api/architecture/check")

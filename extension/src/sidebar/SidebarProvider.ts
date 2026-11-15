@@ -2719,6 +2719,24 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 break;
             }
+            case 'journey.get':
+            case 'journey.record': {
+                //: 4.0 진행 흐름 — 화면 맨 위의 단계 표시. Core 가 없거나 폴더가 없으면 표시를 숨긴다(다른 화면은 그대로).
+                try {
+                    const root = activeProjectPath();
+                    if (!root) { this.postMessageToWebview(requestWebview, 'journey.state', { available: false, reason: '프로젝트 폴더가 열려 있지 않습니다.' }); break; }
+                    if (type === 'journey.record') {
+                        const p = (payload ?? {}) as { step?: string; status?: string; summary?: string };
+                        if (p.step === 'redteam' && (p.status === 'done' || p.status === 'failed' || p.status === 'cancelled')) {
+                            await this._apiClient.recordJourney(root, 'redteam', p.status, String(p.summary ?? '').slice(0, 300));
+                        }
+                    }
+                    this.postMessageToWebview(requestWebview, 'journey.state', await this._apiClient.getJourney(root));
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'journey.state', { available: false, reason: String(err) });
+                }
+                break;
+            }
             case 'map.contract': {
                 //: 3.1 계약 대조 — Core 가 없거나 계약이 없으면 패널을 그리지 않는다(구조 지도는 그대로).
                 try {

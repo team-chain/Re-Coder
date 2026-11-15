@@ -27,6 +27,7 @@ import { canvasStyles } from './components/canvas/styles';
 import { THEME_CSS } from './components/shell/theme';
 import { BrandLogo, Glyph } from './components/shell/parts';
 import { HomeBento } from './components/shell/HomeBento';
+import JourneyBar from './components/JourneyBar';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -431,6 +432,8 @@ export const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
         <strong style={{ flex: "none" }}>확장과 연결이 끊겼습니다</strong>
         <span style={{ color: "var(--rc-fg2)" }}>이 창에서 보낸 요청은 처리되지 않습니다. Ctrl+Shift+P → <b>Developer: Reload Window</b> 로 창을 다시 불러오세요.</span>
       </div>}
+      {/* 4.0 진행 흐름 — 만들기 → 검증 → 보안 검사 → 로컬 실행 → 공격 테스트 → 운영 배포. 모든 화면에서 다음 단계를 보여 준다. */}
+      <JourneyBar view={view === "hub:develop" ? "code" : view} onGo={(v) => onSelectMode(v as ViewMode)} />
       {showDiagnostics && <div id="workspace-diagnostics" style={{ margin: "0 22px 10px", border: "1px solid var(--rc-line2)", borderRadius: 14, background: "var(--rc-solid)", maxHeight: 280, overflowY: "auto" }}><DiagnosticsPanel diagnostics={diagnostics} /><CostTracker costSummary={costSummary} /></div>}
 
       <main className={`rc-main rc-workspace-content${dock ? "" : " rc-no-dock"}`}>

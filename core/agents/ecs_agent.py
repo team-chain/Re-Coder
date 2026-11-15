@@ -1661,6 +1661,15 @@ class ECSAgent:
             ecs_stable.record_success(req.region, req.cluster, req.service, rec.task_definition_arn)
         except Exception as exc:  # noqa: BLE001 - 기록 실패가 배포 성공을 바꾸지 않는다
             logger.warning("성공 배포 기록을 남기지 못했습니다: %s", exc)
+        try:  # 4.0 진행 흐름 — 운영 배포 단계
+            try:
+                import journey
+            except ImportError:  # pragma: no cover
+                from core import journey  # type: ignore
+            url = str(getattr(rec, "url", "") or getattr(rec, "public_url", "") or "")
+            journey.record(req.workspace_path, "release", "done", f"AWS ECS {req.service}" + (f" — {url}" if url else ""))
+        except Exception:  # noqa: BLE001
+            pass
 
     # ------------------------------------------------------------------
     # 7단계: 서비스 확보

@@ -39,6 +39,8 @@ const PATHS: Record<string, string> = {
   arrow: "M5 12h14M13 6l6 6-6 6",
   check: "m5 12 4.5 4.5L19 7",
   refresh: "M20 11a8 8 0 0 0-14.6-4.5M4 4v4h4M4 13a8 8 0 0 0 14.6 4.5M20 20v-4h-4",
+  alert: "M12 7v6M12 17h.01",
+  minus: "M6 12h12",
 };
 export function Glyph({ name, size = 14, sw = 1.9 }: { name: keyof typeof PATHS | string; size?: number; sw?: number }) {
   const d = PATHS[name];

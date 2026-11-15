@@ -3439,5 +3439,33 @@ def _generate_code(
     #: 결과를 체크포인트 자리에 남겨 둔다 — 확장이 받기 전에 연결이 끊겨도 같은 작업 ID 로 바로 받는다.
     #: 2.0.33 분할 생성만이 아니라 모든 생성 결과를 남긴다(한 번에 만든 결과도 끊기면 다시 만들어야 했다).
     _jobs.save(job_id, {"fingerprint": fp, "result": result})
+    _record_journey(root, target_folder, result)
     print(f"[code_agent] 코드 생성 완료 | ops {len(ops_out)}개 | model={result['model']}")
     return result
+
+
+def _record_journey(root, target_folder: str, result: dict) -> None:
+    """4.0 진행 흐름 — 만들기·검증 결과를 프로젝트별로 남긴다(화면 맨 위 진행 표시가 읽는다)."""
+    try:
+        import journey
+    except ImportError:  # pragma: no cover
+        from core import journey  # type: ignore
+    try:
+        folder = (target_folder or "").replace("\\", "/").strip().strip("/")
+        workspace = Path(root) / folder if folder else Path(root)
+        files = len(result.get("ops") or [])
+        journey.record(workspace, "build", "done", f"파일 {files}개 생성", files=files)
+        v = result.get("verification") or {}
+        status = v.get("status")
+        if v.get("kind") == "compose":
+            label = "서비스·DB 를 함께 띄워 검증"
+        else:
+            label = "빌드·실행 검증"
+        if status == "passed":
+            journey.record(workspace, "verify", "done", f"{label} 통과 — {str(v.get('output') or '')[:160]}")
+        elif status == "failed":
+            journey.record(workspace, "verify", "failed", f"{label} 실패 — {str(v.get('output') or '')[:200]}")
+        else:
+            journey.record(workspace, "verify", "unverified", f"{label}을 하지 못했습니다 — {str(v.get('output') or '')[:200]}")
+    except Exception as exc:  # noqa: BLE001 - 기록 실패가 생성 결과를 막지 않는다
+        print(f"[code_agent] 진행 기록 생략: {exc}")
