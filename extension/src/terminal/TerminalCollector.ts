@@ -4,7 +4,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { TerminalOutput } from '../types';
 import { ApiClient } from '../core/ApiClient';
-import { ui } from '../ui/dialogs';
+import { ui } from '../dialogs/inAppDialogs';
 
 const execFileAsync = promisify(execFile);
 

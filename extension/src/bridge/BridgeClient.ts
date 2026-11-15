@@ -28,7 +28,7 @@ import * as vscode from 'vscode';
 import WebSocket from 'ws';
 import * as path from 'path';
 import { buildBridgeWebSocketUrl } from './bridgeEndpoint';
-import { ui } from '../ui/dialogs';
+import { ui } from '../dialogs/inAppDialogs';
 
 interface BridgeMessage {
     type: string;

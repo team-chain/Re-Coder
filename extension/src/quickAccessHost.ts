@@ -7,7 +7,7 @@ import {
     QUICK_SLOTS, QUICK_TARGETS, QuickSlot, QuickTarget, SLOT_COMMAND, TARGET_BY_ID,
     resolveQuickAccess, slotKeyLabel, wheelKeyLabel,
 } from './quickAccess';
-import { ui } from './ui/dialogs';
+import { ui } from './dialogs/inAppDialogs';
 
 const SECTION = 'recoder';
 const KEY = 'quickAccess';

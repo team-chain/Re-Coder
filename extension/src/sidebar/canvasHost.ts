@@ -14,7 +14,7 @@ import { CommitPreview, previewCommit, commitSelected } from './githubCommit';
 import { DiscordWebhook } from './discordWebhook';
 import { DiscordBotToken, normalizeBotToken as normalizeToken } from './discordBotToken';
 import { activeProjectPath, pickProjectFolder, projectFolders, selectActiveProject } from '../activeProject';
-import { ui } from '../ui/dialogs';
+import { ui } from '../dialogs/inAppDialogs';
 
 const exec = promisify(execFile);
 type Send = (type: string, payload: unknown) => void;

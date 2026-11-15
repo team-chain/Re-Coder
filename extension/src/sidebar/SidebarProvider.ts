@@ -45,9 +45,9 @@ import { CanvasHost } from './canvasHost';
 import { workingChanges } from './homeChanges';
 import { DiscordWebhook } from './discordWebhook';
 import { DiscordBotToken } from './discordBotToken';
-import { handleDialogMessage, registerDialogWebview } from '../ui/dialogs';
+import { handleDialogMessage, registerDialogWebview } from '../dialogs/inAppDialogs';
 import { activeProjectPath, activeProjectUri, isInsideProjectRoot, onDidChangeActiveProject, projectFolders, selectActiveProject, useExternalProject } from '../activeProject';
-import { ui } from '../ui/dialogs';
+import { ui } from '../dialogs/inAppDialogs';
 
 /**
  * Core 의 ReadyStatus enum 값("ok" | "partial" | "fail")을 Webview 가 기대하는

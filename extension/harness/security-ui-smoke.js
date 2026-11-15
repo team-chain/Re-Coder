@@ -26,7 +26,7 @@ async function main(){
   await cmd('Page.addScriptToEvaluateOnNewDocument',{source:`window.uiRequests=[];const originalFetch=window.fetch;window.fetch=function(url,options){if(url==='/message'&&options?.body){const m=JSON.parse(options.body);window.uiRequests.push({type:m.type,action:m.payload?.action,kind:m.payload?.kind,scanType:m.payload?.scanType,requestId:m.payload?.requestId});}return originalFetch.apply(this,arguments);};`});
   await cmd('Page.navigate',{url:process.env.RECODER_PREVIEW_URL||'http://127.0.0.1:4188/?layout=workspace'});
   const click=async label=>{await until(()=>evaluate(`(()=>{const matches=[...document.querySelectorAll('button')].filter(e=>e.offsetParent!==null&&e.textContent.trim()===${JSON.stringify(label)});return matches.length===1&&!matches[0].disabled;})()`),'button ready: '+label);return evaluate(`(()=>{const matches=[...document.querySelectorAll('button')].filter(e=>e.offsetParent!==null&&e.textContent.trim()===${JSON.stringify(label)});if(matches.length!==1||matches[0].disabled)throw Error('Button changed before click');matches[0].click();return true;})()`);};
-  const visibleText=()=>evaluate('document.body.innerText');
+  const visibleText=()=>evaluate("document.body?.innerText||''");
   await until(async()=> (await visibleText()).includes('Security'),'navigation');await click('Security');
   await until(async()=> (await visibleText()).includes('보안 검사 시작'),'security dashboard');await click('보안 검사 시작');
   await until(async()=> (await visibleText()).includes('확인할 보안 항목 2개'),'existing checks finish');
@@ -42,7 +42,7 @@ async function main(){
   console.log('PASS: real source audit host runs 7 fixture AI steps and renders persisted result');
   await click('레드팀 테스트');await until(async()=> (await visibleText()).includes('내 PC의 테스트 앱'),'red team options');
   assert.equal((await evaluate('window.uiRequests')).some(x=>x.type==='security.redteam'),false,'opening the red-team entry must not query or provision cloud resources');
-  await click('내 PC의 테스트 앱');await until(async()=> (await visibleText()).includes('레드팀 테스트 시작'),'local panel');await click('레드팀 테스트 시작');
+  await click('내 PC의 테스트 앱');await until(async()=> (await visibleText()).includes('레드팀 테스트 시작'),'local panel');await click('레드팀 테스트 시작');const startCard=async()=>{await until(()=>evaluate(`!!document.querySelector('[data-testid=redteam-start] .rc-rt-opt')`),'start card');await evaluate(`document.querySelector('[data-testid=redteam-start] label.rc-ck').click();true`);await click('시작');};await startCard();
   await until(async()=> (await visibleText()).includes('UI 예시 · 검사 환경 삭제 완료'),'fixture report');await click('닫기');
   const screen=await cmd('Page.captureScreenshot',{format:'png'});await fs.writeFile(path.join(root,'security-3.0.7-ui.png'),Buffer.from(screen.data,'base64'));
   console.log('PASS: red-team execution is explicit, independent, and renders fixture evidence');

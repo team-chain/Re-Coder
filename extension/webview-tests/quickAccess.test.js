@@ -206,7 +206,7 @@ function loadHost(vs) {
   const file = require.resolve('../out/quickAccessHost.js');
   delete require.cache[file];
   //: 화면 안 대화창 모듈도 이 테스트의 vscode 흉내로 다시 읽는다.
-  delete require.cache[require.resolve('../out/ui/dialogs.js')];
+  delete require.cache[require.resolve('../out/dialogs/inAppDialogs.js')];
   const origLoad = Module._load;
   Module._load = function (request, ...rest) { return request === 'vscode' ? vs : origLoad.call(this, request, ...rest); };
   try { return require(file); } finally { Module._load = origLoad; }

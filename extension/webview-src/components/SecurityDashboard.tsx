@@ -9,12 +9,16 @@ import {ManagedRedTeamPanel} from './ManagedRedTeamPanel';
 import type {ManagedReport} from '../../src/security/managedReportTypes';
 import {SourceAuditPanel} from './SourceAuditPanel';
 import {setPendingPrompt} from './CodeAgent';
+import {takeFocus} from './focusIntent';
 
 type Kind='code'|'history'|'recheck'|'policy';
 type Check={running?:boolean;error?:string;result?:Record<string,unknown>;at?:string};
 export const SecurityDashboard: React.FC<{onGo?:(view:string)=>void}> = ({onGo}) => {
  const {postMessage,useMessage}=useVSCodeApi(); const [signal,setSignal]=useState(0); const [scans,setScans]=useState<Partial<Record<ScanKind,ScanResultLite>>>({}); const [scanning,setScanning]=useState(false);
- const [checks,setChecks]=useState<Partial<Record<Kind,Check>>>({}); const pending=useRef(new Map<string,{kind:Kind;timer:ReturnType<typeof setTimeout>}>()); const [redteam,setRedteam]=useState(false);
+ const [checks,setChecks]=useState<Partial<Record<Kind,Check>>>({}); const pending=useRef(new Map<string,{kind:Kind;timer:ReturnType<typeof setTimeout>}>()); const [focused]=useState(()=>takeFocus('redteam'));const [redteam,setRedteam]=useState(focused);const [redteamLocal,setRedteamLocal]=useState(focused);
+ const redteamRef=useRef<HTMLDivElement>(null);
+ useEffect(()=>{const open=(e:Event)=>{if((e as CustomEvent).detail==='redteam'&&takeFocus('redteam')){setRedteam(true);setRedteamLocal(true);setAudit(false);setManagedScans(false);}};window.addEventListener('recoder:focus',open);return()=>window.removeEventListener('recoder:focus',open);},[]);
+ useEffect(()=>{if(redteam)redteamRef.current?.scrollIntoView?.({block:'start',behavior:'smooth'});},[redteam]);
  const [allFindings,setAllFindings]=useState(false),[audit,setAudit]=useState(false),[managedScans,setManagedScans]=useState(false);
  const [managedReport,setManagedReport]=useState<ManagedReport>();
  const request=useCallback((kind:Kind)=>{
@@ -70,7 +74,7 @@ export const SecurityDashboard: React.FC<{onGo?:(view:string)=>void}> = ({onGo})
  <div className="rc-security-redteam"><div><strong>AI 코드 감사</strong><small>Cloudflare security-audit 기반 · 소스 근거와 수정 방향 확인</small></div><button className="rc-btn" aria-expanded={audit} onClick={()=>{setAudit(!audit);setRedteam(false);setManagedScans(false);}}>{audit?'닫기':'AI 감사'}</button></div>
  {audit&&<SourceAuditPanel onFix={onGo?finding=>{setPendingPrompt(`${finding.file}:${finding.line}의 보안 문제를 검토하고 최소 범위의 수정안을 제안해 주세요.\n문제: ${finding.title}\n영향: ${finding.impact}\n수정 방향: ${finding.fix}\n현재 파일을 다시 확인하고 기존 기능을 유지하세요. 승인 전에는 적용하지 마세요.`);onGo('code');}:undefined}/>}
  <div className="rc-security-redteam"><div><strong>실행 중인 앱 검사</strong><small>PentAGI · 검사 사본 → 실행 검토 → 증거 확인</small></div><button className="rc-btn" aria-expanded={redteam} onClick={()=>{setRedteam(!redteam);setAudit(false);setManagedScans(false);}}>{redteam?'닫기':'레드팀 테스트'}</button></div>
- {redteam&&<RedTeamPanel/>}
+ {redteam&&<div ref={redteamRef}><RedTeamPanel key={redteamLocal?'local':'choose'} initialMode={redteamLocal?'local':undefined}/></div>}
  <details className="rc-security-extra"><summary>다른 실행 방식</summary><p>필요할 때만 기존 AWS 연결로 프로젝트 사본을 검사할 수 있습니다. 최초 실행 환경 준비와 사용료가 발생할 수 있습니다.</p><button className="rc-btn" aria-expanded={managedScans} onClick={()=>setManagedScans(!managedScans)}>{managedScans?'닫기':'AWS 사본 검사 열기'}</button>{managedScans&&<ManagedRedTeamPanel mode="scans" onReport={setManagedReport}/>} {managedReport&&<p>사본 검사 결과는 위의 현재 프로젝트 검사와 별도로 표시합니다.</p>}</details>
  <p className="rc-security-note">검사 결과는 실행 당시의 파일과 대상 기준입니다. 파일 수정·새 이미지 배포 후에는 다시 검사하세요. 미실행·오류·해당 없음은 통과로 계산하지 않습니다.</p>
  </section>;

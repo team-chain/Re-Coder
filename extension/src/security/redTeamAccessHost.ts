@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import {AccessIdentity,AccessPolicy,accessKey,accessTarget,validateAccessPolicy} from './redTeamAccess';
-import { ui } from '../ui/dialogs';
+import { ui } from '../dialogs/inAppDialogs';
 
 export async function configureAccess(secrets:vscode.SecretStorage,workspace:string,previousTarget?:string):Promise<boolean> {
     const target=await ui.showInputBox({title:'권한 검사 · 대상',prompt:'테스트 앱 주소. 두 일반 사용자의 소유 리소스만 읽어서 대조합니다.',value:previousTarget?.replace('host.docker.internal','127.0.0.1')||'http://localhost:3000',ignoreFocusOut:true});

@@ -9,7 +9,7 @@ import {prewarmPaths, readPrewarm, removePrewarmEngine} from './redTeamPrewarm';
 import {assessmentMarkdown} from './pentagiAssessment';
 import {AccessPolicy,accessKey,validateAccessPolicy} from './redTeamAccess';
 import {configureAccess} from './redTeamAccessHost';
-import { ui } from '../ui/dialogs';
+import { ui } from '../dialogs/inAppDialogs';
 
 function alive(pid?:number) {if(!pid) return false; try {process.kill(pid,0);return true;} catch {return false;}}
 const providerOptions: Array<vscode.QuickPickItem & {provider:LocalProvider}> = [

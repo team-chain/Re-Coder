@@ -8,7 +8,7 @@ import {ManagedJobs,ManagedRun} from '../security/managedJobs';
 import {bundleSources,zipFiles,Bundle} from '../security/managedBundle';
 import {frontendRequest,frontendManifest,FrontendRequest,FrontendManifest} from '../security/managedFrontendWorker';
 import {buildFrontend,FrontendProject,BuildOutcome} from './frontendBuild';
-import { ui } from '../ui/dialogs';
+import { ui } from '../dialogs/inAppDialogs';
 
 const hash=(x:Buffer|string)=>createHash('sha256').update(x).digest('hex');
 export async function frontendBundle(workspace:string,runtime:string,request:FrontendRequest):Promise<Bundle>{

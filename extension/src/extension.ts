@@ -35,7 +35,7 @@ import { runEnrollCommand } from './gateway/enroll';
 import { DiscordController } from './discord/DiscordController';
 import { managedPermissions } from './cloud/managedPermissions';
 import { initializePortableTools, recoverPortableTools } from './runtime/portableTools';
-import { ui } from './ui/dialogs';
+import { ui } from './dialogs/inAppDialogs';
 
 // ---------------------------------------------------------------------------
 // Activate

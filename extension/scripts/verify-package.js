@@ -11,7 +11,7 @@ function validatePackageFiles(files, { requireCore = false, target = `${process.
     'out/security/pentagiClient.js', 'out/security/pentagiAssessment.js', 'out/security/redTeamHost.js',
     'out/security/localPentagi.js', 'out/security/localPentagiHost.js', 'out/security/localPentagiWorker.js',
     'out/security/localRedTeamScope.js', 'out/security/redTeamAccess.js', 'out/security/redTeamAccessHost.js',
-    'out/security/redTeamCapacity.js',
+    'out/security/redTeamCapacity.js', 'out/security/redTeamPrewarm.js', 'out/dialogs/inAppDialogs.js',
     'out/security/managedBundle.js', 'out/security/managedJobs.js', 'out/security/managedTemplate.js',
     'out/security/managedSecurityHost.js', 'out/security/managedPentagiWorker.js', 'out/cloud/managedAwsClient.js', 'out/cloud/connectedAws.js',
     'out/security/managedAudit.js', 'out/security/sourceAuditHost.js', 'media/security-audit/SKILL.md', 'media/security-audit/LICENSE', 'media/security-audit/REVISION',

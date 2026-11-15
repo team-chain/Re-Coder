@@ -7,7 +7,7 @@ import {AwsRequestError} from '../cloud/managedAwsClient';
 import {ManagedJobs,ManagedRun} from '../security/managedJobs';
 import {bundleSources,zipFiles,Bundle} from '../security/managedBundle';
 import {containerReport,sourceManifest,ManagedContainerReference} from '../security/managedContainerContract';
-import { ui } from '../ui/dialogs';
+import { ui } from '../dialogs/inAppDialogs';
 
 const hash=(x:Buffer|string)=>createHash('sha256').update(x).digest('hex');
 export async function containerBundle(workspace:string,runtime:string,id:string):Promise<Bundle>{

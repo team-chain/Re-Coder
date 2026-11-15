@@ -4,7 +4,7 @@ import * as path from 'path';
 import {createHash,randomBytes} from 'crypto';
 import {ApiClient} from '../core/ApiClient';
 import {AUDIT_REVISION,auditFiles,auditSource,AuditResult} from './managedAudit';
-import { ui } from '../ui/dialogs';
+import { ui } from '../dialogs/inAppDialogs';
 
 interface AuditState {phase:string;stage:string;createdAt?:string;finishedAt?:string;calls?:number;provider?:string;model?:string;stale?:boolean;error?:string;report?:AuditResult}
 const digest=(value:unknown)=>createHash('sha256').update(JSON.stringify(value)).digest('hex');

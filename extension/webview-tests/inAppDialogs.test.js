@@ -12,7 +12,7 @@ const mock={workspace:{isTrusted:true},QuickPickItemKind:{Separator:-1},window:{
 }};
 const original=Module._load;
 Module._load=function(name,...args){return name==='vscode'?mock:original.call(this,name,...args);};
-const dialogs=require('../out/ui/dialogs');
+const dialogs=require('../out/dialogs/inAppDialogs');
 const {LocalPentagiHost}=require('../out/security/localPentagiHost');
 const {dockerfilePort}=require('../out/security/managedSecurityHost');
 Module._load=original;
@@ -105,4 +105,10 @@ test('the managed check reads the app port from the Dockerfile instead of asking
  assert.equal(await dockerfilePort(dir),8080);
  await fs.writeFile(path.join(dir,'Dockerfile'),'FROM x\nEXPOSE 80\nEXPOSE 443\n');
  assert.equal(await dockerfilePort(dir),undefined,'ambiguous → ask');
+});
+
+test('only dialog replies are consumed; screen-state messages still reach the normal handler',()=>{
+ assert.equal(dialogs.handleDialogMessage({type:'ui.state',payload:{view:'code'}}),false);
+ assert.equal(dialogs.handleDialogMessage({type:'ui.openView',payload:{}}),false);
+ assert.equal(dialogs.handleDialogMessage({type:'ui.answer',payload:{id:'missing'}}),true);
 });

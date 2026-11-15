@@ -46,7 +46,8 @@ function activeTarget(): Target | undefined {
 
 /** 화면에서 온 ui.* 메시지를 처리한다. 처리했으면 true. */
 export function handleDialogMessage(message: { type?: string; payload?: unknown }): boolean {
-    if (!message?.type?.startsWith('ui.')) return false;
+    //: 대화창 답만 처리한다 — ui.state(화면 상태 저장) 같은 다른 ui.* 메시지는 원래 처리기로 보낸다.
+    if (message?.type !== 'ui.shown' && message?.type !== 'ui.answer') return false;
     const p = (message.payload ?? {}) as { id?: string; index?: number; value?: string; cancelled?: boolean };
     const item = p.id ? pending.get(p.id) : undefined;
     if (!item) return true;

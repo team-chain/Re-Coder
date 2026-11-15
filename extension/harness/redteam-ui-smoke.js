@@ -21,7 +21,7 @@ async function main(){
   const screen=async name=>{const r=await cmd('Page.captureScreenshot',{format:'png'});await fs.writeFile(path.join(root,name+'.png'),Buffer.from(r.data,'base64'));};
   await cmd('Page.addScriptToEvaluateOnNewDocument',{source:`window.uiRequests=[];const f=window.fetch;window.fetch=function(url,o){if(url==='/message'&&o?.body)window.uiRequests.push(JSON.parse(o.body));return f.apply(this,arguments);};`});
   await cmd('Page.navigate',{url:process.env.RECODER_PREVIEW_URL||'http://127.0.0.1:4188/?layout=workspace'});
-  await click('Security');await click('레드팀 테스트');await click('내 PC의 테스트 앱');await click(['레드팀 테스트 시작','다시 테스트']);
+  await click('Security');await click('레드팀 테스트');await click('내 PC의 테스트 앱');await click(['레드팀 테스트 시작','다시 테스트']);const startCard=async()=>{await until(()=>evaluate(`!!document.querySelector('[data-testid=redteam-start] .rc-rt-opt')`),'start card');await evaluate(`document.querySelector('[data-testid=redteam-start] label.rc-ck').click();true`);await click('시작');};await startCard();
   await until(()=>evaluate(`document.querySelectorAll('.rc-rt-task[data-active=true]').length===1`),'running task');
   assert.equal(await evaluate(`document.querySelectorAll('.rc-rt-task[data-active=true]').length`),1);
   assert.equal(await evaluate(`document.querySelectorAll('.rc-rt-traffic .rt-packet').length`),1);
@@ -43,7 +43,7 @@ async function main(){
   await screen('redteam-narrow');
   await cmd('Emulation.setEmulatedMedia',{features:[{name:'prefers-reduced-motion',value:'reduce'}]});
   assert.equal(await evaluate(`getComputedStyle(document.querySelector('.rc-rt-dot')).animationName`),'none');
-  await click('다시 테스트');await until(()=>evaluate(`document.querySelectorAll('.rc-rt-task[data-active=true]').length===1`),'second run');await click('중단 · 환경 삭제');
+  await click('다시 테스트');await startCard();await until(()=>evaluate(`document.querySelectorAll('.rc-rt-task[data-active=true]').length===1`),'second run');await click('중단 · 환경 삭제');
   await until(()=>contains('중단 후 환경 삭제 완료'),'cancel cleanup');
   assert.equal(await evaluate(`document.querySelectorAll('.rc-rt-flow [data-done=true]').length`),0);
   assert.deepEqual(errors,[]);await fs.writeFile(path.join(root,'redteam-ui-result.json'),JSON.stringify({fixture:true,modelCalls:0,passed:['actual task animation','transient failure/recovery','no duplicate start','incomplete legacy report','1200/700/390 layout','reduced motion','stop/cleanup'],requests:await evaluate('window.uiRequests')},null,2));

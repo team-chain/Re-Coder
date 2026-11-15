@@ -12,7 +12,7 @@ import {
     AI_KEY_SECRET, AI_PROVIDERS, AI_PROVIDER_STATE, AiKeyContext, AiKeyProvider, AiRoutingSettings, EconomyProvider,
     aiKeyEnv as baseAiKeyEnv, currentAiProvider, isAiKeyProvider, isEconomyProvider, storedAiKeys, validateCompatibleUrl,
 } from './aiKeyEnv';
-import { ui } from '../ui/dialogs';
+import { ui } from '../dialogs/inAppDialogs';
 export { AI_PROVIDER_STATE, AiKeyProvider, currentAiProvider, isAiKeyProvider, isEconomyProvider, storedAiKeys };
 
 export const AI_PROVIDER_LABEL: Record<AiKeyProvider, string> = {

@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { ui } from './ui/dialogs';
+import { ui } from './dialogs/inAppDialogs';
 
 /**
  * 배포·보안 화면이 대상으로 삼는 "현재 프로젝트".

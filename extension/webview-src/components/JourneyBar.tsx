@@ -8,6 +8,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import { Glyph } from "./shell/parts";
+import { requestFocus } from "./focusIntent";
 
 export type JourneyStatus = "done" | "failed" | "stale" | "todo" | "locked" | "blocked" | "unverified" | "cancelled";
 export interface JourneyStep { key: string; title: string; status: JourneyStatus; summary: string; at?: string }
@@ -70,9 +71,10 @@ export const JourneyBar: React.FC<{ view: string; onGo: (view: string) => void }
       }
     }
   }, [postMessage, refresh]));
-  //: 로컬 실행을 마쳐 다음이 공격 테스트면, 검사 도구(약 17GB)를 미리 받을지 한 번 묻는다(확장이 알림으로 묻고 동의해야 받는다).
+  //: 로컬 실행을 마쳤고 공격 테스트가 아직이면, 검사 도구(약 17GB)를 미리 받을지 한 번 묻는다(확장이 알림으로 묻고 동의해야 받는다).
   const local = state?.steps?.find(s => s.key === "local");
-  const offerKey = state?.next === "redteam" && local?.status === "done" ? "redteam" : "";
+  const redteam = state?.steps?.find(s => s.key === "redteam");
+  const offerKey = local?.status === "done" && redteam && redteam.status !== "done" ? "redteam" : "";
   useEffect(() => {
     if (!offerKey || offered.current) return;
     offered.current = true;
@@ -107,7 +109,7 @@ export const JourneyBar: React.FC<{ view: string; onGo: (view: string) => void }
                 data-current={target === view} disabled={disabled}
                 title={`${step.title} — ${STATUS_TEXT[step.status] ?? step.status}${step.summary ? ` · ${step.summary}` : ""}`}
                 aria-label={`${i + 1}단계 ${step.title}: ${STATUS_TEXT[step.status] ?? step.status}`}
-                onClick={() => target && onGo(target)}>
+                onClick={() => { if (!target) return; if (step.key === "redteam") requestFocus("redteam"); onGo(target); }}>
                 <span className="rc-journey-dot" aria-hidden>{(MARK[step.status] && <Glyph name={MARK[step.status] as string} size={10} sw={3} />) || i + 1}</span>{step.title}
               </button>
             </li>
@@ -117,7 +119,7 @@ export const JourneyBar: React.FC<{ view: string; onGo: (view: string) => void }
       <div className="rc-journey-next" data-testid="journey-next">
         <span>{nextHint(state)}</span>
         {nextKey && STEP_VIEW[nextKey] && STEP_VIEW[nextKey] !== view &&
-          <button type="button" onClick={() => onGo(STEP_VIEW[nextKey])}>다음: {state.steps.find(s => s.key === nextKey)?.title} →</button>}
+          <button type="button" onClick={() => { if (nextKey === "redteam") requestFocus("redteam"); onGo(STEP_VIEW[nextKey]); }}>다음: {state.steps.find(s => s.key === nextKey)?.title} →</button>}
       </div>
     </nav>
   );

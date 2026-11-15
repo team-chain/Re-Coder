@@ -6,7 +6,7 @@ import {ManagedJobs,ManagedRun} from './managedJobs';
 import {projectBundle} from './managedBundle';
 import {validateManagedInput} from './managedPentagiWorker';
 import {ManagedMode,ManagedReport} from './managedReport';
-import { ui } from '../ui/dialogs';
+import { ui } from '../dialogs/inAppDialogs';
 import {promises as fs} from 'fs';
 import * as path from 'path';
 

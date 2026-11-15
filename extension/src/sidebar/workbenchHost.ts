@@ -22,7 +22,7 @@ import { activeProjectPath } from '../activeProject';
 import { CoreManager } from '../core/CoreManager';
 import { ApiClient } from '../core/ApiClient';
 import { PollingService } from '../core/PollingService';
-import { ui } from '../ui/dialogs';
+import { ui } from '../dialogs/inAppDialogs';
 
 /**
  * 이미지 참조에서 컨테이너 이름을 만든다.

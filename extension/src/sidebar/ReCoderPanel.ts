@@ -7,7 +7,7 @@
  */
 import * as vscode from 'vscode';
 import { SidebarProvider } from './SidebarProvider';
-import { registerDialogWebview } from '../ui/dialogs';
+import { registerDialogWebview } from '../dialogs/inAppDialogs';
 
 export class ReCoderPanel {
     public static readonly viewType = 'recoder.workspace';

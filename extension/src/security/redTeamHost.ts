@@ -3,7 +3,7 @@ import { createHash } from 'crypto';
 import { PentagiClient, PentagiRejectedRequest, pentagiOutcome, serviceUrl, testTarget } from './pentagiClient';
 import {assessPentagi} from './pentagiAssessment';
 import { LocalPentagiHost } from './localPentagiHost';
-import { ui } from '../ui/dialogs';
+import { ui } from '../dialogs/inAppDialogs';
 
 type Run = { id?: string; target: string; provider: string; server: string; createdAt: string; uncertain?: boolean; stopped?: boolean; terminal?: boolean };
 const SECRET = 'recoder.pentagi.connection.v1';

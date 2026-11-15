@@ -23,6 +23,8 @@ if (process.env.HARNESS_SECURITY === '1') {
   // Use the real source-audit host and UI; only the AI response is a fixture.
   vscode.window.showInformationMessage=async(_title,_options,choice)=>choice;
   api.securityAuditStep=async(role)=>{await new Promise(resolve=>setTimeout(resolve,150));return {result:['hunter','critic'].includes(role)?{findings:[]}:{boundaries:[],entrypoints:[],unknowns:[]},provider:'UI fixture only',model:'no paid model call',inputTokens:0,outputTokens:0};};
+  //: 4.0 공격 테스트 시작 카드 — 실행 중인 앱 목록(오프라인 예시).
+  api.getLocalApps=async()=>({apps:[{name:'web',url:'http://localhost:3000',public:true,reachable:true}],others:[],reason:''});
   let sampleRun=null;
   let redteamPolls=0;
   require('../out/security/redTeamHost').RedTeamHost.prototype.handle=async action=>{

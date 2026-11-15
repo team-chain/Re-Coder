@@ -10,7 +10,7 @@ import * as https from 'https';
 import * as http from 'http';
 import { URL } from 'url';
 import { buildDiscordLinkCommand } from './discordLink';
-import { ui } from '../ui/dialogs';
+import { ui } from '../dialogs/inAppDialogs';
 
 export const SECRET_TOKEN = 'recoder.studentToken';
 export const SECRET_STUDENT_ID = 'recoder.studentId';

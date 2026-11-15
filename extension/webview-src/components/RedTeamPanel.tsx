@@ -11,8 +11,8 @@ interface EngineCache {warm:boolean;prewarm:{phase:string;step:string;error?:str
 interface State {keys?:{openai?:boolean;anthropic?:boolean};engine?:EngineCache;outcome?:string;accessConfigured?:boolean;reportError?:string;assessment?:PentagiAssessment;localMode?:boolean;local?:LocalReport;localHistory?:LocalReport[];configured?: boolean; server?: string; runs?: Array<{id?: string; target: string; createdAt: string; uncertain?: boolean; stopped?: boolean; terminal?: boolean}>; flow?: {id: string; title: string; status: string}; tasks?: Array<{id: string; title: string; status: string; result: string}>}
 const STATUS: Record<string,string> = {created:'실행 준비',running:'검사 중',waiting:'입력 대기 또는 중단',finished:'실행 완료 · 결과 검토 필요',failed:'실행 실패'};
 const OUTCOME:Record<string,string>={finished:'검사 완료',failed:'검사 실패',cancelled:'검사 중단',timed_out:'실행 시간 제한으로 중단',interrupted:'작업 종료 확인 필요',needs_input:'추가 입력 필요 · 전체 검사 미완료'};
-export const RedTeamPanel: React.FC = () => {
- const [mode,setMode]=useState<'local'|'aws'|null>(null);
+export const RedTeamPanel: React.FC<{initialMode?:'local'|'aws'}> = ({initialMode}) => {
+ const [mode,setMode]=useState<'local'|'aws'|null>(initialMode??null);
  return <section className="rc-security-detail"><p>검사할 앱에 맞는 실행 방식을 선택하세요.</p><div className="rc-security-actions"><button className="rc-btn" aria-pressed={mode==='local'} onClick={()=>setMode('local')}>내 PC의 테스트 앱</button><button className="rc-btn" aria-pressed={mode==='aws'} onClick={()=>setMode('aws')}>현재 AWS 연결로 앱 사본 검사</button></div>{mode==='local'?<LegacyRedTeamPanel/>:mode==='aws'?<ManagedRedTeamPanel/>:<p>로컬은 Docker 환경을 사용하고, AWS 방식은 검사 전용 환경과 비용을 검토한 뒤 실행합니다.</p>}</section>;
 };
 /** 검사 도구(약 17GB) 보관 상태 — 처음 한 번 받아 두면 다음 테스트는 다운로드 없이 시작한다. */
