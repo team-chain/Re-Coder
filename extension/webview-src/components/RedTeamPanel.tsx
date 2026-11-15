@@ -6,12 +6,24 @@ import {redTeamPollDelay,REDTEAM_STATUS_TIMEOUT} from './redTeamPolling';
 import type {RedTeamHttpEvent} from '../../src/security/pentagiAssessmentTypes';
 import type {PentagiAssessment} from '../../src/security/pentagiAssessmentTypes';
 interface LocalReport {isolationVerified?:boolean;httpEvents?:RedTeamHttpEvent[];session:string;target:string;createdAt:string;updatedAt?:string;phase:string;step:string;provider?:string;outcome?:string;error?:string;assessment?:PentagiAssessment;flow?:{status:string};tasks?:Array<{id:string;title:string;status:string;result:string}>;evidence?:Array<{id:string;type:string;message:string;result:string}>}
-interface State {outcome?:string;accessConfigured?:boolean;reportError?:string;assessment?:PentagiAssessment;localMode?:boolean;local?:LocalReport;localHistory?:LocalReport[];configured?: boolean; server?: string; runs?: Array<{id?: string; target: string; createdAt: string; uncertain?: boolean; stopped?: boolean; terminal?: boolean}>; flow?: {id: string; title: string; status: string}; tasks?: Array<{id: string; title: string; status: string; result: string}>}
+interface EngineCache {warm:boolean;prewarm:{phase:string;step:string;error?:string}|null}
+interface State {engine?:EngineCache;outcome?:string;accessConfigured?:boolean;reportError?:string;assessment?:PentagiAssessment;localMode?:boolean;local?:LocalReport;localHistory?:LocalReport[];configured?: boolean; server?: string; runs?: Array<{id?: string; target: string; createdAt: string; uncertain?: boolean; stopped?: boolean; terminal?: boolean}>; flow?: {id: string; title: string; status: string}; tasks?: Array<{id: string; title: string; status: string; result: string}>}
 const STATUS: Record<string,string> = {created:'실행 준비',running:'검사 중',waiting:'입력 대기 또는 중단',finished:'실행 완료 · 결과 검토 필요',failed:'실행 실패'};
 const OUTCOME:Record<string,string>={finished:'검사 완료',failed:'검사 실패',cancelled:'검사 중단',timed_out:'실행 시간 제한으로 중단',interrupted:'작업 종료 확인 필요',needs_input:'추가 입력 필요 · 전체 검사 미완료'};
 export const RedTeamPanel: React.FC = () => {
  const [mode,setMode]=useState<'local'|'aws'|null>(null);
  return <section className="rc-security-detail"><p>검사할 앱에 맞는 실행 방식을 선택하세요.</p><div className="rc-security-actions"><button className="rc-btn" aria-pressed={mode==='local'} onClick={()=>setMode('local')}>내 PC의 테스트 앱</button><button className="rc-btn" aria-pressed={mode==='aws'} onClick={()=>setMode('aws')}>현재 AWS 연결로 앱 사본 검사</button></div>{mode==='local'?<LegacyRedTeamPanel/>:mode==='aws'?<ManagedRedTeamPanel/>:<p>로컬은 Docker 환경을 사용하고, AWS 방식은 검사 전용 환경과 비용을 검토한 뒤 실행합니다.</p>}</section>;
+};
+/** 검사 도구(약 17GB) 보관 상태 — 처음 한 번 받아 두면 다음 테스트는 다운로드 없이 시작한다. */
+export const EngineCacheRow: React.FC<{engine:EngineCache;busy:boolean;blocked:boolean;send:(action:string)=>void}> = ({engine,busy,blocked,send}) => {
+ const p=engine.prewarm;
+ if(p?.phase==='running')return <div className="rc-security-actions" data-testid="redteam-cache" data-state="running"><p role="status">검사 도구 미리 받는 중 · {p.step}</p><button className="rc-btn" disabled={busy} onClick={()=>send('localPrewarmStop')}>미리 받기 중단</button></div>;
+ if(engine.warm)return <p data-testid="redteam-cache" data-state="warm">검사 도구 준비됨 — 다음 테스트는 도구 다운로드 없이 시작합니다.</p>;
+ return <div className="rc-security-actions" data-testid="redteam-cache" data-state="cold">
+  <p>처음 테스트는 검사 도구(약 17GB)를 받느라 오래 걸립니다. 미리 받아 두면 다음부터 바로 시작합니다. 모델 키나 실행 중인 앱은 쓰지 않습니다.</p>
+  <button className="rc-btn" disabled={busy||blocked} onClick={()=>send('localPrewarm')}>검사 도구 미리 받기</button>
+  {p&&p.phase!=='done'&&<p role={p.phase==='failed'?'alert':undefined}>{p.step}{p.error?` · ${p.error}`:''}</p>}
+ </div>;
 };
 const LegacyRedTeamPanel: React.FC = () => {
  const {postMessage,useMessage}=useVSCodeApi(); const [state,setState]=useState<State>({}); const [busy,setBusy]=useState(false); const [error,setError]=useState('');
@@ -21,20 +33,22 @@ const LegacyRedTeamPanel: React.FC = () => {
  useEffect(()=>{send(localMode?'localStatus':'status');},[send,localMode]);
  const run=state.runs?.[0];
  const local=state.local; const localActive=!!local&&!['removed','cleanup_failed'].includes(local.phase);
+ const prewarming=state.engine?.prewarm?.phase==='running';
  useEffect(()=>{if(!busy||!['localStatus','status'].includes(lastAction.current))return;const id=pending.current;const timer=setTimeout(()=>{if(pending.current!==id)return;pending.current='';failures.current++;setBusy(false);setError('상태 수신이 지연되고 있습니다. 표시된 내용은 마지막 수신 기록입니다.');setSerial(n=>n+1);},REDTEAM_STATUS_TIMEOUT);return()=>clearTimeout(timer);},[busy,serial]);
- useEffect(()=>{if(busy)return;const retry=error?redTeamPollDelay(lastAction.current,failures.current):undefined;if(error&&retry===undefined)return;if(!error&&(localMode?!localActive:!run?.id||run.terminal))return;const timer=setTimeout(()=>{if(typeof document==='undefined'||document.visibilityState==='visible')send(localMode?'localStatus':'status');else setSerial(n=>n+1);},retry??3000);return()=>clearTimeout(timer);},[busy,run?.id,run?.terminal,error,serial,send,localMode,localActive]);
+ useEffect(()=>{if(busy)return;const retry=error?redTeamPollDelay(lastAction.current,failures.current):undefined;if(error&&retry===undefined)return;if(!error&&(localMode?!localActive&&!prewarming:!run?.id||run.terminal))return;const timer=setTimeout(()=>{if(typeof document==='undefined'||document.visibilityState==='visible')send(localMode?'localStatus':'status');else setSerial(n=>n+1);},retry??3000);return()=>clearTimeout(timer);},[busy,run?.id,run?.terminal,error,serial,send,localMode,localActive,prewarming]);
  if(localMode)return <div className="rc-security-detail" aria-busy={busy}>
   <h3>내 앱 레드팀 테스트</h3>
   <p>로컬 앱을 선택하면 검사 전용 PentAGI Docker 환경을 자동으로 준비합니다. 검사 도구는 승인한 앱의 경로만 접근하도록 격리합니다.</p>
   <div className="rc-security-actions">
    <button className="rc-btn" disabled={busy||localActive} onClick={()=>send('localAccessConfigure')}>{state.accessConfigured?'권한 검사 설정 변경':'인증·권한 검사 설정'}</button>
    {state.accessConfigured&&<button className="rc-btn" disabled={busy||localActive} onClick={()=>send('localAccessClear')}>권한 검사 설정 해제</button>}
-   <button className="rc-btn p" disabled={busy||!!local&&local.phase!=='removed'} onClick={()=>send('localStart')}>{local?'다시 테스트':'레드팀 테스트 시작'}</button>
+   <button className="rc-btn p" disabled={busy||prewarming||!!local&&local.phase!=='removed'} onClick={()=>send('localStart')}>{local?'다시 테스트':'레드팀 테스트 시작'}</button>
 
    {local?.phase==='cleanup_failed'&&<button className="rc-btn" disabled={busy} onClick={()=>send('localCleanup')}>환경 정리 재시도</button>}
    {local&&<button className="rc-btn" disabled={busy} onClick={()=>send('localOpenReport')}>저장된 보고서</button>}
    <button className="rc-btn" disabled={busy} onClick={()=>send('localStatus')}>상태 확인</button>
   </div>
+  {state.engine&&<EngineCacheRow engine={state.engine} busy={busy} blocked={localActive} send={send}/>}
   <p role="status" aria-live="polite">{busy?'요청 처리 중…':local?`${local.outcome?OUTCOME[local.outcome]+' · ':''}${local.step}`:'대상 선택 → 환경 준비 → 검사 → 결과 저장 · 환경 삭제'}</p>
   {(error||local?.error)&&<p role="alert" className="rc-security-error">{error||local?.error}</p>}
   {local&&<p>{local.target} · {new Date(local.createdAt).toLocaleString()}</p>}
@@ -43,7 +57,7 @@ const LegacyRedTeamPanel: React.FC = () => {
   {local&&<RedTeamRunView key={local.session} active={localActive&&!error} phase={local.phase} step={error?'연결 확인 중 · 마지막 수신 기록':local.step} outcome={local.outcome} target={local.target} tasks={local.tasks} assessment={local.assessment} cleaned={local.phase==='removed'} updatedAt={local.updatedAt} httpEvents={local.httpEvents||[]} isolationVerified={local.isolationVerified} controls={localActive&&<button className="rc-btn" disabled={busy} onClick={()=>send('localStop')}>중단 · 환경 삭제</button>}/>}
   {local&&<details><summary>원본 기록 · 검증되지 않은 AI 설명 포함</summary><button className="rc-btn" disabled={busy} onClick={()=>send('localOpenRawReport')}>원본 JSON 열기</button>{local.evidence?.map(m=><details key={m.id}><summary>{m.type==='ask'?'추가 확인 요청':'AI 보고 원문'}</summary><pre>{m.message}{m.result?'\n'+m.result:''}</pre></details>)}</details>}
   {!!state.localHistory?.length&&<details><summary>이전 검사 {state.localHistory.length}개</summary>{state.localHistory.map(r=><details key={r.session}><summary>{new Date(r.createdAt).toLocaleString()} · {OUTCOME[r.outcome||'']||r.step}</summary><p>{r.target} · {r.step}</p>{r.tasks?.map(t=><pre key={t.id}>{t.title}{'\n'}{t.result}</pre>)}</details>)}</details>}
-  <details><summary>실행 조건 · 연결 설정</summary><p>Docker Desktop Linux 엔진과 OpenAI 또는 Anthropic 키를 사용합니다. 환경 준비는 최대 60분, 검사는 최대 30분입니다. 모델 사용료가 발생할 수 있습니다. 결과는 검토할 근거이며 안전 보증이 아닙니다.</p><p>검사 도구의 외부 네트워크를 분리하고 승인한 앱의 경로로만 요청을 전달합니다. 앱에서 다른 서비스로 이어지는 동작은 별도 검증이 필요합니다. 최대 300개 요청, GET·HEAD·OPTIONS·POST만 허용합니다.</p><p>VS Code를 닫아도 검사와 정리가 이어집니다. PC나 Docker가 종료되면 다시 켠 후 환경 정리를 재시도할 수 있습니다.</p><div className="rc-security-actions"><button className="rc-btn" disabled={busy} onClick={()=>send('localKey')}>모델 키 변경</button><button className="rc-btn" disabled={busy||localActive} onClick={()=>{setState({});setLocalMode(false);}}>별도 PentAGI 서버 연결</button></div></details>
+  <details><summary>실행 조건 · 연결 설정</summary><p>Docker Desktop Linux 엔진과 OpenAI 또는 Anthropic 키를 사용합니다. 환경 준비는 최대 60분, 검사는 최대 30분입니다. 모델 사용료가 발생할 수 있습니다. 결과는 검토할 근거이며 안전 보증이 아닙니다.</p><p>검사 도구의 외부 네트워크를 분리하고 승인한 앱의 경로로만 요청을 전달합니다. 앱에서 다른 서비스로 이어지는 동작은 별도 검증이 필요합니다. 최대 300개 요청, GET·HEAD·OPTIONS·POST만 허용합니다.</p><p>VS Code를 닫아도 검사와 정리가 이어집니다. PC나 Docker가 종료되면 다시 켠 후 환경 정리를 재시도할 수 있습니다.</p><div className="rc-security-actions"><button className="rc-btn" disabled={busy} onClick={()=>send('localKey')}>모델 키 변경</button>{state.engine?.warm&&<button className="rc-btn" disabled={busy||localActive||prewarming} onClick={()=>send('localCacheClear')}>검사 도구 보관 공간 비우기</button>}<button className="rc-btn" disabled={busy||localActive} onClick={()=>{setState({});setLocalMode(false);}}>별도 PentAGI 서버 연결</button></div></details>
  </div>;
  return <div className="rc-security-detail" aria-busy={busy}>
   <h3>내 테스트 앱 레드팀 검사</h3><p>PentAGI가 실행 중인 앱을 점검합니다. 결과는 검토할 근거이며 배포 승인이나 안전 보증이 아닙니다.</p>

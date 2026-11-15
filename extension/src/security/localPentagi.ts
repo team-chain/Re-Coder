@@ -4,7 +4,7 @@ import {promises as fs} from 'fs';
 import * as path from 'path';
 import {PentagiClient, PentagiFlow, PentagiTask, PentagiEvidence, pentagiOutcome, testTarget} from './pentagiClient';
 import {assessPentagi,PentagiAssessment,redactDiagnostic} from './pentagiAssessment';
-import {LOCAL_WORKER,SCOPE_NETWORK,prepareLocalScope,scopeEvents,RedTeamHttpEvent} from './localRedTeamScope';
+import {LOCAL_TOOLBOX,LOCAL_WORKER,SCOPE_NETWORK,prepareLocalScope,scopeEvents,RedTeamHttpEvent} from './localRedTeamScope';
 import {AccessPolicy,AccessResult,runAccessChecks,validateAccessPolicy,withAccessResult} from './redTeamAccess';
 import {ensureRedTeamCapacity} from './redTeamCapacity';
 
@@ -15,6 +15,85 @@ export const PENTAGI_IMAGES = {
     engine: 'docker@sha256:686d2c5464787b0ca42420e0aa03a94fc9781ff9bf8b5ff947614b9fa4c3c3e0',
 };
 const OWNER = 'io.recoder.redteam.session';
+/**
+ * 검사 도구 이미지 보관 볼륨(로컬 실행만). 전용 엔진의 /var/lib/docker 를 세션마다 지우면
+ * 약 17GB 도구 이미지를 매번 다시 받는다. 이 볼륨만 세션 사이에 남기고, 쓰기 전에 엔진 안의
+ * 컨테이너·네트워크·볼륨·빌드 캐시와 고정 도구 이외의 이미지를 모두 지운다. 도구 이미지는
+ * 매번 고정 내용 ID 로 다시 대조하므로 재사용해도 다른 이미지가 쓰이지 않는다.
+ * 엔진 이미지가 바뀌면 저장 형식이 달라질 수 있어 이름에 엔진 digest 일부를 넣는다.
+ */
+export const ENGINE_CACHE_LABEL = 'io.recoder.redteam.cache';
+export const ENGINE_CACHE = `recoder-redteam-engine-${PENTAGI_IMAGES.engine.slice(-64,-52)}`;
+/** 로컬 전용 엔진의 저장소 설정 — 실행과 미리 받기가 같은 형식으로 볼륨을 쓴다. */
+export const LOCAL_ENGINE_STORAGE = ['--feature=containerd-snapshotter=false','--storage-driver=overlay2'];
+const lines = (text: string) => text.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+export async function engineCacheState(run: DockerRun): Promise<{exists: boolean; users: string[]; old: string[]}> {
+    const volumes = lines(await run(['volume','ls','--filter',`label=${ENGINE_CACHE_LABEL}=engine`,'--format','{{.Name}}']));
+    const exists = volumes.includes(ENGINE_CACHE);
+    const users = exists ? lines(await run(['container','ls','-a','--filter',`volume=${ENGINE_CACHE}`,'--format','{{.Names}}'])) : [];
+    return {exists, users, old: volumes.filter(v=>v!==ENGINE_CACHE)};
+}
+/** 다른 엔진이 쓰고 있지 않을 때만 보관 볼륨을 넘긴다. 쓰는 중이면 undefined — 세션 전용 볼륨으로 돌아간다. */
+export async function claimEngineCache(run: DockerRun): Promise<string|undefined> {
+    const state = await engineCacheState(run);
+    if (state.users.length) return undefined;
+    if (!state.exists) await run(['volume','create','--label',`${ENGINE_CACHE_LABEL}=engine`,ENGINE_CACHE]);
+    for (const old of state.old) await run(['volume','rm',old]).catch(()=>{}); // 옛 엔진 형식 — 쓰는 중이면 Docker 가 거부한다.
+    return ENGINE_CACHE;
+}
+/** 보관 볼륨 삭제(사용자 요청). 쓰는 엔진이 있으면 지우지 않는다. */
+export async function clearEngineCache(run: DockerRun): Promise<boolean> {
+    const state = await engineCacheState(run);
+    if (state.users.length) throw new Error('검사 또는 미리 받기가 진행 중입니다. 끝난 뒤 다시 시도하세요.');
+    for (const name of [...(state.exists?[ENGINE_CACHE]:[]), ...state.old]) await run(['volume','rm',name]);
+    return state.exists || state.old.length > 0;
+}
+/**
+ * 전용 엔진 안을 "고정 도구 이미지만 남은" 상태로 되돌린다. 호스트 Docker 가 아니라
+ * 엔진 컨테이너 안의 dockerd 에만 적용된다. images=false 는 정리 단계용(이미지 유지).
+ */
+export async function resetEngineState(engine: string, run: DockerRun, images = true): Promise<void> {
+    await run(['exec',engine,'sh','-c',
+        'docker ps -aq | xargs -r docker rm -f -v >/dev/null 2>&1; docker network prune -f >/dev/null 2>&1; '+
+        'docker volume ls -q | xargs -r docker volume rm -f >/dev/null 2>&1; docker builder prune -af >/dev/null 2>&1; true'],{timeout:5*60*1000});
+    if (!images) return;
+    const inner = (args: string[]) => run(['exec',engine,'docker',...args],{timeout:2*60*1000});
+    const keep = await inner(['image','inspect',LOCAL_TOOLBOX,'--format','{{.Id}}']).catch(()=>'');
+    for (const imageId of new Set(lines(await inner(['image','ls','-a','-q','--no-trunc']))))
+        if (imageId !== keep.trim()) await inner(['image','rm','-f',imageId]).catch(()=>{});
+}
+/** 로컬 Docker Desktop(Linux 엔진, 최소 자원)인지 — 실행과 미리 받기가 같은 조건을 쓴다. */
+export async function assertLocalDocker(run: DockerRun): Promise<void> {
+    const endpoint=process.env.DOCKER_HOST || await run(['context','inspect','--format','{{(index .Endpoints "docker").Host}}']);
+    if (!/^(npipe:\/\/|unix:\/\/)/.test(endpoint)) throw new Error('로컬 Docker Desktop 컨텍스트를 선택하세요. 원격 Docker 엔진에서는 자동 검사를 실행하지 않습니다.');
+    const info = await run(['info','--format','{{.OSType}}|{{.MemTotal}}|{{.NCPU}}']);
+    const [os,memoryText,cpuText] = info.split('|');
+    if (os !== 'linux') throw new Error('Docker Desktop을 Linux 컨테이너 모드로 전환하세요.');
+    const memory = Number(memoryText), cpus = Number(cpuText);
+    if (!Number.isFinite(memory) || !Number.isFinite(cpus)) throw new Error('Docker의 메모리·CPU 정보를 확인할 수 없습니다. Docker Desktop을 다시 시작하고 재확인하세요.');
+    if (memory < 6 * 1024 ** 3 || cpus < 2) throw new Error('PentAGI 격리 환경은 Docker에 최소 메모리 6GB와 CPU 2개를 할당해야 합니다. Docker Desktop 리소스 설정을 늘린 뒤 다시 시도하세요.');
+}
+/** 호스트에 PentAGI 앱·DB·엔진 이미지(고정 digest)가 없으면 받는다. */
+export async function ensureHostImages(run: DockerRun, progress: (step: string) => Promise<void>): Promise<void> {
+    for (const [name,image] of Object.entries(PENTAGI_IMAGES)) {
+        await progress(`검사 환경 다운로드 · ${name}`);
+        try {await run(['image','inspect',image,'--format','{{.Id}}']);}
+        catch {await run(['pull',image], {timeout:20*60*1000});}
+    }
+}
+/** 보관 볼륨에 도구가 들어 있다고 확인된 기록(내용 ID 만). 볼륨이 없어지면 무효다. */
+export const cacheMarker = (root: string) => path.join(path.resolve(root), 'engine-cache.json');
+export async function markEngineCache(root: string, toolboxId: string): Promise<void> {
+    await fs.mkdir(path.resolve(root), {recursive:true});
+    await fs.writeFile(cacheMarker(root), JSON.stringify({volume:ENGINE_CACHE, toolboxId, at:new Date().toISOString()}), {mode:0o600});
+}
+export async function engineCacheWarm(root: string, run: DockerRun): Promise<boolean> {
+    try {
+        const marker = JSON.parse(await fs.readFile(cacheMarker(root),'utf8'));
+        if (marker?.volume !== ENGINE_CACHE) return false;
+        return (await engineCacheState(run)).exists;
+    } catch {return false;}
+}
 export type LocalProvider = 'openai'|'anthropic';
 export interface ManagedPentagiOptions {
     bedrockEnv: Record<string,string>; configPath: string; workerImage: string;
@@ -108,7 +187,14 @@ export class LocalPentagiRuntime {
         for (const suffix of ['app','bootstrap','cache','engine','db']) {
             const name = this.name(suffix);
             const names = await this.run(['container','ls','-a','--filter',`label=${OWNER}=${this.session}`,'--format','{{.Names}}']);
-            if (names.split(/\r?\n/).includes(name)) await this.run(['container','rm','-f','-v',name]);
+            if (!names.split(/\r?\n/).includes(name)) continue;
+            if (suffix === 'engine') {
+                // Inside the dedicated engine only: drop workers/networks/volumes so a kept image
+                // store carries nothing but images, then let dockerd shut down cleanly.
+                await resetEngineState(name, this.run, false).catch(()=>{});
+                await this.run(['stop','--time','20',name],{timeout:60000}).catch(()=>{});
+            }
+            await this.run(['container','rm','-f','-v',name]);
         }
         for (const suffix of ['engine-data','db-data','app-data','cache-data']) {
             const name = this.name(suffix); if (await this.owned('volume',name)) await this.run(['volume','rm',name]);
@@ -117,37 +203,37 @@ export class LocalPentagiRuntime {
             const name = this.name(suffix); if (await this.owned('network',name)) await this.run(['network','rm',name]);
         }
     }
-    async prepare(apiKey: string, provider: LocalProvider|'bedrock', progress: (step: string) => Promise<void>, managed?: ManagedPentagiOptions, target?:string): Promise<{server: string; token: string;executionTarget?:string;isolationVerified?:boolean}> {
+    async prepare(apiKey: string, provider: LocalProvider|'bedrock', progress: (step: string) => Promise<void>, managed?: ManagedPentagiOptions, target?:string): Promise<{server: string; token: string;executionTarget?:string;isolationVerified?:boolean;engineCache?:string}> {
         if(provider==='bedrock' && !managed) throw new Error('검사 관리형 실행 설정이 필요합니다.');
         await progress('Docker 확인');
-        const endpoint=process.env.DOCKER_HOST || await this.run(['context','inspect','--format','{{(index .Endpoints "docker").Host}}']);
-        if (!/^(npipe:\/\/|unix:\/\/)/.test(endpoint)) throw new Error('로컬 Docker Desktop 컨텍스트를 선택하세요. 원격 Docker 엔진에서는 자동 검사를 실행하지 않습니다.');
-        const info = await this.run(['info','--format','{{.OSType}}|{{.MemTotal}}|{{.NCPU}}']);
-        const [os,memoryText,cpuText] = info.split('|');
-        if (os !== 'linux') throw new Error('Docker Desktop을 Linux 컨테이너 모드로 전환하세요.');
-        const memory = Number(memoryText), cpus = Number(cpuText);
-        if (!Number.isFinite(memory) || !Number.isFinite(cpus)) throw new Error('Docker의 메모리·CPU 정보를 확인할 수 없습니다. Docker Desktop을 다시 시작하고 재확인하세요.');
-        if (memory < 6 * 1024 ** 3 || cpus < 2) throw new Error('PentAGI 격리 환경은 Docker에 최소 메모리 6GB와 CPU 2개를 할당해야 합니다. Docker Desktop 리소스 설정을 늘린 뒤 다시 시도하세요.');
-        for (const [name,image] of Object.entries(PENTAGI_IMAGES)) {
-            await progress(`검사 환경 다운로드 · ${name}`);
-            try {await this.run(['image','inspect',image,'--format','{{.Id}}']);}
-            catch {await this.run(['pull',image], {timeout:20*60*1000});}
-        }
+        await assertLocalDocker(this.run);
+        await ensureHostImages(this.run, progress);
+        //: 로컬 실행만 도구 이미지 보관 볼륨을 쓴다(관리형은 매번 새 엔진).
+        const cache = managed ? undefined : await claimEngineCache(this.run);
         await progress('검사 전용 엔진과 DB 준비');
         await this.run(['network','create',...this.labels(),this.name('runtime')]);
         await this.run(['network','create','--internal',...this.labels(),this.name('database')]);
-        for (const suffix of ['engine-data','db-data','app-data']) await this.run(['volume','create',...this.labels(),this.name(suffix)]);
+        for (const suffix of [...(cache?[]:['engine-data']),'db-data','app-data']) await this.run(['volume','create',...this.labels(),this.name(suffix)]);
         const dbPassword = randomBytes(24).toString('hex');
         const common = ['--detach','--restart=no','--log-opt','max-size=5m','--log-opt','max-file=2',...this.labels()];
         await this.run(['run',...common,'--name',this.name('db'),'--network',this.name('database'),'--network-alias','pgvector','--memory','768m','--pids-limit','256',
             '-e','POSTGRES_PASSWORD','-e','POSTGRES_DB=pentagidb','-v',`${this.name('db-data')}:/var/lib/postgresql/data`,PENTAGI_IMAGES.db], {env:{POSTGRES_PASSWORD:dbPassword}});
         await this.run(['run',...common,'--name',this.name('engine'),'--network',this.name('runtime'),'--network-alias','engine','--privileged','--memory','3g','--cpus','2','--pids-limit','2048',
-            '-e','DOCKER_TLS_CERTDIR=','-v',`${this.name('engine-data')}:/var/lib/docker`,PENTAGI_IMAGES.engine,'dockerd','--host=unix:///var/run/docker.sock','--host=tcp://0.0.0.0:2375','--tls=false',
+            '-e','DOCKER_TLS_CERTDIR=','-v',`${cache ?? this.name('engine-data')}:/var/lib/docker`,PENTAGI_IMAGES.engine,'dockerd','--host=unix:///var/run/docker.sock','--host=tcp://0.0.0.0:2375','--tls=false',
             // Only this disposable local engine: avoid a second content-store copy
             // of the large uncompressed toolbox archive. Never change the host daemon.
-            ...(managed?['--dns=1.1.1.1']:['--feature=containerd-snapshotter=false','--storage-driver=overlay2'])]);
+            ...(managed?['--dns=1.1.1.1']:LOCAL_ENGINE_STORAGE)]);
         await this.until(async () => {await this.run(['exec',this.name('db'),'pg_isready','-U','postgres','-d','pentagidb']);}, progress, 'DB 시작 대기', 120000);
-        await this.until(async () => {await this.run(['exec',this.name('engine'),'docker','info','--format','{{.ServerVersion}}']);}, progress, '검사 엔진 시작 대기', 120000);
+        try {await this.until(async () => {await this.run(['exec',this.name('engine'),'docker','info','--format','{{.ServerVersion}}']);}, progress, '검사 엔진 시작 대기', 120000);}
+        catch (error) {
+            //: 보관 볼륨이 손상돼 엔진이 뜨지 않으면 다음 실행이 새로 받도록 지운다(중단 요청은 제외).
+            if (cache && error instanceof Error && error.message.includes('시간이 초과')) {
+                await this.run(['container','rm','-f','-v',this.name('engine')]).catch(()=>{});
+                await this.run(['volume','rm',cache]).catch(()=>{});
+            }
+            throw error;
+        }
+        if (cache) {await progress('이전 검사 흔적 정리 · 도구 이미지만 유지'); await resetEngineState(this.name('engine'), this.run);}
         let executionTarget:string|undefined;
         if(managed) await managed.prepareTarget(this.name('engine'));
         else {
@@ -204,7 +290,7 @@ export class LocalPentagiRuntime {
         if (!response.ok) throw new Error('PentAGI 임시 API 토큰 생성에 실패했습니다.');
         const body = await response.json() as {data?:{token?:string}};
         if (typeof body.data?.token !== 'string') throw new Error('PentAGI 임시 토큰 응답 형식이 올바르지 않습니다.');
-        return {server,token:body.data.token,executionTarget,isolationVerified:!managed};
+        return {server,token:body.data.token,executionTarget,isolationVerified:!managed,engineCache:cache};
     }
     async events() { return scopeEvents(this.name('engine'),this.run); }
     private async sql(input: string) {return this.run(['exec','-i',this.name('db'),'psql','-U','postgres','-d','pentagidb','-At','-v','ON_ERROR_STOP=1'],{input});}
@@ -237,8 +323,9 @@ export async function executeLocalTest(request: LocalRequest): Promise<void> {
         report.step=step; await persist();
     };
     try {
-        await ensureRedTeamCapacity(root);
+        await ensureRedTeamCapacity(root,process.env,process.platform,fs,await engineCacheWarm(root,docker));
         const connection = await runtime.prepare(apiKey,provider,progress,undefined,target); report.server=connection.server;
+        if(connection.engineCache) await markEngineCache(root,await docker(['exec',`${session}-engine`,'docker','image','inspect',LOCAL_TOOLBOX,'--format','{{.Id}}'])).catch(()=>{});
         if(!connection.isolationVerified||!connection.executionTarget)throw new Error('검사 네트워크 격리를 확인하지 못했습니다. 실행을 중단합니다.');
         report.executionTarget=connection.executionTarget;report.isolationVerified=true;
         secrets.push(connection.token);

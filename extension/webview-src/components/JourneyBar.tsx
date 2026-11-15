@@ -46,6 +46,7 @@ export const JourneyBar: React.FC<{ view: string; onGo: (view: string) => void }
   const { postMessage, useMessage } = useVSCodeApi();
   const [state, setState] = useState<JourneyState | null>(null);
   const recorded = useRef<string>("");
+  const offered = useRef(false);
   const refresh = useCallback(() => postMessage("journey.get"), [postMessage]);
   useEffect(() => { refresh(); }, [refresh, view]);
   useEffect(() => {
@@ -69,6 +70,14 @@ export const JourneyBar: React.FC<{ view: string; onGo: (view: string) => void }
       }
     }
   }, [postMessage, refresh]));
+  //: 로컬 실행을 마쳐 다음이 공격 테스트면, 검사 도구(약 17GB)를 미리 받을지 한 번 묻는다(확장이 알림으로 묻고 동의해야 받는다).
+  const local = state?.steps?.find(s => s.key === "local");
+  const offerKey = state?.next === "redteam" && local?.status === "done" ? "redteam" : "";
+  useEffect(() => {
+    if (!offerKey || offered.current) return;
+    offered.current = true;
+    postMessage("security.redteam", { action: "localPrewarmOffer", requestId: `journey-prewarm-${Date.now()}` });
+  }, [offerKey, postMessage]);
   if (!state?.available || !state.steps?.length) return null;
   const nextKey = state.next ?? "";
   return (

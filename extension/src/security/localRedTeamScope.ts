@@ -109,8 +109,9 @@ export function scopeConfig(target:string) {
     return {host:u.hostname,authority:'localhost:'+u.port,port:Number(u.port),scheme:u.protocol.slice(0,-1),prefix};
 }
 
-export async function prepareLocalScope(engine:string,target:string,run:DockerRun,progress?:(step:string)=>Promise<void>):Promise<string> {
-    const config=scopeConfig(target);
+/** Pinned toolbox inside the dedicated engine: download by digest when missing, then verify
+ * the fixed worker tag points at exactly that content ID. Shared by a run and by pre-warming. */
+export async function ensureToolbox(engine:string,run:DockerRun,progress?:(step:string)=>Promise<void>):Promise<string> {
     const inner=(args:string[],timeout=60000)=>run(['exec',engine,'docker',...args],{timeout});
     let sourceId:string;
     await progress?.('검사 전용 엔진의 도구 확인');
@@ -122,6 +123,13 @@ export async function prepareLocalScope(engine:string,target:string,run:DockerRu
         await inner(['image','tag',LOCAL_TOOLBOX,LOCAL_WORKER]);
         if(await inner(['image','inspect',LOCAL_WORKER,'--format','{{.Id}}'])!==sourceId)throw new Error('Docker 검사 이미지의 내용 검증에 실패했습니다.');
     }
+    return sourceId;
+}
+
+export async function prepareLocalScope(engine:string,target:string,run:DockerRun,progress?:(step:string)=>Promise<void>):Promise<string> {
+    const config=scopeConfig(target);
+    const inner=(args:string[],timeout=60000)=>run(['exec',engine,'docker',...args],{timeout});
+    await ensureToolbox(engine,run,progress);
     await progress?.('대상 전용 네트워크 생성·접근 제한 확인');
     const resolved=await run(['exec',engine,'getent','hosts','host.docker.internal']);
     const hostIp=resolved.trim().split(/\s+/)[0];

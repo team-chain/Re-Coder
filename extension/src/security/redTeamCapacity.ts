@@ -3,7 +3,8 @@ import * as path from 'path';
 import * as os from 'os';
 const GiB=1024**3;
 /** Check the host volume, not the virtual free space advertised inside WSL. */
-export async function ensureRedTeamCapacity(reportRoot:string,env:NodeJS.ProcessEnv=process.env,platform=process.platform,io=fs):Promise<void> {
+/** cached: 검사 도구(약 17GB)가 이미 보관 볼륨에 있어 다시 받지 않는 경우 — 그만큼 이미 디스크에 있다. */
+export async function ensureRedTeamCapacity(reportRoot:string,env:NodeJS.ProcessEnv=process.env,platform=process.platform,io=fs,cached=false):Promise<void> {
     const root=await io.statfs(reportRoot);
     if(root.bavail*root.bsize<256*1024**2)throw new Error('검사 기록 저장 공간이 부족합니다. 해당 드라이브에 최소 256MB를 확보하세요.');
     let candidates:string[];
@@ -25,5 +26,8 @@ export async function ensureRedTeamCapacity(reportRoot:string,env:NodeJS.Process
     if(available===undefined)throw new Error('Docker 데이터 저장 드라이브의 여유 공간을 확인하지 못했습니다. Docker Desktop의 저장 위치와 접근 권한을 확인하세요.');
     // The pinned toolbox expands to about 17GB and also exists inside the disposable
     // engine. Leave room for compressed layers, both copies, the app and its database.
-    if(available<50*GiB)throw new Error('Docker 데이터 저장 드라이브에 최소 50GB가 필요합니다. 공간을 확보하거나 Docker 저장 위치를 변경한 뒤 다시 실행하세요.');
+    // With a kept toolbox the download and its second copy are already on disk; the run still
+    // needs room for the app, its database and worker containers.
+    const need=cached?20:50;
+    if(available<need*GiB)throw new Error(`Docker 데이터 저장 드라이브에 최소 ${need}GB가 필요합니다. 공간을 확보하거나 Docker 저장 위치를 변경한 뒤 다시 실행하세요.`);
 }
