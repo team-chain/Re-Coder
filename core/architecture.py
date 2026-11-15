@@ -402,6 +402,9 @@ def service_of(arch: dict, path: str) -> Optional[dict]:
     return next((s for s in arch.get("services") or [] if norm == s["path"] or norm.startswith(s["path"] + "/")), None)
 
 
+_WRITES = ("POST", "PUT", "PATCH")
+
+
 def test_cases(arch: dict) -> list[dict]:
     """계약에서 결정적으로 만드는 통합 테스트(③). 같은 규칙을 compose_check 와 프로젝트의 contract-test 실행기가 쓴다.
 
@@ -422,9 +425,14 @@ def test_cases(arch: dict) -> list[dict]:
         if e["auth"]:
             cases.append({**base, "id": f"{e['service']}-{e['method']}-{e['path']}-noauth", "expect": "401|403",
                           "why": "로그인 없이는 거절"})
-        elif e.get("expect"):
+        elif e.get("expect") and not (e["method"] in _WRITES and e.get("body") is None and str(e["expect"]).startswith("2")):
             cases.append({**base, "id": f"{e['service']}-{e['method']}-{e['path']}", "expect": str(e["expect"]),
                           "why": "계약의 응답 코드"})
+        elif e.get("expect"):
+            #: 요청 예(body) 없이 쓰기 API 의 성공 코드를 기대하면, 입력을 검사하는 정상 앱은 400 을 돌려준다
+            #: (실사용 2026-11-15: 회원가입·로그인이 400 으로 "실패" 처리됐다). 경로·서버 오류만 확인한다.
+            cases.append({**base, "id": f"{e['service']}-{e['method']}-{e['path']}", "expect": "!5xx,!404",
+                          "why": "요청 예가 없어 경로가 있고 서버 오류가 없는지만 확인"})
         else:
             has_param = path != e["path"]
             cases.append({**base, "id": f"{e['service']}-{e['method']}-{e['path']}",

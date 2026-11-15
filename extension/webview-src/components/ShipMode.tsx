@@ -9,6 +9,7 @@
  */
 
 import type { TrustReport } from "./TrustCheck";
+import { StackDeployResult, isStackDeploy } from "./StackDeployResult";
 import React, { useState, useCallback, useEffect, useRef } from "react";
 import { Icon } from "./ui/icons";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
@@ -658,7 +659,9 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
 
   // 롤백 뒤에는 복구된 이전 배포의 감시를 조회한다. 이전 실패 스냅샷은 버린다.
   const deploymentId = deployResult?.deployment_id;
-  const watchedDeploymentId = rollbackWatchId(deploymentId, rollbackResult);
+  //: 여러 서비스 실행(compose)은 단일 앱 연속 검증이 없다 — 조회하지 않는다.
+  const stackResult = isStackDeploy(deployResult);
+  const watchedDeploymentId = stackResult ? undefined : rollbackWatchId(deploymentId, rollbackResult);
   watchIdRef.current = watchedDeploymentId;
   const watchDone = watch !== null && watch !== "none" && watch.status !== "running";
   useEffect(() => {
@@ -990,9 +993,14 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
       {/* ── Deploy plan ── */}
       {step === "planReady" && plan && (
         <div style={{ background: "#252526", border: "1px solid #333", borderRadius: 5, padding: "8px 10px", marginBottom: 10, fontSize: 11 }}>
-          <div style={{ marginBottom: 3 }}><strong>이미지:</strong> {plan.image}</div>
-          <div style={{ marginBottom: 3 }}><strong>컨테이너:</strong> {plan.container_name}</div>
-          <div><strong>포트:</strong> {Object.entries(plan.ports).map(([h, c]) => `${h}→${c}`).join(", ")}</div>
+          {stack?.stack ? <>
+            <div style={{ marginBottom: 3 }}><strong>실행:</strong> 서비스 {stack.services}개 · DB {stack.databases}개 (docker compose)</div>
+            <div><strong>접속 주소:</strong> {Object.keys(plan.ports).map(h => `http://localhost:${h}`).join(", ") || "외부 공개 서비스 없음"}</div>
+          </> : <>
+            <div style={{ marginBottom: 3 }}><strong>이미지:</strong> {plan.image}</div>
+            <div style={{ marginBottom: 3 }}><strong>컨테이너:</strong> {plan.container_name}</div>
+            <div><strong>포트:</strong> {Object.entries(plan.ports).map(([h, c]) => `${h}→${c}`).join(", ")}</div>
+          </>}
         </div>
       )}
       {step === "planReady" && plan && dbChoice && (
@@ -1043,7 +1051,8 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
       {step === "done" && deployResult?.seeded && <AppSeedNote seed={deployResult.seeded} />}
       {dbError && step === "done" && <div role="alert" style={{ color: "var(--vscode-errorForeground,#f48771)", fontSize: 11, marginBottom: 8 }}>{dbError}</div>}
       {/* ── Done banner ── */}
-      {step === "done" && (rollbackResult ? <LocalRollbackStatus result={rollbackResult} watch={watch} /> : deploymentHealthVerdict(deployResult, watch) !== "healthy" ? (
+      {step === "done" && stackResult && deployResult && <StackDeployResult result={deployResult as never} onOpen={(url) => postMessage("webview.open.external", { url })} />}
+      {step === "done" && !stackResult && (rollbackResult ? <LocalRollbackStatus result={rollbackResult} watch={watch} /> : deploymentHealthVerdict(deployResult, watch) !== "healthy" ? (
         //: docker run 은 됐지만 헬스 확인은 실패 — "통과" 로 칠하지 않는다.
         //: 실기기: /health 가 404 인 앱이 초록 "Health Check 통과" 로 보였다.
         <div style={{ background: "rgba(245,158,11,0.10)", border: "1px solid #f59e0b", borderRadius: 5, padding: "10px 12px", color: "#f59e0b", fontWeight: 600, marginBottom: 10 }}>
@@ -1073,7 +1082,7 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
       ))}
 
       {/* ── 배포 후 감시 · 롤백 제안 (D1~D4) ── */}
-      {step === "done" && deploymentId && (
+      {step === "done" && deploymentId && !stackResult && (
         <div style={{ background: "#252526", border: "1px solid #333", borderRadius: 5, padding: "8px 10px", marginBottom: 10, fontSize: 11, lineHeight: 1.6 }}>
           <div style={{ fontWeight: 600, marginBottom: 2 }}>
             {rollbackResult?.status === "ok" ? "이전 버전 연속 검증" : "연속 검증"} ·{" "}
@@ -1288,13 +1297,13 @@ export const ShipMode: React.FC<ShipModeProps> = ({ isAiReady }) => {
         <div style={{ marginTop: 10 }}>
           <ApprovalModal
             level={plan.approval_level}
-            title="docker build / run 실행"
-            summary={`이미지 ${plan.image}를 빌드하고 컨테이너 ${plan.container_name}을 실행합니다.`}
+            title={stack?.stack ? "여러 서비스 함께 실행 (docker compose)" : "docker build / run 실행"}
+            summary={stack?.stack ? `서비스 ${stack.services}개 · DB ${stack.databases}개를 설계도대로 빌드하고 함께 실행합니다.` : `이미지 ${plan.image}를 빌드하고 컨테이너 ${plan.container_name}을 실행합니다.`}
             riskLevel={plan.risk_level}
             riskReasons={plan.risk_reasons}
             commandSteps={plan.command_steps}
             trust={plan.trust}
-            commandPreview={`docker build -t ${plan.image} . && docker run -d --name ${plan.container_name} ${Object.entries(plan.ports).map(([h, c]) => `-p ${h}:${c}`).join(" ")} ${plan.image}`}
+            commandPreview={stack?.stack ? undefined : `docker build -t ${plan.image} . && docker run -d --name ${plan.container_name} ${Object.entries(plan.ports).map(([h, c]) => `-p ${h}:${c}`).join(" ")} ${plan.image}`}
             onApprove={handleDeploy}
             onReject={() => { setShowApproval(false); }}
           />

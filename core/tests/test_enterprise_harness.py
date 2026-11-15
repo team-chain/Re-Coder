@@ -483,3 +483,19 @@ def test_compose_config_error_is_not_blamed_on_service_code(tmp_path):
     assert res["status"] == "unavailable" and res.get("config_error") is True
     assert "코드 교정을 하지 않습니다" in res["output"] and "PAYMENT_WEBHOOK_SECRET" in res["output"]
     assert C.issues(res, a, {"services/orders/app/main.py": "x"}) == []
+
+
+def test_write_api_without_example_body_is_not_failed_for_input_validation():
+    """실사용: 계약이 회원가입 201 을 기대하지만 요청 예가 없어 빈 body 를 보냈고, 입력을 검사하는 정상 앱이 400 → '실패'."""
+    import architecture
+    arch = {"services": [], "endpoints": [
+        {"service": "gateway", "method": "POST", "path": "/api/auth/signup", "auth": False, "expect": 201, "body": None},
+        {"service": "gateway", "method": "POST", "path": "/api/orders", "auth": False, "expect": 201, "body": {"item": 1}},
+        {"service": "gateway", "method": "GET", "path": "/api/products", "auth": False, "expect": 200, "body": None},
+    ]}
+    cases = {c["path"]: c for c in architecture.test_cases(arch)}
+    assert cases["/api/auth/signup"]["expect"] == "!5xx,!404"
+    assert architecture.judge(cases["/api/auth/signup"]["expect"], 400)
+    assert not architecture.judge(cases["/api/auth/signup"]["expect"], 500)
+    assert cases["/api/orders"]["expect"] == "201" and cases["/api/orders"]["body"] == {"item": 1}
+    assert cases["/api/products"]["expect"] == "200"
