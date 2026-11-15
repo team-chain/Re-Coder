@@ -54,6 +54,54 @@ TOOL_NAME = "output"
 _AUTO_TOOL_MODELS = ("claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-mythos-5-1")
 
 
+#: Claude 5 계열은 **요청에 아무것도 안 적어도 생각(thinking)을 한다.** 생각에 쓴 토큰도 max_tokens 에서 빠진다.
+#: 실기기 2026-11-15(Sonnet 5.5, 서비스 5개 요청): 설계·약속 문서 호출이 8192 토큰을 전부 생각에 쓰고 글은 0자로 끝나
+#: (stop_reason=max_tokens) 대규모 생성이 "더 진행되지 않았습니다" 로 멈췄다. ReCoder 는 한도를 응답 길이로 계산하고
+#: 응답을 스스로 검증·교정하므로, 호출 앞의 생각을 끈다. 끄는 방법은 모델마다 다르다(더 구체적인 접두사가 먼저).
+#:   https://platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting
+#: 값이 None 인 모델은 생각을 끌 수 없다 — 그만큼 한도를 더 준다.
+_THINKING_OFF: tuple[tuple[str, Optional[dict]], ...] = (
+    ("claude-sonnet-5-5", {"type": "between_tools"}),   # "disabled" 는 400 — between_tools 가 가장 낮은 설정
+    ("claude-haiku-5-5", {"type": "disabled"}),
+    ("claude-opus-5-5", None),
+    ("claude-fable-5", None),
+    ("claude-mythos-5", None),
+    ("claude-sonnet-5", {"type": "disabled"}),
+    ("claude-opus-5", {"type": "disabled"}),
+    ("claude-haiku-5", {"type": "disabled"}),
+)
+#: 생각을 끌 수 없을 때(또는 사용자가 켜 두라고 했을 때) 응답 한도에 더하는 여유.
+THINK_HEADROOM = 16000
+#: 사용자가 생각을 켜 두고 싶으면 RECODER_ANTHROPIC_THINKING=on (느리고 비용이 늘지만 한도는 여유를 더해 맞춘다).
+ENV_THINKING = "RECODER_ANTHROPIC_THINKING"
+
+
+def _thinking_plan(model_id: str) -> tuple[Optional[dict], int]:
+    """(요청에 넣을 thinking 설정 또는 None, 한도에 더할 여유). 생각하지 않는 예전 모델은 (None, 0)."""
+    model = (model_id or "").lower()
+    #: 호스팅 접두사(예: global.anthropic.claude-…)가 붙어도 모델 이름으로 찾는다.
+    at = model.find("claude-")
+    name = model[at:] if at >= 0 else model
+    for prefix, setting in _THINKING_OFF:
+        if name.startswith(prefix):
+            if setting is None or (os.environ.get(ENV_THINKING) or "").strip().lower() in ("on", "1", "true", "default"):
+                return None, THINK_HEADROOM
+            return dict(setting), 0
+    return None, 0
+
+
+def _starved_by_thinking(result: dict) -> bool:
+    """응답 한도에서 끊겼는데 글도 도구 호출도 없다 — 한도를 생각에 다 쓴 것이다."""
+    if not isinstance(result, dict) or result.get("stop_reason") != "max_tokens":
+        return False
+    for block in result.get("content") or []:
+        if block.get("type") == "text" and str(block.get("text") or "").strip():
+            return False
+        if block.get("type") == "tool_use":
+            return False
+    return True
+
+
 def _anthropic_auto_tool(payload: dict) -> dict:
     """Claude 5.5: strict belongs to the tool, not tool_choice."""
     return {**payload, "tool_choice": {"type": "auto"},
@@ -188,7 +236,11 @@ class ApiKeyProvider(LLMProvider):
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(self._endpoint, data=data, method="POST", headers=self._headers())
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout, context=self._ctx) as r:
+            #: 생각을 끌 수 없는 모델에 여유를 더한 큰 요청은 오래 걸린다 — 한도에 비례해 기다린다(진단용 짧은 대기는 그대로).
+            timeout = self._timeout
+            if self._provider == "anthropic" and timeout >= 60:
+                timeout = max(timeout, int(payload.get("max_tokens") or 0) / 35)
+            with urllib.request.urlopen(req, timeout=timeout, context=self._ctx) as r:
                 return json.loads(r.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             raise self._http_error(e) from None
@@ -230,11 +282,31 @@ class ApiKeyProvider(LLMProvider):
 
     def _post(self, payload: dict) -> dict:
         """일시 오류는 한 번 재시도. 모델이 모르는 선택 파라미터는 빼고 한 번 더 보낸다."""
-        for attempt in range(3):
+        thinking_fixed = False
+        starved = False
+        for attempt in range(5):
             try:
-                return self._post_once(payload)
+                result = self._post_once(payload)
+                if self._provider == "anthropic" and not starved and _starved_by_thinking(result):
+                    #: 안전망 — 표에 없는 새 모델이 한도를 전부 생각에 써서 내용이 비었다. 여유를 더해 한 번만 다시 보낸다.
+                    starved = True
+                    payload = {**payload, "max_tokens": int(payload.get("max_tokens") or 0) + THINK_HEADROOM}
+                    continue
+                return result
             except LLMError as exc:
                 text = str(exc)
+                if (self._provider == "anthropic" and exc.error_type == LLMErrorType.VALIDATION_ERROR and "(400)" in text
+                        and "thinking" in text.lower() and "thinking" in payload and not thinking_fixed):
+                    #: 이 모델은 우리가 보낸 thinking 값을 받지 않는다 — 안내대로 between_tools 로 바꾸거나,
+                    #: 그것도 아니면 설정을 빼고 생각에 쓸 여유를 더한다(요청을 실패로 끝내지 않는다).
+                    thinking_fixed = True
+                    current = (payload.get("thinking") or {}).get("type")
+                    if "between_tools" in text and current != "between_tools":
+                        payload = {**payload, "thinking": {"type": "between_tools"}}
+                    else:
+                        payload = {k: v for k, v in payload.items() if k != "thinking"}
+                        payload["max_tokens"] = int(payload.get("max_tokens") or 0) + THINK_HEADROOM
+                    continue
                 if (self._provider == "anthropic" and exc.error_type == LLMErrorType.VALIDATION_ERROR
                         and "(400)" in text and "tool_choice" in text.lower()
                         and payload.get("tools") and payload.get("tool_choice", {}).get("type") != "auto"):
@@ -274,6 +346,11 @@ class ApiKeyProvider(LLMProvider):
                 "model": self.model_id, "max_tokens": max_tokens,
                 "messages": [{"role": r, "content": [{"type": "text", "text": t}]} for r, t in texts],
             }
+            thinking, headroom = _thinking_plan(self.model_id)
+            if thinking:
+                payload["thinking"] = thinking
+            elif headroom:
+                payload["max_tokens"] = max_tokens + headroom
             if system:
                 payload["system"] = system
             if schema:

@@ -887,15 +887,27 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
         """0단계 — 아키텍처 계약(서비스·DB·API)을 받아 정규화한다. 못 받으면 None(예전 흐름으로 만든다)."""
         arch_mod = _arch()
         self._event("planning", message="아키텍처 설계 중 — 서비스·DB·API 를 나눕니다")
-        try:
-            resp = self.call(arch_mod.prompt(self.context_prompt), arch_mod.SCHEMA, "plan_architecture", 4096, agent="planner")
-            raw = _ca()._extract_json(resp.text)
-        except (LLMError, CodeOutputError, ValueError) as exc:
-            if isinstance(exc, LLMError) and not _is_truncation(exc) and exc.error_type != LLMErrorType.STRUCTURED_OUTPUT \
-                    and not _recoverable(exc):
-                raise
-            self._log("-", "plan", f"아키텍처 계약을 받지 못해 일반 설계로 만듭니다: {exc}")
-            return None
+        raw = None
+        #: 서비스 5개·DB 4개·API 수십 개면 계약 JSON 이 길다 — 한도를 넉넉히 주고, 그래도 잘리면 간결하게 한 번 더 받는다.
+        #: (실기기 2026-11-15: 4096 에서 잘려 계약 없이 일반 설계로 내려갔고, 다중 서비스 하네스가 아예 동작하지 않았다.)
+        attempts = ((STREAM_MAX_TOKENS, ""),
+                    (STREAM_MAX_TOKENS * 2, "\n\n[다시 요청] 앞의 응답이 길이 한도에서 잘렸습니다. 더 간결하게 쓰세요 — purpose 는 한 줄, "
+                                            "endpoints 는 서비스마다 핵심 API 만(전체 30개 이내), body 예시는 필드 3개 이내."))
+        for index, (limit, hint) in enumerate(attempts):
+            try:
+                resp = self.call(arch_mod.prompt(self.context_prompt) + hint, arch_mod.SCHEMA, "plan_architecture", limit, agent="planner")
+                raw = _ca()._extract_json(resp.text)
+                break
+            except (LLMError, CodeOutputError, ValueError) as exc:
+                if isinstance(exc, LLMError) and not _is_truncation(exc) and exc.error_type != LLMErrorType.STRUCTURED_OUTPUT \
+                        and not _recoverable(exc):
+                    raise
+                if index + 1 < len(attempts):
+                    self._log("-", "plan", f"아키텍처 계약 응답을 쓰지 못해 간결하게 다시 받습니다: {exc}")
+                    continue
+                self._log("-", "plan", f"아키텍처 계약을 받지 못해 일반 설계로 만듭니다: {exc}")
+                self._event("planning", message="아키텍처 계약을 받지 못해 일반 설계로 만듭니다(다중 서비스 검증은 건너뜁니다)")
+                return None
         arch, notes = arch_mod.normalize(raw)
         if notes:
             self._log("-", "plan", "아키텍처 계약 정리: " + "; ".join(notes[:6]))

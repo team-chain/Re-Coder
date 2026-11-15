@@ -345,3 +345,112 @@ def test_라우터는_글자_그대로_요청이면_원문과_끊김_여부를_�
         assert resp.text == pkg and resp.metadata["truncated"] is True
     finally:
         server.close()
+
+
+# ---------------------------------------------------------------------------
+# Claude 5 계열의 기본 생각(thinking) — 실기기 2026-11-15: Sonnet 5.5 가 응답 한도를 전부 생각에 써서
+# 글이 0자로 끝났고(stop_reason=max_tokens) 대규모 생성이 "더 진행되지 않았습니다" 로 멈췄다.
+# ---------------------------------------------------------------------------
+
+_MSG = [{"role": "user", "content": [{"text": "x"}]}]
+_STARVED = {"content": [{"type": "thinking", "thinking": "", "signature": "s"}], "stop_reason": "max_tokens"}
+
+
+def _sonnet55(body, n):
+    """Sonnet 5.5 의 실제 규칙을 흉내 낸다 — 설정이 없으면 생각만 하다 끝나고, disabled 는 400, between_tools 면 글을 쓴다."""
+    kind = (body.get("thinking") or {}).get("type")
+    if kind == "disabled":
+        return 400, {"error": {"type": "invalid_request_error", "message":
+                               'To turn thinking off on this model, send "thinking": {"type": "between_tools"} instead of {"type": "disabled"}.'}}
+    if kind == "between_tools":
+        return 200, {"content": [{"type": "text", "text": "## 약속\n- GET /api/orders\n"}], "stop_reason": "end_turn"}
+    return (200, _STARVED) if body["max_tokens"] < 20000 else \
+        (200, {"content": [{"type": "thinking", "thinking": "", "signature": "s"}, {"type": "text", "text": "늦게 쓴 글"}], "stop_reason": "end_turn"})
+
+
+@pytest.mark.parametrize("model, expected", [
+    ("claude-sonnet-5-5", {"type": "between_tools"}), ("claude-sonnet-5-5-20261001", {"type": "between_tools"}),
+    ("claude-haiku-5-5", {"type": "disabled"}), ("claude-sonnet-5", {"type": "disabled"}), ("claude-opus-5", {"type": "disabled"}),
+])
+def test_claude5_requests_turn_off_upfront_thinking(env, model, expected):
+    payload = akp.ApiKeyProvider("anthropic", model)._payload(_MSG, None, None, 8192)
+    assert payload["thinking"] == expected and payload["max_tokens"] == 8192
+    assert set(payload["thinking"]) == {"type"}  # between_tools 는 다른 필드를 받지 않는다
+    structured = akp.ApiKeyProvider("anthropic", model)._payload(_MSG, None, SCHEMA, 1024)
+    assert structured["thinking"] == expected and structured["tools"]
+
+
+@pytest.mark.parametrize("model", ["claude-opus-5-5", "claude-fable-5-2", "claude-mythos-5-1"])
+def test_models_that_always_think_get_headroom_instead(env, model):
+    payload = akp.ApiKeyProvider("anthropic", model)._payload(_MSG, None, None, 8192)
+    assert "thinking" not in payload and payload["max_tokens"] == 8192 + akp.THINK_HEADROOM
+
+
+@pytest.mark.parametrize("model", ["claude-sonnet-4-5-20250929", "claude-haiku-4-5", "claude-3-5-sonnet"])
+def test_older_models_are_sent_unchanged(env, model):
+    payload = akp.ApiKeyProvider("anthropic", model)._payload(_MSG, None, None, 4096)
+    assert "thinking" not in payload and payload["max_tokens"] == 4096
+
+
+def test_user_can_keep_thinking_on_and_gets_headroom(env):
+    env.setenv("RECODER_ANTHROPIC_THINKING", "on")
+    payload = akp.ApiKeyProvider("anthropic", "claude-sonnet-5-5")._payload(_MSG, None, None, 8192)
+    assert "thinking" not in payload and payload["max_tokens"] == 8192 + akp.THINK_HEADROOM
+
+
+def test_sonnet55_long_text_is_not_starved_by_thinking(env):
+    server = _Server(_sonnet55)
+    try:
+        _use(env, "anthropic", server)
+        out = asyncio.run(akp.ApiKeyProvider("anthropic").converse(_MSG, raw=True, max_tokens=8192))
+        assert out == {"text": "## 약속\n- GET /api/orders\n", "truncated": False}
+        assert len(server.requests) == 1 and server.requests[0]["body"]["thinking"] == {"type": "between_tools"}
+    finally:
+        server.close()
+
+
+def test_rejected_thinking_value_follows_the_servers_hint_once(env):
+    """표가 틀렸거나 모델 규칙이 바뀌어도 요청을 실패로 끝내지 않는다 — 안내대로 between_tools 로 한 번 바꾼다."""
+    server = _Server(_sonnet55)
+    try:
+        _use(env, "anthropic", server)
+        out = asyncio.run(akp.ApiKeyProvider("anthropic", "claude-haiku-5-5").converse(_MSG, raw=True, max_tokens=4096))
+        assert out["text"].startswith("## 약속")
+        kinds = [r["body"].get("thinking") for r in server.requests]
+        assert kinds == [{"type": "disabled"}, {"type": "between_tools"}]
+    finally:
+        server.close()
+
+
+def test_unsupported_thinking_field_is_dropped_and_budget_is_raised(env):
+    def respond(body, n):
+        if "thinking" in body:
+            return 400, {"error": {"message": "thinking: Extra inputs are not permitted"}}
+        return 200, {"content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn"}
+    server = _Server(respond)
+    try:
+        _use(env, "anthropic", server)
+        out = asyncio.run(akp.ApiKeyProvider("anthropic", "claude-sonnet-5-5").converse(_MSG, raw=True, max_tokens=4096))
+        assert out["text"] == "ok" and len(server.requests) == 2
+        assert "thinking" not in server.requests[1]["body"]
+        assert server.requests[1]["body"]["max_tokens"] == 4096 + akp.THINK_HEADROOM
+    finally:
+        server.close()
+
+
+def test_unknown_model_starved_by_thinking_is_retried_once_with_headroom(env):
+    server = _Server(_sonnet55)  # thinking 설정을 모르는 새 모델 이름 — 표에 없다
+    try:
+        _use(env, "anthropic", server)
+        out = asyncio.run(akp.ApiKeyProvider("anthropic", "claude-next-9").converse(_MSG, raw=True, max_tokens=8192))
+        assert out == {"text": "늦게 쓴 글", "truncated": False}
+        assert [r["body"]["max_tokens"] for r in server.requests] == [8192, 8192 + akp.THINK_HEADROOM]
+    finally:
+        server.close()
+    always = _Server(lambda body, n: (200, _STARVED))
+    try:
+        _use(env, "anthropic", always)
+        out = asyncio.run(akp.ApiKeyProvider("anthropic", "claude-next-9").converse(_MSG, raw=True, max_tokens=8192))
+        assert out == {"text": "", "truncated": True} and len(always.requests) == 2, "끝없이 다시 보내지 않는다"
+    finally:
+        always.close()

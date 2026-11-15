@@ -341,3 +341,30 @@ def test_명세_하네스도_다중_서비스에서_합격_조건을_시험하�
     # 계약 API 표대로 그 API 를 가진 서비스(orders)에 보냈다
     assert any(base == "http://127.0.0.1:4800" and path == "/api/orders" for base, _, path in sent)
     assert any(c["name"] == "acceptance" and c["ok"] for c in result["verification"]["checks"])
+
+
+def test_아키텍처_계약이_잘리면_간결하게_한번_더_받아_하네스를_유지한다(monkeypatch, tmp_path):
+    """실기기 2026-11-15: 계약 응답이 길이 한도에서 잘리자 바로 일반 설계로 내려가 다중 서비스 하네스가 동작하지 않았다."""
+    from llm.base import LLMError, LLMErrorType
+
+    class CutOnce(FakeAI):
+        limits = []
+
+        def call(self, request, agent=None, operation=None):
+            if operation == "plan_architecture":
+                CutOnce.limits.append((request.max_tokens, "다시 요청" in request.prompt))
+                if len(CutOnce.limits) == 1:
+                    raise LLMError("모델 출력이 응답 길이 제한에서 잘렸습니다.", LLMErrorType.STRUCTURED_OUTPUT)
+            return super().call(request, agent, operation)
+
+    ai, docker = CutOnce(), Docker()
+    real = generated_validation.verify_compose
+    monkeypatch.setattr(generated_validation, "verify_compose",
+                        lambda root, ops, arch, **kw: real(root, ops, arch, docker=docker, http=docker.http, **kw))
+    monkeypatch.setattr(ca, "get_router", lambda: ai)
+    result = ca.generate_code("게이트웨이·주문 서비스·워커로 나뉜 마이크로서비스 주문 플랫폼, PostgreSQL 과 Redis 사용",
+                              project_root=str(tmp_path), mode="team", test=False, decisions=[DECISION])
+    assert len(CutOnce.limits) == 2
+    assert CutOnce.limits[0][0] >= 8192 and CutOnce.limits[1][0] > CutOnce.limits[0][0] and CutOnce.limits[1][1] is True
+    assert result["verification"]["kind"] == "compose" and result["verification"]["status"] == "passed"
+    assert any(op["file"] == "docker-compose.yml" and op.get("fixed") for op in result["ops"])
