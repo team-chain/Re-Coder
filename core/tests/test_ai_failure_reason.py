@@ -114,3 +114,52 @@ def test_빈_응답은_전용_문장을_유지한다(monkeypatch) -> None:
     with pytest.raises(HTTPException) as exc:
         asyncio.run(analyze.chat_route(analyze.ChatRequest(message="hi")))
     assert "빈 응답" in str(exc.value.detail)
+
+
+# ---------------------------------------------------------------------------
+# 진단(AI 연결 확인) — 실패 이유가 화면으로 간다. 예전에는 core.log 에만 있었다(실기기 2026-11-15).
+# ---------------------------------------------------------------------------
+
+import first_run  # noqa: E402
+from llm import api_key_provider  # noqa: E402
+
+
+class _Broke:
+    def __init__(self, *a, **k):
+        self._timeout = 60
+        self.model_id = "claude-x"
+
+    def ping(self):
+        raise RuntimeError("Claude API 크레딧·사용 한도가 부족합니다. Claude API 콘솔에서 결제·한도를 확인하세요: "
+                           "Your credit balance is too low (key sk-ant-api03-abcdefghijklmnopqrstuvwxyz)")
+
+
+def test_chosen_api_key_failure_reason_reaches_diagnostics(monkeypatch):
+    monkeypatch.setattr(api_key_provider, "selected_provider", lambda: "anthropic")
+    monkeypatch.setattr(api_key_provider, "ApiKeyProvider", _Broke)
+    monkeypatch.setattr(first_run, "check_core_ready", lambda: (first_run.ReadyStatus.OK, []))
+    monkeypatch.setattr(first_run, "check_docker_ready", lambda: (first_run.ReadyStatus.OK, "Docker"))
+    monkeypatch.setattr(first_run, "check_aws_deploy_ready", lambda: (first_run.ReadyStatus.OK, []))
+    monkeypatch.setattr(first_run, "save_diagnostics", lambda result: None)
+    for name in ("check_ops_ready",):
+        if hasattr(first_run, name):
+            monkeypatch.setattr(first_run, name, lambda: (first_run.ReadyStatus.OK, []))
+    result = asyncio.run(first_run.run_diagnostics())
+    assert result.ai_ready != "ok"
+    reason = result.details["ai_failure"]
+    assert any("크레딧" in i for i in result.issues)
+    assert not any("Bedrock or Gemini" in i for i in result.issues)
+    assert "크레딧" in reason and "credit balance" not in reason  # 공급자 원문은 내보내지 않는다
+    assert "abcdefghijklmnop" not in reason
+
+
+def test_success_clears_previous_reason(monkeypatch):
+    first_run._last_ai_failure = "old"
+
+    class _Ok(_Broke):
+        def ping(self):
+            return None
+    monkeypatch.setattr(api_key_provider, "selected_provider", lambda: "anthropic")
+    monkeypatch.setattr(api_key_provider, "ApiKeyProvider", _Ok)
+    assert first_run._check_ai_ready_sync()[0] == first_run.ReadyStatus.OK
+    assert first_run._last_ai_failure == ""

@@ -65,3 +65,12 @@ test('Docker starts with a pending event and concurrent requests share one attem
   assert.ok(messages.at(-1).payload.message.includes('ready'));
  }finally{Module._resolveFilename=resolve;}
 });
+
+test('AI connection failure shows the real reason instead of only "setup needed"',()=>{
+ const base={core_ready:'ready',docker_ready:'ready',aws_deploy_ready:'ready',ops_ready:'ready',provider_type:'anthropic'};
+ const failed=renderToStaticMarkup(React.createElement(DiagnosticsPanel,{diagnostics:{...base,ai_ready:'not_ready',
+  details:{ai_failure:'Claude API 크레딧·사용 한도가 부족합니다. Claude API 콘솔에서 결제·한도를 확인하세요.'}}}));
+ assert.match(failed,/data-testid="ai-failure-reason"[^>]*>Claude API 크레딧·사용 한도가 부족합니다/);
+ const ok=renderToStaticMarkup(React.createElement(DiagnosticsPanel,{diagnostics:{...base,ai_ready:'ready',details:{ai_failure:'old'}}}));
+ assert.ok(!ok.includes('ai-failure-reason'));
+});

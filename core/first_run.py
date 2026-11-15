@@ -61,7 +61,11 @@ async def run_diagnostics() -> DiagnosticsResult:
     result.provider_type = provider
     result.is_cross_region_profile = is_cross_region
     if not model_id:
-        result.issues.append("AI Ready: No provider available (Bedrock or Gemini)")
+        #: 실패한 실제 이유를 화면(진단 패널)에 보낸다 — 예전 문구 "No provider available (Bedrock or Gemini)" 는
+        #: Claude API 키를 고른 사용자에게 틀린 안내였다.
+        reason = _last_ai_failure or "AI 공급자에 연결하지 못했습니다."
+        result.details["ai_failure"] = reason
+        result.issues.append("AI Ready: " + reason)
 
     # Step 3: Docker Ready
     docker_status, docker_version = await asyncio.to_thread(check_docker_ready)
@@ -158,7 +162,28 @@ async def check_ai_ready() -> tuple[ReadyStatus, str, str, str, bool]:
     return await asyncio.to_thread(_check_ai_ready_sync)
 
 
+#: 마지막 AI 연결 확인이 실패한 이유(사용자에게 보일 문장). 예전에는 core.log 에만 남아서, 화면은 "AI 설정 필요" 만 보여 주고
+#: 크레딧 부족인지 키 오류인지 알 수 없었다(실기기 2026-11-15: AWS·Claude 를 다 연결했는데 이유 없이 "AI 설정 필요").
+_last_ai_failure: str = ""
+
+
+def _ai_failure_text(exc: BaseException) -> str:
+    """오류를 화면에 보여 줄 한 문장으로 — 채팅과 같은 분류기를 쓴다(공급자 원문·내부 정보는 내보내지 않는다)."""
+    from llm.failure import public_ai_failure_reason
+    return public_ai_failure_reason(exc if isinstance(exc, Exception) else Exception(str(exc)))
+
+
 def _check_ai_ready_sync() -> tuple[ReadyStatus, str, str, str, bool]:
+    global _last_ai_failure
+    _last_ai_failure = ""
+    status = _check_ai_ready_inner()
+    if status[0] != ReadyStatus.OK and not _last_ai_failure:
+        _last_ai_failure = ("AI 공급자에 연결하지 못했습니다. Claude·ChatGPT API 키를 연결하거나, "
+                            "AWS 에서 Bedrock 모델 사용 권한을 켜 주세요.")
+    return status
+
+
+def _check_ai_ready_inner() -> tuple[ReadyStatus, str, str, str, bool]:
     """
     Strict 검증: 실제 invoke (Bedrock converse 또는 Gemini list_models) 가
     성공해야만 OK. 자격증명만 있고 호출이 실패하면 FAIL.
@@ -177,6 +202,7 @@ def _check_ai_ready_sync() -> tuple[ReadyStatus, str, str, str, bool]:
     실패 시 빈 문자열들과 ReadyStatus.FAIL.
     """
 
+    global _last_ai_failure
     import logging
     log = logging.getLogger(__name__)
 
@@ -191,6 +217,7 @@ def _check_ai_ready_sync() -> tuple[ReadyStatus, str, str, str, bool]:
             return ReadyStatus.OK, provider.model_id, "", chosen, False
         except Exception as exc:
             log.warning("AI Ready: %s API key check failed: %s", chosen, exc)
+            _last_ai_failure = _ai_failure_text(exc)
             return ReadyStatus.FAIL, "", "", chosen, False
 
     from llm.gateway_provider import GatewayProvider, gateway_enabled
@@ -202,7 +229,8 @@ def _check_ai_ready_sync() -> tuple[ReadyStatus, str, str, str, bool]:
             gateway._timeout = min(gateway._timeout, 10)
             response = gateway.call(LLMRequest(prompt="ping", max_tokens=1))
             return ReadyStatus.OK, response.model_used, "", "gateway", False
-        except Exception:
+        except Exception as exc:
+            _last_ai_failure = "게이트웨이 연결 확인 실패: " + _ai_failure_text(exc)
             return ReadyStatus.FAIL, "", "", "gateway", False
 
     deadline = time.monotonic() + 25

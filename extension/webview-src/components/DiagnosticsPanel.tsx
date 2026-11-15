@@ -184,6 +184,12 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({
                     </a>
                   )}
                 </div>
+                {item.key === "ai_ready" && !isReady && typeof diagnostics.details?.ai_failure === "string" && (
+                  //: 실패한 실제 이유(크레딧 부족·키 오류 등) — 예전에는 core.log 에만 있었다.
+                  <div data-testid="ai-failure-reason" style={{ color: "var(--rk-warn)", fontSize: 11.5, margin: "4px 0" }}>
+                    {diagnostics.details.ai_failure as string}
+                  </div>
+                )}
                 {item.key === "ai_ready" && (
                   <div className="acts">
                     {isReady && diagnostics.provider_type && <span>현재: {AI_PROVIDER_NAMES[diagnostics.provider_type] ?? diagnostics.provider_type}</span>}
