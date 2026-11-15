@@ -680,6 +680,8 @@ class LargeGeneration:
                 fixed += 1
                 self._log(path, "format", "저장된 조각에서 응답 형식을 벗겨 실제 내용만 이어 씀")
         for key, op in list(self.state["ops"].items()):
+            if isinstance(op, dict) and op.get("fixed"):
+                continue  # ReCoder 가 만든 고정 파일은 응답 형식 검사 대상이 아니다
             content = op.get("content") if isinstance(op, dict) else None
             cleaned = clean_content(str((op or {}).get("file") or key), content) if isinstance(content, str) else None
             if cleaned is None:
@@ -859,12 +861,20 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
             files, fixed_ops = self._apply_architecture(files, arch)
         if self.plan_hook:
             try:
-                files, fixed_ops, extra = self.plan_hook(files)
+                files, hook_ops, extra = self.plan_hook(files)
                 if extra:
                     manifest["contracts"] = (manifest.get("contracts") or "") + extra
+                #: 결제 모듈 같은 고정 파일을 **더한다** — 계약 고정 파일(compose·Dockerfile·architecture.json)을 대신하지 않는다.
+                #: 실기기 2026-11-15: 결제가 있는 쇼핑몰 요청에서 결제 훅이 고정 파일 목록을 빈 목록으로 바꿔, 계약 고정 파일이
+                #: 목록에는 "고정" 으로 남았지만 내용이 없어 AI 가 직접 썼다 — compose 가 ReCoder 것이 아니게 되어 검증이 시작조차 못 했다.
+                have = {_norm(op["file"]) for op in fixed_ops}
+                fixed_ops = fixed_ops + [op for op in hook_ops if _norm(op["file"]) not in have]
             except Exception as exc:  # noqa: BLE001 — 고정 파일을 못 넣어도 생성은 계속한다(점검이 결제 약속을 다시 본다)
                 self._log("", "other", f"설계 보강 생략: {exc}")
-                fixed_ops = []
+            #: 훅이 목록을 새로 만들면서 계약 고정 파일 항목을 뺐을 수 있다 — 고정 op 가 있는 파일은 목록에도 남긴다.
+            listed = {_norm(f["file"]) for f in files}
+            files = [{"file": op["file"], "layer": 0, "size": "small", "fixed": True, "uses": [],
+                      "purpose": op.get("rationale", "")} for op in fixed_ops if _norm(op["file"]) not in listed] + files
         self.state["manifest"] = manifest
         self.state["files"] = files
         for op in fixed_ops:
@@ -1445,9 +1455,17 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
         저장 전에 의존 관문(이 파일과, 이 파일을 불러오는 완성 파일 사이의 이름·타입·Context 어긋남)을 돌린다.
         이 함수가 끝나기 전에는 이 파일을 기다리는 다음 파일이 시작하지 않으므로, 관문에서 고친 내용을 보고 쓴다.
         """
+        with self._lock:
+            current = self.state["ops"].get(_norm(op["file"]))
+        if current is not None and current.get("fixed"):
+            #: 고정 파일(계약 인프라·결제 모듈)은 AI 결과로 바꾸지 않는다 — 마지막 방어선.
+            self._log(op["file"], "other", "고정 파일이라 AI 가 쓴 내용을 버림")
+            return
         op = self._verify_and_fix(op, files_done, agent)
         op = self._gate(op, files_done, agent)
         with self._lock:
+            if (self.state["ops"].get(_norm(op["file"])) or {}).get("fixed"):
+                return
             self.state["ops"][_norm(op["file"])] = op
             self.state["failed"].pop(_norm(op["file"]), None)
         self._post_board(op, agent)
@@ -1595,7 +1613,7 @@ uses(import 할 프로젝트 파일 경로)를 붙이고,
         # 그리고 그 사이 다른 관문이 먼저 바꾸지 않았을 때만 쓴다 — 아니면 옛 내용으로 덮어 다른 관문의 고침을 되돌린다.
         with self._lock:
             for t, o in done.items():
-                if t == key or o.get("content") == original.get(t) or t not in self.state["ops"]:
+                if t == key or o.get("content") == original.get(t) or t not in self.state["ops"] or self.state["ops"][t].get("fixed"):
                     continue
                 if self.state["ops"][t].get("content") == original.get(t):
                     self.state["ops"][t] = dict(self.state["ops"][t], content=o["content"])

@@ -45,6 +45,12 @@ Http = Callable[[str, str, Optional[dict]], tuple[Optional[int], str]]
 _UNAVAILABLE = re.compile(r"(pull access denied|failed to resolve reference|manifest unknown|toomanyrequests|"
                           r"tls handshake|i/o timeout|no such host|connection refused.*docker|cannot connect to the docker daemon|"
                           r"error during connect|docker daemon is not running|403 forbidden|: forbidden)", re.I)
+#: compose 파일·비밀값 설정 자체가 틀려 아무것도 시작하지 못한 경우 — 서비스 코드 문제가 아니다.
+#: (실기기 2026-11-15: AI 가 쓴 compose 의 "required variable ... is missing a value" 로 모든 서비스가 None 상태가 됐는데,
+#:  이를 서비스 실패로 보고 코드 교정을 4번 돌렸다.)
+_CONFIG_FAIL = re.compile(r"(error while interpolating|required variable \S+ is missing a value|invalid compose project|"
+                          r"yaml: (?:line|unmarshal)|validating .*?: |services\.[\w.-]+ (?:Additional property|must be)|"
+                          r"no such service|unknown merge key|service \S+ refers to undefined)", re.I)
 #: BuildKit 이 실패한 단계를 보여 주는 줄 — " > [orders 4/6] RUN pip install ...:"
 _FAILED_STEP = re.compile(r"^\s*> \[[^\]]*\] RUN (.+?):\s*$", re.M)
 _BUILD_FAIL = re.compile(r"(failed to solve|error building|=> ERROR \[|target [\w-]+: failed|executor failed running)", re.I)
@@ -191,6 +197,12 @@ def _check(arch: dict, base: list[str], docker: Runner, http: Http, result: dict
     if up.returncode != 0 and _UNAVAILABLE.search(log) and not _BUILD_FAIL.search(log):
         result["status"] = "unavailable"
         result["output"] = "이미지 저장소·Docker 에 닿지 못해 다중 서비스 검증을 하지 못했습니다(코드 문제 아님): " + _tail(log, 4, 600)
+        return
+    if up.returncode != 0 and _CONFIG_FAIL.search(log) and not _BUILD_FAIL.search(log):
+        result["status"] = "unavailable"
+        result["config_error"] = True
+        result["output"] = ("compose 설정이 올바르지 않아 서비스를 하나도 시작하지 못했습니다(서비스 코드 문제가 아니라 코드 교정을 하지 않습니다): "
+                            + _tail(log, 3, 500))
         return
     result["status"] = "checked"
     if up.returncode != 0 and _BUILD_FAIL.search(log):

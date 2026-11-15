@@ -68,10 +68,44 @@ FIXED_FILES = ("이 프로젝트의 docker-compose.yml·서비스별 Dockerfile 
                "새로 만들면 검증한 구성과 달라지므로 만들지 않습니다. 구성을 바꾸려면 개발 화면에서 요청하세요.")
 
 
+def built_services(workspace: str | Path) -> list[str]:
+    """루트 compose 파일에서 직접 빌드하는 서비스 이름(ReCoder 가 만들지 않은 compose 포함). 못 읽으면 빈 목록."""
+    root = Path(workspace)
+    for name in ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"):
+        path = root / name
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")[:400_000]
+        try:
+            import yaml  # type: ignore
+            data = yaml.safe_load(text) or {}
+            services = data.get("services") if isinstance(data, dict) else None
+            if isinstance(services, dict):
+                return [str(k) for k, v in services.items() if isinstance(v, dict) and v.get("build")]
+        except Exception:  # noqa: BLE001 - 형식이 틀려도 아래 대략적인 판단으로
+            pass
+        return re.findall(r"^  ([A-Za-z0-9_.-]+):\s*\n(?:    .*\n)*?    build:", text, re.M)
+    return []
+
+
 def aws_block(workspace: str | Path | None) -> str:
-    """다중 서비스 프로젝트면 AWS 배포를 막는 안내문, 아니면 빈 문자열. 읽기만 한다."""
+    """다중 서비스 프로젝트면 AWS 배포를 막는 안내문, 아니면 빈 문자열. 읽기만 한다.
+
+    ReCoder 계약 프로젝트뿐 아니라, 직접 빌드하는 서비스가 둘 이상인 compose 프로젝트도 막는다 — AWS(ECS) 배포는 컨테이너
+    하나만 올리므로, 다른 서비스 주소(ORDERS_URL 등)가 가리킬 대상이 AWS 에 없다(실기기 2026-11-15: 배포 화면이 그 주소들을
+    「직접 입력하라」 고 요구했다).
+    """
     try:
-        return AWS_UNSUPPORTED if workspace and load(workspace) else ""
+        if not workspace:
+            return ""
+        if load(workspace):
+            return AWS_UNSUPPORTED
+        built = built_services(workspace)
+        if len(built) >= 2:
+            return (f"서비스 {len(built)}개({', '.join(built[:6])}{' …' if len(built) > 6 else ''})로 된 compose 프로젝트는 아직 AWS 배포를 "
+                    "지원하지 않습니다. AWS(ECS) 배포는 컨테이너 하나만 올리므로, 다른 서비스 주소(예: ORDERS_URL)가 가리킬 서비스가 "
+                    "AWS 에 없습니다. AWS 자원은 아무것도 만들지 않았습니다. 로컬에서 `docker compose up` 으로 함께 실행하세요.")
+        return ""
     except Exception:  # noqa: BLE001 - 판단 실패로 단일 앱 배포를 막지 않는다
         return ""
 

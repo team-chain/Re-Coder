@@ -259,7 +259,8 @@ def test_요청_한_줄에서_다중_서비스를_만들고_compose_검증으로
     assert all("[아키텍처 계약" in p for p in ai.prompts["generate_code_part"])
     # ② compose 검증 → ③ 통합 테스트가 "로그인 없이 열린 API" 를 잡고 → 교정 → 다시 검증해 통과
     assert docker.runs == 2
-    assert result["verification"]["kind"] == "compose" and result["verification"]["status"] == "passed"
+    assert result["verification"]["kind"] == "compose" and result["verification"]["status"] == "passed", \
+        [(f["kind"], f["title"]) for f in result["verification"].get("failures", [])]
     assert any(c["name"] == "test:orders-GET-/api/orders-noauth" and c["ok"] for c in result["verification"]["checks"])
     assert "require_user(authorization)" in ops["services/orders/app/main.py"]["content"]
     assert ops["services/gateway/src/server.js"]["content"] == GATEWAY  # 문제없는 서비스는 그대로
@@ -366,5 +367,47 @@ def test_아키텍처_계약이_잘리면_간결하게_한번_더_받아_하네�
                               project_root=str(tmp_path), mode="team", test=False, decisions=[DECISION])
     assert len(CutOnce.limits) == 2
     assert CutOnce.limits[0][0] >= 8192 and CutOnce.limits[1][0] > CutOnce.limits[0][0] and CutOnce.limits[1][1] is True
-    assert result["verification"]["kind"] == "compose" and result["verification"]["status"] == "passed"
+    assert result["verification"]["kind"] == "compose" and result["verification"]["status"] == "passed", \
+        [(f["kind"], f["title"]) for f in result["verification"].get("failures", [])]
     assert any(op["file"] == "docker-compose.yml" and op.get("fixed") for op in result["ops"])
+
+
+def test_결제를_고른_다중_서비스에서도_계약_고정_파일을_AI_가_쓰지_않는다(monkeypatch, tmp_path):
+    """실기기 2026-11-15: 결제(모의 결제)를 고른 쇼핑몰 마이크로서비스 요청에서 결제 훅이 고정 파일 목록을 빈 목록으로 바꿔,
+    docker-compose.yml·서비스별 Dockerfile·architecture.json 을 AI 가 직접 썼다. compose 가 ReCoder 것이 아니어서
+    검증은 시작도 못 했고(없는 비밀값 변수), 배포 화면은 다중 서비스 프로젝트로 알아보지 못했다."""
+    import commerce_starter
+    import payment_kit
+
+    calls = []
+
+    def hook(files):  # 서버 폴더를 못 찾은 결제 훅 — 실제와 같은 모양으로 고정 op 없이 목록만 돌려준다
+        calls.append([f["file"] for f in files])
+        return [f for f in files if f["file"] != "docker-compose.yml"], [], ""
+    monkeypatch.setattr(payment_kit, "plan_with_kit", hook)
+
+    class Writes(FakeAI):
+        def call(self, request, agent=None, operation=None):
+            if operation == "generate_code_part":
+                wanted = request.prompt.rsplit("**아래 파일만**", 1)[1]
+                if "- docker-compose.yml\n" in wanted + "\n" or "- services/orders/Dockerfile\n" in wanted + "\n":
+                    raise AssertionError("고정 파일을 AI 에게 쓰게 했다: " + wanted[:200])
+            return super().call(request, agent, operation)
+
+    ai, docker = Writes(), Docker()
+    real = generated_validation.verify_compose
+    monkeypatch.setattr(generated_validation, "verify_compose",
+                        lambda root, ops, arch, **kw: real(root, ops, arch, docker=docker, http=docker.http, **kw))
+    monkeypatch.setattr(ca, "get_router", lambda: ai)
+    payment = {**commerce_starter.payment_decision(), "chosen_key": "mock"}
+    result = ca.generate_code("게이트웨이·주문 서비스·워커로 나뉜 마이크로서비스 주문 플랫폼, PostgreSQL 과 Redis 사용",
+                              project_root=str(tmp_path), mode="team", test=False, decisions=[DECISION, payment])
+    assert calls, "결제 훅이 실행됐다"
+    ops = {op["file"]: op for op in result["ops"]}
+    for path in ("docker-compose.yml", "architecture.json", ".env.example", "services/orders/Dockerfile", "contract-tests.json"):
+        assert ops[path].get("fixed"), path
+    assert ops["docker-compose.yml"]["content"].startswith("# ReCoder 검증 compose")
+    #: 검증이 ReCoder compose 로 실제로 시작했다(예전에는 없는 비밀값 변수 때문에 아무것도 뜨지 않았다).
+    checks = {c["name"]: c["ok"] for c in result["verification"]["checks"]}
+    assert result["verification"]["kind"] == "compose"
+    assert checks.get("db:orders-db") and checks.get("service:gateway") and checks.get("link:gateway->orders"), checks

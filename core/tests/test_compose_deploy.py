@@ -394,3 +394,19 @@ def test_single_app_port_notice_matches_actual_binding(monkeypatch):
     assert "이 PC 에서만" in local_port_reason(3000) and "다른 기기" not in local_port_reason(3000)
     monkeypatch.setenv("RECODER_LOCAL_BIND", "0.0.0.0")
     assert "다른 기기" in local_port_reason(3000)
+
+
+def test_aws_block_also_covers_multi_service_compose_not_made_by_recoder(tmp_path):
+    """실기기 2026-11-15: AI 가 직접 쓴 compose(서비스 6개)라 ReCoder 프로젝트로 알아보지 못했고, ECS 화면이
+    ORDERS_URL·USERS_URL 같은 다른 서비스 주소를 직접 입력하라고 요구했다(AWS 에는 그 서비스가 없다)."""
+    ws = tmp_path / "ai"
+    ws.mkdir()
+    (ws / "docker-compose.yml").write_text(
+        "name: shop\nservices:\n  gateway:\n    build:\n      context: ./services/gateway\n    environment:\n      ORDERS_URL: http://orders:3003\n"
+        "  orders:\n    build: ./services/orders\n  orders-db:\n    image: postgres:16-alpine\n", encoding="utf-8")
+    msg = D.aws_block(ws)
+    assert "서비스 2개(gateway, orders)" in msg and "ORDERS_URL" in msg and "만들지 않았습니다" in msg
+    one = tmp_path / "one"
+    one.mkdir()
+    (one / "docker-compose.yml").write_text("services:\n  app:\n    build: .\n  db:\n    image: postgres:16\n", encoding="utf-8")
+    assert D.aws_block(one) == ""  # 앱 하나 + DB 는 기존 ECS 배포 대상 그대로

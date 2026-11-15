@@ -472,3 +472,14 @@ def test_verification_copy_keeps_compose_database_urls_intact(tmp_path):
             "amqp://guest:guest@mq:5672": "amqp://guest:[MASKED]@mq:5672",
             "postgres://app:${PW}real@db/app": "postgres://app:[MASKED]@db/app"}
     assert {t: context_gate.scrub_build_source(t) for t in mask} == mask
+
+
+def test_compose_config_error_is_not_blamed_on_service_code(tmp_path):
+    """실기기 2026-11-15: compose 의 비밀값 변수 오류로 아무것도 뜨지 않았는데, 모든 서비스를 '상태 None' 실패로 보고 코드 교정을 4번 돌렸다."""
+    a = small_arch()
+    msg = ("error while interpolating services.orders.environment.PAYMENT_WEBHOOK_SECRET: required variable "
+           "PAYMENT_WEBHOOK_SECRET is missing a value: set PAYMENT_WEBHOOK_SECRET in .env")
+    res = C.run(_workspace(tmp_path, a), a, docker=FakeDocker(4000, up=(1, "", msg)), http=_http_for({}), project="p10")
+    assert res["status"] == "unavailable" and res.get("config_error") is True
+    assert "코드 교정을 하지 않습니다" in res["output"] and "PAYMENT_WEBHOOK_SECRET" in res["output"]
+    assert C.issues(res, a, {"services/orders/app/main.py": "x"}) == []
