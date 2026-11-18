@@ -17,3 +17,9 @@ test('a clean stack run reads as complete',()=>{
  const html=renderToStaticMarkup(React.createElement(StackDeployResult,{result:{status:'success',method:'local_docker_compose',url:'http://localhost:3000',message:'서비스 3개 · DB 2개 실행 중 — http://localhost:3000 · 검사 10/10 통과',verification:{checks:[{name:'a',ok:true}],failures:[]}}}));
  assert.match(html,/실행 완료 — 서비스 3개 · DB 2개 실행 중/);
 });
+test('the address button opens the page that answers, not an API root that 404s',()=>{
+ let opened='';const result={status:'success',method:'local_docker_compose',url:'http://localhost:3000',open_url:'http://localhost:3000/health',message:'서비스 1개',verification:{checks:[],failures:[]}};
+ const el=StackDeployResult({result,onOpen:u=>{opened=u;}});
+ const find=n=>!n||typeof n!=='object'?null:(n.type==='button'&&n.props?.onClick?n:[].concat(n.props?.children||[]).map(find).find(Boolean));
+ find(el).props.onClick();assert.equal(opened,'http://localhost:3000/health');
+});

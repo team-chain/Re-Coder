@@ -410,3 +410,27 @@ def test_aws_block_also_covers_multi_service_compose_not_made_by_recoder(tmp_pat
     one.mkdir()
     (one / "docker-compose.yml").write_text("services:\n  app:\n    build: .\n  db:\n    image: postgres:16\n", encoding="utf-8")
     assert D.aws_block(one) == ""  # 앱 하나 + DB 는 기존 ECS 배포 대상 그대로
+
+
+def test_open_url_falls_back_to_health_when_api_root_is_404():
+    """실사용 2026-11-18: API 만 있는 게이트웨이를 열면 "Cannot GET /" 404 — 응답하는 헬스 경로를 연다."""
+    calls = []
+
+    def http(method, url, body):
+        calls.append(url)
+        return (404, "") if url.endswith(":3000/") else (200, "{}")
+
+    assert D._open_url(http, "http://localhost:3000", "/health") == "http://localhost:3000/health"
+    assert calls[0] == "http://127.0.0.1:3000/"
+    assert D._open_url(lambda *a: (200, ""), "http://localhost:3000", "/health") == "http://localhost:3000"
+    assert D._open_url(lambda *a: (None, ""), "http://localhost:3000", "/health") == "http://localhost:3000"
+    assert D._open_url(lambda *a: (200, ""), "", "/health") == ""
+
+
+def test_contract_asks_public_api_for_a_root_page():
+    import architecture
+    arch = {"services": [{"name": "gateway", "kind": "api", "language": "node", "path": "services/gateway", "port": 3000,
+                          "public": True, "purpose": "", "databases": [], "depends_on": []}],
+            "databases": [], "endpoints": []}
+    text = architecture.contract_text(arch)
+    assert "GET / —" in text and "404 금지" in text

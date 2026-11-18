@@ -428,6 +428,7 @@ async def _deploy(workspace: str | Path, *, scan: Scan, docker=None, http=None,
     _restore_tags(docker, proj, {}, drop=current_pins)
     public = next((s for s in arch["services"] if s["public"] and s["port"]), None)
     url = f"http://localhost:{public['port']}" if public else ""
+    open_url = await asyncio.to_thread(_open_url, http, url, public.get("health") if public else "")
     result["status"] = "failed" if result["failures"] else "passed"
     result["passed"] = not result["failures"]
     msg = (f"서비스 {len(arch['services'])}개 · DB {len(arch['databases'])}개 실행 중"
@@ -436,8 +437,28 @@ async def _deploy(workspace: str | Path, *, scan: Scan, docker=None, http=None,
         msg += " · 일부 검사 실패: " + "; ".join(record["failures"][:3])
     if gate["unverified"]:
         msg += " · 미검증: " + ", ".join(gate["unverified"])
-    return {"status": "success", "stage": "done", "message": msg, "url": url, "deployment_id": deployment_id,
+    return {"status": "success", "stage": "done", "message": msg, "url": url, "open_url": open_url, "deployment_id": deployment_id,
             "verification": result, "gate": gate, "env_source": env_source, "project": proj}
+
+
+def _open_url(http, url: str, health: str) -> str:
+    """브라우저로 열 주소 — API 만 있는 게이트웨이는 / 가 404 일 수 있다(실사용 2026-11-18: "Cannot GET /").
+
+    / 가 응답하면 그대로, 아니면 검사를 통과한 헬스 경로를 연다. 둘 다 안 되면 원래 주소.
+    """
+    if not url:
+        return ""
+    local = url.replace("localhost", "127.0.0.1")
+    for path in ("/", health or ""):
+        if not path:
+            continue
+        try:
+            status, _ = http("GET", local + path, None)
+        except Exception:  # noqa: BLE001 - 열 주소 고르기가 배포 결과를 막지 않는다
+            status = None
+        if status is not None and status < 400:
+            return url + ("" if path == "/" else path)
+    return url
 
 
 def _restore_tags(docker, proj: str, pins: dict[str, str], drop: dict[str, str] | None = None) -> None:

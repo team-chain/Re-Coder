@@ -9,7 +9,7 @@ import React from "react";
 
 export interface StackFailure { kind?: string; service?: string; title: string; detail?: string }
 export interface StackDeploy {
-  status: string; message?: string; url?: string; deployment_id?: string; method?: string;
+  status: string; message?: string; url?: string; open_url?: string; deployment_id?: string; method?: string;
   verification?: { status?: string; passed?: boolean; checks?: Array<{ name: string; ok: boolean }>; failures?: StackFailure[] };
 }
 
@@ -26,7 +26,7 @@ export const StackDeployResult: React.FC<{ result: StackDeploy; onOpen?: (url: s
     <div data-testid="stack-result" style={{ border: `1px solid ${tone}`, borderRadius: 12, padding: "12px 14px", marginBottom: 10, background: "var(--rc-tile,rgba(148,178,210,.035))" }}>
       <div style={{ fontWeight: 650, color: tone }}>{ok ? "실행 완료" : "실행 중 · 확인 필요"} — {head || "여러 서비스 실행"}</div>
       <div style={{ fontSize: 12, marginTop: 6, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", color: "var(--rc-fg2,#9AA8B8)" }}>
-        {result.url && <button type="button" onClick={() => onOpen?.(result.url!)} style={{ all: "unset", cursor: "pointer", color: "var(--rc-teal,#35A9D1)", fontFamily: "var(--rc-mono)" }}>{result.url} ↗</button>}
+        {result.url && <button type="button" onClick={() => onOpen?.(result.open_url || result.url!)} style={{ all: "unset", cursor: "pointer", color: "var(--rc-teal,#35A9D1)", fontFamily: "var(--rc-mono)" }}>{result.url} ↗</button>}
         {!!checks.length && <span>검사 {passed}/{checks.length} 통과</span>}
       </div>
       {!!failures.length && <ul style={{ margin: "8px 0 0", paddingLeft: 18, fontSize: 12, lineHeight: 1.6 }}>

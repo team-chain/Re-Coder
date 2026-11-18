@@ -359,6 +359,9 @@ def contract_text(arch: dict) -> str:
         if s["kind"] == "api":
             lines.append("    GET /health — 쓰는 DB 연결이 모두 되면 200 {\"status\":\"ok\"}, 아니면 503. 시작할 때 DB 가 아직 "
                          "준비되지 않았으면 몇 번 기다렸다 다시 연결(바로 종료하지 않기).")
+        if s["kind"] == "api" and s.get("public") and not any(x["kind"] == "web" for x in arch["services"]):
+            lines.append("    GET / — 브라우저로 주소를 열면 200 {\"service\":이름,\"status\":\"ok\",\"endpoints\":[이 서비스가 받는 API 목록]} "
+                         "(404 금지). GET /favicon.ico 는 204.")
         if s["kind"] == "worker":
             lines.append("    HTTP 서버 없이 계속 도는 프로세스(작업 큐·주기 작업). 오류가 나도 프로세스를 끝내지 말고 기록 후 다시 시도.")
         if s["kind"] == "web":
