@@ -434,3 +434,9 @@ def test_contract_asks_public_api_for_a_root_page():
             "databases": [], "endpoints": []}
     text = architecture.contract_text(arch)
     assert "GET / —" in text and "404 금지" in text
+
+
+def test_design_prompt_asks_for_a_screen_for_browser_apps():
+    """실사용 2026-11-18: "쇼핑몰" 요청이 화면 없이 API 만으로 설계돼 주소를 열면 JSON 만 나왔다."""
+    text = A.prompt("")
+    assert "web 서비스(화면)를 반드시 넣고" in text

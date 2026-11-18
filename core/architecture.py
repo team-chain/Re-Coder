@@ -104,6 +104,7 @@ def prompt(context: str) -> str:
 - databases: name(예: orders-db, catalog-db, cache), engine({'/'.join(ENGINES)}), tables(관계형이면 만들 테이블 이름).
 - endpoints: 서비스마다 실제로 구현할 HTTP API(테스트 기준). service, method, path(예: /api/orders, /api/orders/:id),
   auth(로그인 토큰이 필요하면 true), body(POST/PUT 예시 요청). 각 api 서비스에 GET /health 는 쓰지 마세요(ReCoder 가 넣습니다).
+사람이 브라우저로 쓰는 앱(쇼핑몰·예약·게시판·관리 화면 등)이면 web 서비스(화면)를 반드시 넣고 public 으로 두세요 — API 만 요청한 경우만 빼세요(실사용: 쇼핑몰이 화면 없이 API 만 배포됐다).
 요청이 작으면 서비스 1개·DB 1개여도 됩니다. 실제로 필요한 만큼만 나누세요(최대 서비스 {MAX_SERVICES}개 · DB {MAX_DATABASES}개)."""
 
 
