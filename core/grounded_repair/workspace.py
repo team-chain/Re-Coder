@@ -6,6 +6,8 @@ import hashlib
 import os
 import shutil
 import stat
+import json
+import re
 import subprocess
 import tempfile
 from pathlib import Path, PurePosixPath
@@ -112,19 +114,67 @@ def select_context(root: Path, files: dict[str, str], evidence: str) -> dict[str
     return chosen
 
 
+_FAILED_SERVICE = (
+    re.compile(r"target ([a-z][a-z0-9-]*): failed to solve"),
+    re.compile(r"(?m)^\s*([a-z][a-z0-9-]*) 이미지 빌드 실패"),
+    re.compile(r"=> (?:ERROR )?\[([a-z][a-z0-9-]*) (?:build|stage-\d+|\d+/\d+)"),
+)
+
+
+def failed_service(log: str) -> str:
+    """docker compose 빌드 로그에서 실패한 서비스 이름."""
+    for pattern in _FAILED_SERVICE:
+        found = pattern.findall(log or "")
+        if found:
+            return found[-1]
+    return ""
+
+
+def compose_services(workspace: Path) -> dict[str, str]:
+    """architecture.json 의 서비스 중 Dockerfile 이 있는 것 — 이름 → 폴더(상대 경로)."""
+    try:
+        arch = json.loads((workspace / "architecture.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    out: dict[str, str] = {}
+    for svc in arch.get("services") or [] if isinstance(arch, dict) else []:
+        name, path = str(svc.get("name") or ""), str(svc.get("path") or "").replace("\\", "/").strip("/")
+        if name and path and ".." not in path.split("/") and (workspace / path / "Dockerfile").is_file():
+            out[name] = path
+    return out
+
+
 class DockerVerifier:
     """Build only. Cloud/runtime failures require a different environment verifier."""
 
     identity = "docker-build-v1"
 
+    def __init__(self, service: str = ""):
+        self.service = service
+
+    def for_log(self, log: str) -> "DockerVerifier":
+        """여러 서비스 프로젝트 — 빌드 로그에서 실패한 서비스를 찾아 그 폴더만 다시 빌드한다(실사용 2026-11-18)."""
+        return DockerVerifier(failed_service(log))
+
+    def context(self, workspace: Path) -> str | None:
+        """빌드할 폴더 — 루트 Dockerfile 이 있으면 루트, 없으면 실패한 서비스(또는 하나뿐인 서비스) 폴더."""
+        if (workspace / "Dockerfile").is_file():
+            return "."
+        services = compose_services(workspace)
+        if self.service in services:
+            return services[self.service]
+        return next(iter(services.values())) if len(services) == 1 else None
+
     def __call__(self, workspace: Path) -> dict:
-        if not (workspace / "Dockerfile").is_file():
-            return {"passed": False, "output": "Dockerfile is required for rebuild verification"}
+        target = self.context(workspace)
+        if target is None:
+            return {"passed": False, "available": False, "kind": self.identity,
+                    "output": "Dockerfile is required for rebuild verification"}
         # A private output file bounds memory even for verbose compiler output.
         with tempfile.TemporaryFile() as output:
             try:
                 p = _run_tree(
-                    ["docker", "build", "--progress=plain", "."],
+                    ["docker", "build", "--progress=plain", target],
                     cwd=workspace,
                     stdout=output,
                     stderr=subprocess.STDOUT,

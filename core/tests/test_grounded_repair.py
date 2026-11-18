@@ -353,3 +353,43 @@ def test_docker_verifier_never_invokes_model_commands(tmp_path, monkeypatch):
     monkeypatch.setattr("grounded_repair.workspace._run_tree", fake)
     assert not DockerVerifier()(tmp_path)["passed"]
     assert commands == [["docker", "build", "--progress=plain", "."]]
+
+
+def test_compose_project_rebuilds_the_failed_service_folder(tmp_path, monkeypatch):
+    """실사용 2026-11-18: 여러 서비스 프로젝트는 루트 Dockerfile 이 없어 수정안 검증이 늘 실패했다."""
+    import json as _json
+    from grounded_repair import workspace as W
+    for name in ("gateway", "web"):
+        (tmp_path / "services" / name).mkdir(parents=True)
+        (tmp_path / "services" / name / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    (tmp_path / "architecture.json").write_text(_json.dumps({"services": [
+        {"name": "gateway", "path": "services/gateway"}, {"name": "web", "path": "services/web"}]}), encoding="utf-8")
+    log = ("web 이미지 빌드 실패 — \n 9 | FROM nginxinc/nginx-unprivileged:1.27-alpine\n"
+           "target web: failed to solve: process \"/bin/sh -c npm run build\" did not complete successfully: exit code: 1")
+    assert W.failed_service(log) == "web"
+    seen = {}
+
+    class Done:
+        returncode = 0
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        return Done()
+
+    monkeypatch.setattr(W, "_run_tree", fake_run)
+    verdict = W.DockerVerifier().for_log(log)(tmp_path)
+    assert seen["cmd"][-1] == "services/web" and verdict["passed"] is True
+    # 어느 서비스인지 모르면 짐작해서 엉뚱한 서비스를 빌드하지 않는다.
+    assert W.DockerVerifier().for_log("unknown")(tmp_path)["available"] is False
+    # 단일 앱은 그대로 루트를 빌드한다.
+    (tmp_path / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    W.DockerVerifier().for_log(log)(tmp_path)
+    assert seen["cmd"][-1] == "."
+
+
+def test_web_image_builds_on_glibc_so_native_build_tools_load():
+    import architecture as A
+    import compose_kit as K
+    arch, _ = A.normalize({"services": [{"name": "web", "kind": "web", "port": 3000, "public": True}]})
+    text = K.render_dockerfile(arch["services"][0])
+    assert "FROM node:22-bookworm-slim AS build" in text and "FROM nginxinc/nginx-unprivileged" in text

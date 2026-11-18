@@ -88,6 +88,9 @@ class RepairPipeline:
         if not root.is_dir():
             raise ValueError("Workspace does not exist")
         start = time.monotonic()
+        #: 여러 서비스 프로젝트는 루트 Dockerfile 이 없다 — 로그에서 실패한 서비스를 골라 그 폴더를 빌드한다.
+        pick = getattr(self.verifier, "for_log", None)
+        verifier = pick(log) if callable(pick) else self.verifier
         evidence = summarize(log, stage)
         expected = await asyncio.to_thread(manifest, root)
         profile = getattr(self.router, "repair_profile", lambda: {})()
@@ -99,7 +102,7 @@ class RepairPipeline:
                     evidence.fingerprint,
                     self.index.version,
                     strategy,
-                    self.verifier.identity,
+                    verifier.identity,
                     profile,
                     CONTEXT_VERSION,
                     self.policy.profile,
@@ -201,9 +204,9 @@ class RepairPipeline:
                     for n, c in changes.items()
                 ):
                     return finish("rule_action_required")
-                if not await permit("repair.verify", snapshot=True, tool=self.verifier.identity):
+                if not await permit("repair.verify", snapshot=True, tool=verifier.identity):
                     return finish("policy_denied")
-                result["verification"] = await asyncio.to_thread(self.verifier, base)
+                result["verification"] = await asyncio.to_thread(verifier, base)
                 if not result["verification"]["passed"] or not changes:
                     return finish("rule_action_required")
                 result["edits"] = changes
@@ -225,10 +228,10 @@ class RepairPipeline:
             if not context:
                 return finish("insufficient_context")
             # Avoid counting an already working build as an AI repair success.
-            if stage == "build" or stage in getattr(self.verifier, "supported_stages", set()):
-                if not await permit("repair.verify", snapshot=True, tool=self.verifier.identity):
+            if stage == "build" or stage in getattr(verifier, "supported_stages", set()):
+                if not await permit("repair.verify", snapshot=True, tool=verifier.identity):
                     return finish("policy_denied")
-                result["baseline"] = await asyncio.to_thread(self.verifier, base)
+                result["baseline"] = await asyncio.to_thread(verifier, base)
                 if result["baseline"].get("available") is False:
                     return finish("verification_unavailable")
                 if result["baseline"]["passed"]:
@@ -338,10 +341,10 @@ class RepairPipeline:
                             "Readiness failed: " + "; ".join(i.code for i in remaining.errors)
                         )
                     if not await permit(
-                        "repair.verify", snapshot=True, tool=self.verifier.identity
+                        "repair.verify", snapshot=True, tool=verifier.identity
                     ):
                         return finish("policy_denied")
-                    verdict = await asyncio.to_thread(self.verifier, candidate_dir)
+                    verdict = await asyncio.to_thread(verifier, candidate_dir)
                     attempt["verification"] = verdict
                     if verdict.get("available") is False:
                         return finish("verification_unavailable")

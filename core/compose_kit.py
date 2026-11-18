@@ -26,7 +26,12 @@ MARKER = "# ReCoder 검증 compose"
 DOCKER_MARKER = "# ReCoder 검증 Dockerfile"
 NODE_IMAGE = "node:22-alpine"
 PYTHON_IMAGE = "python:3.12-slim"
-WEB_IMAGE = "nginxinc/nginx-unprivileged:1.27-alpine"
+#: 1.27 은 이미지 보안 검사에서 심각 취약점으로 막혔다(실사용 2026-11-18) — 유지되는 안정판 + OS 패키지 업데이트.
+WEB_IMAGE = "nginxinc/nginx-unprivileged:stable-alpine"
+#: 화면 빌드 단계만 glibc 이미지 — alpine(musl)에서는 vite·rollup·esbuild 같은 네이티브 빌드 도구가
+#: 다른 OS 에서 만든 package-lock 으로 설치되면 실행 파일을 못 찾아 빌드가 깨진다(실사용 2026-11-18: web 이미지 빌드 실패).
+#: 결과물은 정적 파일이라 실행 이미지(nginx)와 무관하다.
+WEB_BUILD_IMAGE = "node:22-bookworm-slim"
 DB_IMAGES = {"postgres": "postgres:16-alpine", "mysql": "mysql:8.4", "mongodb": "mongo:7", "redis": "redis:7-alpine"}
 DB_USER = "app"
 
@@ -154,8 +159,9 @@ def render_dockerfile(svc: dict) -> str:
     head = f"{DOCKER_MARKER} — {svc['name']} ({svc['kind']}, {svc['language']})\n"
     if svc["kind"] == "web":
         return head + "\n".join([
-            f"FROM {NODE_IMAGE} AS build", "WORKDIR /app", "COPY package*.json ./", _install(), "COPY . .", "RUN npm run build", "",
-            f"FROM {WEB_IMAGE}", "COPY nginx.conf /etc/nginx/conf.d/default.conf",
+            f"FROM {WEB_BUILD_IMAGE} AS build", "WORKDIR /app", "COPY package*.json ./", _install(), "COPY . .", "RUN npm run build", "",
+            f"FROM {WEB_IMAGE}", "USER root", "RUN apk upgrade --no-cache", "USER 101",
+            "COPY nginx.conf /etc/nginx/conf.d/default.conf",
             f"COPY --from=build /app/{svc['output']} /usr/share/nginx/html", f"EXPOSE {svc['port']}", ""])
     if svc["language"] == "node":
         lines = [f"FROM {NODE_IMAGE} AS build", "WORKDIR /app", "COPY package*.json ./", _install(), "COPY . .",
