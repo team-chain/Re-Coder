@@ -440,3 +440,48 @@ def test_design_prompt_asks_for_a_screen_for_browser_apps():
     """실사용 2026-11-18: "쇼핑몰" 요청이 화면 없이 API 만으로 설계돼 주소를 열면 JSON 만 나왔다."""
     text = A.prompt("")
     assert "web 서비스(화면)를 반드시 넣고" in text
+
+
+def _crit(pkg, installed, fixed, cls="os-pkgs", vid="CVE-2026-0001"):
+    return {"severity": "CRITICAL", "id": vid, "package": pkg, "installed": installed, "fixed": fixed, "class": cls}
+
+
+def test_fixable_critical_from_stale_cache_is_rebuilt_with_pull_and_passes(tmp_path):
+    """실사용 2026-11-19: 매번 "web 이미지: 심각 3건". 고칠 버전이 있으면 기본 이미지를 새로 받고 캐시 없이 다시 빌드해 다시 검사한다."""
+    ws = project(tmp_path)
+    docker = Docker()
+    seen = {"n": 0}
+
+    async def scan(kind, w, target):
+        if kind == "trivy" and str(target).endswith("-orders"):
+            seen["n"] += 1
+            if seen["n"] == 1:
+                return {"status": "ok", "critical_count": 1, "high_count": 0, "findings": [_crit("libxml2", "2.13.4-r3", "2.13.4-r5")]}
+        return {"status": "ok", "critical_count": 0, "high_count": 0, "findings": []}
+
+    res = run(D.deploy(ws, scan=scan, docker=docker, http=http))
+    assert res["status"] == "success", res
+    rebuild = [c for c in docker.calls if "--no-cache" in c]
+    assert rebuild and "--pull" in rebuild[0] and rebuild[0][-1] == "orders"
+    assert seen["n"] == 2
+
+
+def test_unfixed_critical_does_not_block_but_is_reported(tmp_path):
+    ws = project(tmp_path)
+    docker = Docker()
+    report = {"status": "ok", "critical_count": 1, "high_count": 0, "findings": [_crit("busybox", "1.37.0-r12", "")]}
+    res = run(D.deploy(ws, scan=scanner(**{"trivy:orders": report}), docker=docker, http=http))
+    assert res["status"] == "success"
+    assert "아직 수정판이 없는 심각 취약점 1건" in res["message"] and "busybox" in res["message"]
+    assert not [c for c in docker.calls if "--no-cache" in c]
+
+
+def test_fixable_critical_that_remains_names_package_and_version(tmp_path):
+    ws = project(tmp_path)
+    docker = Docker()
+    report = {"status": "ok", "critical_count": 1, "high_count": 0,
+              "findings": [_crit("lodash", "4.17.20", "4.17.21", cls="lang-pkgs", vid="CVE-2021-23337")]}
+    res = run(D.deploy(ws, scan=scanner(**{"trivy:orders": report}), docker=docker, http=http))
+    assert res["status"] == "failed"
+    assert "lodash 4.17.20 → 4.17.21 (CVE-2021-23337)" in res["message"]
+    assert "package.json" in res["diagnosis"]["fix"]

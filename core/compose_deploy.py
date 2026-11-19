@@ -270,6 +270,42 @@ def _blocking(report: dict, kind: str) -> tuple[bool, str]:
     return (crit > 0, f"{kind}: 심각 {crit}건") if crit else (False, "")
 
 
+def _image_findings(report: dict) -> tuple[list[dict], list[dict]]:
+    """이미지 검사의 심각(CRITICAL) 취약점을 (고칠 버전이 있는 것, 아직 없는 것) 으로 나눈다.
+
+    실사용 2026-11-19: 매 배포가 "web 이미지: 심각 3건" 으로 막혔다. 고칠 버전이 없는 취약점은 사용자가 할 수 있는 일이
+    없어 배포가 영원히 막힌다 — 업계 게이트(trivy --ignore-unfixed)처럼 고칠 수 있는 것만 막고, 나머지는 결과에 알린다.
+    세부 목록이 없는 보고서는 보수적으로 모두 막는다.
+    """
+    if report.get("status") != "ok":
+        return [], []
+    crit = [f for f in (report.get("findings") or []) if str(f.get("severity", "")).upper() == "CRITICAL"]
+    count = int(report.get("critical_count", 0) or 0)
+    if count and not crit:
+        return [{"id": "", "package": "", "installed": "", "fixed": "?", "class": ""}] * count, []
+    fixable = [f for f in crit if str(f.get("fixed") or "").strip()]
+    unfixed = [f for f in crit if not str(f.get("fixed") or "").strip()]
+    return fixable, unfixed
+
+
+def _finding_line(f: dict) -> str:
+    pkg = str(f.get("package") or "")
+    if not pkg:
+        return "세부 정보 없음"
+    to = str(f.get("fixed") or "").split(",")[0].strip()
+    return f"{pkg} {f.get('installed') or ''}{f' → {to}' if to else ''}" + (f" ({f['id']})" if f.get("id") else "")
+
+
+def _dedupe(items: list[dict]) -> list[dict]:
+    seen, out = set(), []
+    for f in items:
+        key = (f.get("package"), f.get("installed"), f.get("id"))
+        if key not in seen:
+            seen.add(key)
+            out.append(f)
+    return out
+
+
 async def deploy(workspace: str | Path, *, scan: Scan, docker=None, http=None,
                  progress: Callable[[str, str], None] | None = None) -> dict:
     proj = project_name(workspace)
@@ -368,18 +404,54 @@ async def _deploy(workspace: str | Path, *, scan: Scan, docker=None, http=None,
 
     # 4. 이미지 게이트 — 아직 기존 컨테이너를 바꾸지 않았다.
     say("scan", "빌드한 서비스 이미지의 취약점을 검사합니다")
+    blocked_by: dict[str, list[dict]] = {}
+    unfixed_by: dict[str, list[dict]] = {}
+
+    async def scan_image(name: str) -> None:
+        report = await scan("trivy", "", _service_image(proj, name))
+        gate["reports"][f"trivy:{name}"] = {k: report.get(k) for k in ("status", "critical_count", "high_count")}
+        if report.get("status") != "ok":
+            if f"Trivy:{name}" not in gate["unverified"]:
+                gate["unverified"].append(f"Trivy:{name}")
+            blocked_by.pop(name, None)
+            return
+        fixable, unfixed = _image_findings(report)
+        blocked_by.pop(name, None)
+        unfixed_by.pop(name, None)
+        if fixable:
+            blocked_by[name] = _dedupe(fixable)
+        if unfixed:
+            unfixed_by[name] = _dedupe(unfixed)
+
     for svc in arch["services"]:
-        report = await scan("trivy", "", _service_image(proj, svc["name"]))
-        gate["reports"][f"trivy:{svc['name']}"] = {k: report.get(k) for k in ("status", "critical_count", "high_count")}
-        blocked, why = _blocking(report, f"{svc['name']} 이미지")
-        if blocked:
-            gate["blockers"].append(why)
-        elif report.get("status") != "ok":
-            gate["unverified"].append(f"Trivy:{svc['name']}")
-    if gate["blockers"]:
+        await scan_image(svc["name"])
+    retried = False
+    if blocked_by:
+        #: 고칠 버전이 있는데 걸렸다 = 오래된 기본 이미지나 빌드 캐시(apk upgrade 층이 예전 결과로 남음)인 경우가 대부분이다.
+        #: 그 서비스만 기본 이미지를 새로 받고 캐시 없이 다시 빌드해 한 번 더 검사한다. 기존 서비스는 아직 그대로다.
+        names = sorted(blocked_by)
+        say("build", f"보안 업데이트를 받아 {', '.join(names)} 을(를) 새로 빌드합니다")
+        rebuilt = await asyncio.to_thread(docker, [*base, "build", "--pull", "--no-cache", *names], 1800)
+        if rebuilt.returncode == 0:
+            retried = True
+            say("scan", "새로 빌드한 이미지를 다시 검사합니다")
+            for name in names:
+                await scan_image(name)
+        else:
+            gate.setdefault("notes", []).append("보안 업데이트 재빌드 실패: " + compose_check._tail((rebuilt.stderr or "") + (rebuilt.stdout or ""), 2, 300))
+    if unfixed_by:
+        gate["advisories"] = [f"{name}: 아직 수정판이 없는 심각 취약점 {len(items)}건 — " + ", ".join(_finding_line(f) for f in items[:3])
+                              for name, items in unfixed_by.items()]
+    if blocked_by:
+        for name, items in blocked_by.items():
+            gate["blockers"].append(f"{name} 이미지: 심각 {len(items)}건 — " + "; ".join(_finding_line(f) for f in items[:4]))
+        lang = any(str(f.get("class")) == "lang-pkgs" for items in blocked_by.values() for f in items)
+        os_ = any(str(f.get("class")) in ("os-pkgs", "") for items in blocked_by.values() for f in items)
+        fix = ("기본 이미지를 새로 받고 다시 빌드해도 남았습니다. " if os_ and retried else "") + \
+              ("Dockerfile 의 FROM 을 더 최신 태그로 바꾸세요. " if os_ else "") + \
+              ("package.json 등에서 위 패키지를 → 오른쪽 버전 이상으로 올리세요. " if lang else "") + "기존에 돌던 서비스는 그대로입니다."
         _restore_tags(docker, proj, current_pins)
-        return fail("scan", "이미지 보안 검사에서 막았습니다", "; ".join(gate["blockers"]),
-                    "기본 이미지·의존성 버전을 올린 뒤 다시 배포하세요. 기존에 돌던 서비스는 그대로입니다.")
+        return fail("scan", "이미지 보안 검사에서 막았습니다", "; ".join(gate["blockers"]), fix.strip())
 
     # 5. 기동
     say("deploy", "DB → 서비스 순서로 시작하고 헬스 체크를 기다립니다")
@@ -441,6 +513,8 @@ async def _deploy(workspace: str | Path, *, scan: Scan, docker=None, http=None,
         msg += " · 일부 검사 실패: " + "; ".join(record["failures"][:3])
     if gate["unverified"]:
         msg += " · 미검증: " + ", ".join(gate["unverified"])
+    if gate.get("advisories"):
+        msg += " · 알림: " + "; ".join(gate["advisories"])
     return {"status": "success", "stage": "done", "message": msg, "url": url, "open_url": open_url, "deployment_id": deployment_id,
             "verification": result, "gate": gate, "env_source": env_source, "project": proj}
 
