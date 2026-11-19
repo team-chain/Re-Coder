@@ -59,13 +59,12 @@ export const ProjectSummary: React.FC<{ active: boolean; branch?: string; onSpec
     <style>{SUMMARY_CSS}</style>
     <div className="hd">
       <b>{spec.project}</b>
-      <small>{branch && <>{branch} · </>}<span className={`dot ${tone}`} />{d ? `${DEPLOY_LABEL[d.status] || d.status} · ${when(d.at)}` : "아직 로컬에서 실행하지 않았어요"}</small>
+      <small title={d ? [DEPLOY_LABEL[d.status] || d.status, ...d.failures].join("\n") : "아직 로컬 실행 전"}>{branch && <>{branch} · </>}<span className={`dot ${tone}`} aria-label={d ? DEPLOY_LABEL[d.status] || d.status : "실행 전"} />{d ? when(d.at) : "—"}</small>
     </div>
     {spec.available === false ? <p className="rc-muted">{spec.reason}</p> : <>
       {svcNames.length > 0 && <div className="svcs" aria-label="서비스 상태">
-        {svcNames.map(n => { const s = d?.services?.[n] ?? "unknown"; return <span key={n} title={s === "ok" ? "정상" : s === "fail" ? "시작 못 함" : "확인 전"}><i className={`dot ${s}`} />{n}</span>; })}
+        {svcNames.map(n => { const s = d?.services?.[n] ?? "unknown"; return <span key={n} title={s === "ok" ? "실행 중" : s === "fail" ? "시작 못 함" : "확인 전"}><i className={`dot ${s}`} />{n}</span>; })}
       </div>}
-      {d?.status === "failed" && d.failures[0] && <p className="fail-note">{d.failures[0]}</p>}
       <div className="tiles">
         <button type="button" onClick={onSpec}><b>{features.length}</b><small>기능</small></button>
         <button type="button" onClick={onSpec}><b style={{ color: t.total && t.passed < t.total ? "var(--rc-bad,#f27272)" : undefined }}>{t.total ? `${t.passed}/${t.total}` : "—"}</b><small>테스트</small></button>
@@ -73,9 +72,9 @@ export const ProjectSummary: React.FC<{ active: boolean; branch?: string; onSpec
       </div>
     </>}
     <div className="acts">
-      {d?.url && <button type="button" className="rc-primary" onClick={() => postMessage("webview.open.external", { url: d.url })}>사이트 열기</button>}
+      {d?.url && <button type="button" className="rc-primary" title={d.url} onClick={() => postMessage("webview.open.external", { url: d.url })}>↗ 열기</button>}
       {spec.available !== false && <button type="button" onClick={onSpec}>명세</button>}
-      <button type="button" onClick={onDeploy}>{d ? "다시 배포" : "로컬 실행"}</button>
+      <button type="button" onClick={onDeploy}>▶ {d ? "다시 배포" : "실행"}</button>
     </div>
   </div>;
 };
