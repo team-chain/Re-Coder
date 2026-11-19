@@ -179,17 +179,49 @@ def render_dockerfile(svc: dict) -> str:
     return head + "\n".join(lines + ["CMD " + json.dumps(svc["start"]), ""])
 
 
+#: 화면 응답 보안 헤더 — nginx 는 location 안에 add_header 가 있으면 바깥 것을 물려받지 않아 위치마다 다시 넣는다.
+_WEB_SECURITY_HEADERS = (
+    'add_header X-Content-Type-Options "nosniff" always;',
+    'add_header X-Frame-Options "DENY" always;',
+    'add_header Referrer-Policy "strict-origin-when-cross-origin" always;',
+    'add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;',
+    "add_header Content-Security-Policy \"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: https:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; "
+    "form-action 'self'; object-src 'none'\" always;",
+)
+
+
 def render_nginx(arch: dict, svc: dict) -> str:
-    """화면 서비스 — 빌드한 정적 파일 + /api 를 첫 API 서비스로 넘김 + 새로 고침해도 화면(SPA)."""
+    """화면 서비스 — 빌드한 정적 파일 + /api 를 첫 API 서비스로 넘김 + 새로 고침해도 화면(SPA).
+
+    실사용 2026-11-19: 클라이언트 주소를 그대로 이어 붙이면($proxy_add_x_forwarded_for) 위조할 수 있고, 덮어쓰지 않으면
+    게이트웨이가 모든 사용자를 nginx 한 주소로 보아 로그인 시도 제한이 전체 사용자에게 걸린다 — 실제 주소로 덮어쓴다.
+    index.html 은 캐시하지 않고(배포 직후 옛 화면 방지), 해시가 붙은 /assets 는 오래 캐시한다.
+    """
+    def headers(indent: str) -> str:
+        return "".join(f"{indent}{h}\n" for h in _WEB_SECURITY_HEADERS)
+
     api = next((arch_mod.service(arch, d) for d in svc["depends_on"] if (arch_mod.service(arch, d) or {}).get("kind") == "api"), None)
     proxy = ""
     if api:
         proxy = (f"    location /api/ {{\n        proxy_pass http://{api['name']}:{api['port']};\n"
-                 "        proxy_set_header Host $host;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n    }\n")
+                 "        proxy_http_version 1.1;\n"
+                 "        proxy_set_header Host $host;\n"
+                 "        proxy_set_header X-Real-IP $remote_addr;\n"
+                 "        proxy_set_header X-Forwarded-For $remote_addr;\n"
+                 "        proxy_set_header X-Forwarded-Proto $scheme;\n"
+                 "        proxy_read_timeout 30s;\n"
+                 "    }\n")
     return ("# ReCoder 검증 nginx 설정\nserver {\n"
             f"    listen {svc['port']};\n    server_tokens off;\n    root /usr/share/nginx/html;\n"
+            "    client_max_body_size 1m;\n"
+            "    gzip on;\n    gzip_types text/css application/javascript application/json image/svg+xml;\n    gzip_min_length 1024;\n"
+            + headers("    ")
             + proxy +
-            "    location / {\n        try_files $uri $uri/ /index.html;\n    }\n}\n")
+            "    location /assets/ {\n        add_header Cache-Control \"public, max-age=31536000, immutable\" always;\n"
+            + headers("        ") + "        try_files $uri =404;\n    }\n"
+            "    location / {\n        add_header Cache-Control \"no-cache\" always;\n" + headers("        ")
+            + "        try_files $uri $uri/ /index.html;\n    }\n}\n")
 
 
 DOCKERIGNORE = "node_modules\ndist\n.env\n.env.*\n!.env.example\n.git\n__pycache__\n*.pyc\n.venv\n"

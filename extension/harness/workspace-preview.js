@@ -68,6 +68,12 @@ const ready = {core_ready:'ok',ai_ready:'ok',docker_ready:'ok',aws_deploy_ready:
 api.getDiagnostics = async()=>ready;
 api.runDiagnostics = async()=>{await new Promise(resolve=>setTimeout(resolve,1000));return ready;};
 api.getCanvasSnapshot = async()=>({success:true,data:{aws:{ready:false,account:'',region:''},deployment:{running:false,stage:'idle'},warnings:[]}});
+//: 4.0.1 명세 화면 — Core spec_review.build 결과를 저장한 JSON(화면 검증용, 모델 호출 없음).
+if(process.env.HARNESS_SPEC_FILE) {
+  const spec=JSON.parse(fs.readFileSync(process.env.HARNESS_SPEC_FILE,'utf8'));
+  api.getSpec=async()=>spec;
+  api.reviewSpec=async()=>{await new Promise(resolve=>setTimeout(resolve,800));return spec;};
+}
 api.getHealth = async()=>({status:'ok',uptime:1,ai_connected:true});
 api.getCostSummary = async()=>({total_cost:0,budget_limit:10});
 const polling = {start(fn){fn({status:'ok',version:'fixture',uptime:1});},stop(){},poll:async()=>({status:'ok'}),getLastHealth:()=>({status:'ok'})};
@@ -155,7 +161,7 @@ let receiver, queue = [];
 const webview = {postMessage:async m=>{queue.push(m);return true;},onDidReceiveMessage(fn){receiver=fn;return{dispose(){}};}};
 provider.attachWorkspacePanel(webview);
 const html = `<!doctype html><html lang="ko" data-recoder-layout="workspace" data-recoder-logo="/logo.png"><meta charset="utf-8"><title>ReCoder production flow fixture</title><style>@font-face{font-family:Pretendard;src:url(/font.woff2) format("woff2");font-weight:100 900}body{margin:0;background:#181818;color:#ddd;font-family:Segoe UI,sans-serif}button{cursor:pointer}</style><body class="${process.env.HARNESS_LIGHT ? "vscode-light" : "vscode-dark"}"><div id="root"></div><script>
-window.acquireVsCodeApi=()=>({postMessage:message=>{if(new URLSearchParams(location.search).has('dropGraph')&&message.type==='canvas.graph')return;return fetch('/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(message)});},getState:()=>(${process.env.HARNESS_AI_PICKER==='1'?JSON.stringify({view:'code'}):'null'}),setState:()=>{}});
+window.acquireVsCodeApi=()=>({postMessage:message=>{if(new URLSearchParams(location.search).has('dropGraph')&&message.type==='canvas.graph')return;return fetch('/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(message)});},getState:()=>(${process.env.HARNESS_VIEW?JSON.stringify({view:process.env.HARNESS_VIEW}):process.env.HARNESS_AI_PICKER==='1'?JSON.stringify({view:'code'}):'null'}),setState:()=>{}});
 setInterval(async()=>{for(const m of await(await fetch('/events')).json())window.dispatchEvent(new MessageEvent('message',{data:m}));},30);
 </script><script src="/webview.js"></script></html>`;
 http.createServer(async(req,res)=>{

@@ -2754,6 +2754,21 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 break;
             }
+            case 'spec.load':
+            case 'spec.review': {
+                //: 명세 화면 — 검토(AI)는 누를 때만. 결과는 요청한 화면으로만 돌려준다.
+                const requestId = typeof (message as { payload?: { requestId?: unknown } }).payload?.requestId === 'string'
+                    ? (message as { payload: { requestId: string } }).payload.requestId : '';
+                try {
+                    const root = activeProjectPath();
+                    if (!root) { this.postMessageToWebview(requestWebview, 'spec.result', { requestId, spec: { available: false, reason: '프로젝트 폴더가 열려 있지 않습니다.' } }); break; }
+                    const spec = message.type === 'spec.review' ? await this._apiClient.reviewSpec(root) : await this._apiClient.getSpec(root);
+                    this.postMessageToWebview(requestWebview, 'spec.result', { requestId, spec });
+                } catch (err) {
+                    this.postMessageToWebview(requestWebview, 'spec.error', { requestId, review: message.type === 'spec.review', message: err instanceof Error ? err.message : String(err) });
+                }
+                break;
+            }
             case 'map.contract': {
                 //: 3.1 계약 대조 — Core 가 없거나 계약이 없으면 패널을 그리지 않는다(구조 지도는 그대로).
                 try {

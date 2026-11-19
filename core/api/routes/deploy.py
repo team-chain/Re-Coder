@@ -5902,3 +5902,36 @@ async def get_verification_status(deployment_id: str) -> dict:
 async def stop_verification(deployment_id: str) -> dict:
     verifier = _get_verifier()
     return await verifier.stop(deployment_id)
+
+
+class SpecReviewRequest(BaseModel):
+    workspace_path: str
+
+
+@router.get("/api/project/spec")
+async def project_spec(workspace_path: str) -> dict:
+    """명세 화면(요구사항 · 설계 · 작업) — 계약 · 코드 · 마지막 통합 테스트 · 저장된 AI 검토를 합친다. 읽기만 한다."""
+    import spec_review
+    if not workspace_path or not Path(workspace_path).is_dir():
+        return {"available": False, "reason": "작업 폴더를 찾지 못했습니다."}
+    return await asyncio.to_thread(spec_review.build, workspace_path)
+
+
+@router.post("/api/project/spec/review")
+async def project_spec_review(body: SpecReviewRequest) -> dict:
+    """사용자가 '검토' 를 누를 때만 — AI 가 요구사항 · 빠진 기능을 한 번 검토하고 결과를 저장한다."""
+    import spec_review
+    from llm.provider_router import get_provider_router
+    if not body.workspace_path or not Path(body.workspace_path).is_dir():
+        raise HTTPException(status_code=400, detail="작업 폴더를 찾지 못했습니다.")
+    router_ = get_provider_router()
+
+    async def complete(prompt: str) -> str:
+        return await asyncio.wait_for(router_.complete(prompt=prompt, model_preference="sonnet", agent="spec_review",
+                                                       operation="spec_review", max_tokens=8000), timeout=180)
+    try:
+        return await spec_review.run_review(body.workspace_path, complete)
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="AI 검토가 3분 안에 끝나지 않았습니다. 다시 시도하세요.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc

@@ -31,9 +31,12 @@ try:
 except ImportError:  # pragma: no cover - 패키지 실행
     from core import architecture as arch_mod  # type: ignore
 
-CODE_EXT = (".ts", ".tsx", ".js", ".mjs", ".cjs", ".jsx", ".py")
+CODE_EXT = (".ts", ".tsx", ".js", ".mjs", ".cjs", ".jsx", ".py", ".prisma")
 _SKIP = re.compile(r"(^|/)(node_modules|dist|build|__pycache__|\.venv|venv|coverage)/|(^|/)(tests?|__tests__)/|\.(test|spec)\.[jt]sx?$|(^|/)test_[^/]+\.py$")
 _ENV_JS = re.compile(r"process\.env(?:\.([A-Z][A-Z0-9_]*)|\[\s*['\"`]([A-Z][A-Z0-9_]*)['\"`]\s*\])")
+#: 환경 변수를 읽는 도우미 함수 — requireEnv('X') · intEnv('X', 1) · config.get('X') · env("X")(Prisma 스키마)
+_ENV_HELPER = re.compile(r"\b(?:require|optional|read|get|int|bool|str|number|must)?[Ee]nv\w*\(\s*['\"`]([A-Z][A-Z0-9_]*)['\"`]"
+                         r"|\bconfig(?:Service)?\.get(?:<[^>]*>)?\(\s*['\"`]([A-Z][A-Z0-9_]*)['\"`]")
 _ENV_JS_DESTRUCT = re.compile(r"\{([^{}]{1,400})\}\s*=\s*process\.env\b")
 _ENV_PY = re.compile(r"(?:os\.)?(?:environ(?:\.get)?\s*[\[(]\s*|getenv\s*\(\s*)['\"]([A-Z][A-Z0-9_]*)['\"]")
 _PY_DECOR = re.compile(r"@(\w+)\.(get|post|put|patch|delete)\(\s*['\"]([^'\"]*)['\"]")
@@ -61,9 +64,45 @@ def env_reads(text: str, python: bool) -> list[tuple[str, int]]:
     else:
         for m in _ENV_JS.finditer(text):
             out.append((m.group(1) or m.group(2), _line(text, m.start())))
+        for m in _ENV_HELPER.finditer(text):
+            out.append((m.group(1) or m.group(2), _line(text, m.start())))
         for m in _ENV_JS_DESTRUCT.finditer(text):
             for name in re.findall(r"\b([A-Z][A-Z0-9_]*)\b(?=\s*(?:[,:=}]|$))", m.group(1)):
                 out.append((name, _line(text, m.start())))
+    return out
+
+
+_NEST_CONTROLLER = re.compile(r"@Controller\(\s*(?:['\"`]([^'\"`]*)['\"`]|\{[^}]*?path\s*:\s*['\"`]([^'\"`]*)['\"`][^}]*\})?\s*\)")
+_NEST_METHOD = re.compile(r"@(Get|Post|Put|Patch|Delete|All)\(\s*(?:['\"`]([^'\"`]*)['\"`])?\s*\)")
+_NEST_GLOBAL = re.compile(r"\.setGlobalPrefix\(\s*['\"`]([^'\"`]*)['\"`]")
+
+
+def _join(*parts: str) -> str:
+    out = "/".join(p.strip("/") for p in parts if p and p.strip("/"))
+    return "/" + out
+
+
+def _nest_routes(files: dict[str, str]) -> list[tuple[str, str, str, int]]:
+    """NestJS — @Controller('prefix') 아래 @Get('sub') 를 합친다(실사용 2026-11-19: 모든 Nest API 가 "찾지 못했습니다" 로 보였다).
+    setGlobalPrefix 가 있으면 서비스 전체 앞에 붙인다."""
+    glob = ""
+    for text in files.values():
+        m = _NEST_GLOBAL.search(text)
+        if m:
+            glob = m.group(1)
+            break
+    out = []
+    for rel, text in files.items():
+        controllers = [(m.start(), m.group(1) or m.group(2) or "") for m in _NEST_CONTROLLER.finditer(text)]
+        if not controllers:
+            continue
+        for m in _NEST_METHOD.finditer(text):
+            prefix = ""
+            for pos, pre in controllers:
+                if pos < m.start():
+                    prefix = pre
+            method = "GET" if m.group(1) == "All" else m.group(1).upper()
+            out.append((method, _join(glob, prefix, m.group(2) or ""), rel, _line(text, m.start())))
     return out
 
 
@@ -89,7 +128,7 @@ def _js_routes(files: dict[str, str]) -> list[tuple[str, str, str, int]]:
             method, sub = m.group(1), m.group(2)
             for prefix in mounted.get(rel) or [""]:
                 out.append((method.upper(), (prefix + ("" if sub == "/" else sub)) or "/", rel, _line(text, m.start())))
-    return out
+    return out + _nest_routes(files)
 
 
 def _py_module_file(files: dict[str, str], importer: str, module: str) -> Optional[str]:
@@ -219,6 +258,10 @@ def check(arch: dict, files: dict[str, str]) -> dict:
                 add("CONTRACT_CALL_UNDECLARED", "error", name, rel, line, f"{name} 가 계약에 없는 서비스 {target} 를 부릅니다",
                     f"계약의 depends_on 에 {target} 를 더하거나, 이미 의존하는 서비스를 거쳐 받으세요.")
         for dep in svc["depends_on"]:
+            if svc["kind"] == "web":
+                #: 화면은 ReCoder nginx 설정(/api → API 서비스)으로 연결된다 — 코드에서 주소를 읽지 않는 게 정상.
+                edges.append({"from": name, "to": dep, "kind": "service", "status": "ok", "file": f"{svc['path']}/nginx.conf", "line": 1})
+                continue
             if dep not in used_svcs:
                 edges.append({"from": name, "to": dep, "kind": "service", "status": "unused"})
                 add("CONTRACT_DEP_UNUSED", "warning", name, svc["path"], 0, f"계약상 {name} → {dep} 호출이 코드에 없습니다",
@@ -235,7 +278,7 @@ def check(arch: dict, files: dict[str, str]) -> dict:
                         "계약의 경로·메서드를 그대로 구현하세요(동적으로 등록했다면 통합 테스트 결과를 보세요).")
             for method, path, rel, line in routes:
                 key = (method, norm_path(path))
-                if key not in want and norm_path(path) not in ("/health", "/"):
+                if key not in want and norm_path(path) not in ("/health", "/", "/favicon.ico"):
                     add("CONTRACT_ENDPOINT_EXTRA", "info", name, rel, line, f"계약에 없는 API {method} {path}",
                         "공개할 API 라면 계약에 더하세요(통합 테스트 대상이 됩니다).")
         services_out.append({"name": name, "used_dbs": sorted(used_dbs), "used_services": sorted(used_svcs),

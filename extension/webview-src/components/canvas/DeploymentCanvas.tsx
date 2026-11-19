@@ -25,8 +25,16 @@ import { canvasStyles } from "./styles";
 import { mergeDeployment, SnapshotRequests } from "./state";
 import { DockerNotifications } from './dockerNotifications';
 import {GroundedRepairPanel} from '../GroundedRepairPanel';
+import {ProjectSummary} from './ProjectSummary';
 
-type Pane = "canvas" | "details" | "history" | "aws" | "docker" | "security" | "discord" | "status" | "analysis";
+type Pane = "canvas" | "details" | "history" | "aws" | "docker" | "security" | "discord" | "status" | "analysis" | "project";
+type OpenablePane = "docker" | "project" | "history";
+//: 다른 화면(로컬 Docker 바로가기 · 홈)이 캔버스의 패널을 열 때. 캔버스가 아직 없으면 처음 그릴 때 연다.
+let pendingPane: OpenablePane | null = null;
+export function requestCanvasPane(pane: OpenablePane): void {
+  pendingPane = pane;
+  if (typeof window.dispatchEvent === "function") window.dispatchEvent(new CustomEvent("recoder:canvas.pane", { detail: pane }));
+}
 /** 2.0.47 패널 머리 — 설정 시트와 같은 아이콘 · 제목 · 한 줄 설명. Discord 는 자기 머리를 그린다. */
 const PANE_HEAD: Partial<Record<Pane, { icon: React.ReactNode; title: string; sub: string }>> = {
   details: { icon: <Icon name="settings" size={18} />, title: "상세 배포", sub: "파이프라인 · 워크플로 · 고급 설정" },
@@ -37,10 +45,11 @@ const PANE_HEAD: Partial<Record<Pane, { icon: React.ReactNode; title: string; su
   status: { icon: <Icon name="pulse" size={18} />, title: "배포 상태", sub: "검사 단계 · 진행 · 실행 중인 태스크" },
   analysis: { icon: <Icon name="graph" size={18} />, title: "소스 분석", sub: "파일 · 함수 연결과 발견한 문제" },
 };
+const goView = (view: string) => typeof window.dispatchEvent === "function" && window.dispatchEvent(new CustomEvent("recoder:go", { detail: view }));
 const defaultConfig: Config = { target:"ecs",image_name:"recoder-app",tag:"v1",aws_region:"",ecs_cluster:"recoder-cluster",ecs_service:"recoder-app",task_family:"recoder-task",container_port:8000,cpu:"256",memory:"512",environment:"staging",dir:"" };
 const toolLabels: Record<string,string> = {pending:'대기',running:'검사 중',passed:'통과',findings:'발견 항목 있음',unverified:'미확인',not_run:'미실행',accepted:'요청 승인'};
 
-export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigation, isAiReady=false, isDockerReady=false, isOpsReady=false }: { onOpenDocker:()=>void; onOpenOperate?:()=>void; navigation?:React.ReactNode; isAiReady?:boolean; isDockerReady?:boolean; isOpsReady?:boolean }) {
+export default function DeploymentCanvas({ onOpenOperate, navigation, isAiReady=false, isDockerReady=false, isOpsReady=false }: { onOpenDocker?:()=>void; onOpenOperate?:()=>void; navigation?:React.ReactNode; isAiReady?:boolean; isDockerReady?:boolean; isOpsReady?:boolean }) {
   const {postMessage,useMessage}=useVSCodeApi();
   const [snapshot,setSnapshot]=useState<Snapshot|null>(null), [loading,setLoading]=useState(true);
   const [pane,setPane]=useState<Pane>('canvas'), [visited,setVisited]=useState<Set<Pane>>(new Set(['canvas']));
@@ -71,6 +80,14 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
   const requestId=()=>`canvas-${Date.now()}-${++ids.current}`;
   const refresh=useCallback((force=false)=> { const id=`snapshot-${Date.now()}-${++ids.current}`; if(!snapshotRequests.current.begin(id,force))return; setLoading(true);postMessage('canvas.snapshot',{requestId:id}); },[postMessage]);
   const openPane=(next:Pane)=>{setSelection(null);setPane(next);setVisited(v=>new Set([...v,next]));};
+  const openPaneRef=useRef(openPane);openPaneRef.current=openPane;
+  useEffect(()=>{
+    const on=(e:Event)=>{const p=(e as CustomEvent<OpenablePane>).detail;pendingPane=null;openPaneRef.current(p);};
+    if(pendingPane){const p=pendingPane;pendingPane=null;openPaneRef.current(p);}
+    if(typeof window.addEventListener!=='function')return;
+    window.addEventListener('recoder:canvas.pane',on);
+    return()=>window.removeEventListener('recoder:canvas.pane',on);
+  },[]);
   const applyNotificationPreference=()=>{
     const state=discordRef.current;
     const enabled=notificationPreference.current && Boolean(state?.active_channel_id) && (state?.mode!=='oauth' || state.project_id===state.canvas_project_id);
@@ -186,7 +203,7 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
   };
   const activate=(node:SceneNode)=>{
     if(level!==1&&graph){if(node.kind==='folder'){setFolder(node.id);return;}if(level===2){loadGraph(node.id);return;}setMessage(`${node.name} · ${node.badge}`);return;}
-    if(node.id==='project'){setFolder(null);setSearch('');loadGraph();return;}
+    if(node.id==='project'){openPane('project');return;}
     if(node.id==='gate'){openPane('security');return;}
     if(node.id==='discord'){openPane('discord');return;}
     if(['cluster','service','task','public'].includes(node.kind)&&!node.target){openPane('status');return;}
@@ -259,9 +276,10 @@ export default function DeploymentCanvas({ onOpenDocker, onOpenOperate, navigati
         {selection==='s3'&&<S3Sheet config={config} update={(k,v)=>update(k,v)} running={running} busy={busy} ready={Boolean(snapshot?.workspace)} onPrepare={()=>prepare()} autoDir={!dirTouched.current}/>}
         {selection==='github'&&snapshot&&<GitHubPanel workspace={snapshot.workspace} git={snapshot.git} onChanged={git=>{setSnapshot(s=>s?{...s,git}:s);refresh();}} onReview={()=>prepare()} onWorkflow={()=>openPane('details')} disabled={running}/>}
       </Kit>}
-      {visited.has('details')&&<div className="rc-pane-details" hidden={pane!=='details'}><DeploymentCenter key={snapshot?.workspace||'none'} onOpenDocker={onOpenDocker}/></div>}
+      {visited.has('details')&&<div className="rc-pane-details" hidden={pane!=='details'}><DeploymentCenter key={snapshot?.workspace||'none'} onOpenDocker={()=>openPane('docker')}/></div>}
       {visited.has('history')&&<div className="rc-pane-history" hidden={pane!=='history'}><Replay/></div>}
       {visited.has('aws')&&<div hidden={pane!=='aws'}><AwsConnection ecsPolicyContext={{cluster:config.ecs_cluster,service:config.ecs_service,ecrRepo:(config.image_name||config.ecs_service).trim().toLowerCase()}}/></div>}
+      {visited.has('project')&&<div hidden={pane!=='project'}><ProjectSummary key={snapshot?.workspace||'none'} active={pane==='project'} branch={snapshot?.git.branch} onSpec={()=>{closeDrawer();goView('map');}} onDeploy={()=>openPane('docker')}/></div>}
       {visited.has('docker')&&<div hidden={pane!=='docker'}><ShipMode key={snapshot?.workspace||'none'} isAiReady={isAiReady} isDockerReady={isDockerReady}/></div>}
       {visited.has('security')&&<div hidden={pane!=='security'}>{security&&<p className="rc-muted">빨간 점선은 소스의 시크릿이 저장소로 유출될 수 있는 경로입니다. 커밋·이미지 포함 여부는 별도 확인이 필요합니다. 검사 미실행은 안전 판정이 아닙니다.</p>}{manualGate&&manualGate.state!=='running'&&<div className={`rc-note ${manualGate.state==='issues'?'rc-error':''}`} role="status" style={{borderLeft:`3px solid ${gateColors[manualGate.state]}`}}><b>보안 게이트 · {manualGate.label}</b>{manualGate.notApplicable.length>0&&<small style={{display:'block'}}>{manualGate.notApplicable.map(k=>k==='trivy'?'이미지 검사(빌드된 이미지 없음)':'Dockerfile 검사(Dockerfile 없음)').join(', ')}는 대상이 없어 제외했습니다. 배포할 때 다시 검사합니다.</small>}{manualGate.state==='unverified'&&<small style={{display:'block'}}>검사하지 못한 항목은 통과로 보지 않습니다. 항목을 펼쳐 원인을 확인하세요.</small>}</div>}<SecurityScanPanel key={snapshot?.workspace||'none'} kinds={['trivy','hadolint','gitleaks']} title="지금 소스 검사" note="고친 뒤 다시 검사하세요." onChange={onScanResults}/><PolicyPanel/>{scan?.findings.map((f,i)=><div key={i} className="rc-finding"><b>{f.tool} · {f.title}</b><p>{f.fix}</p><small>{f.location}</small></div>)}{Boolean(scan?.findings.length)&&<button disabled={!isAiReady} onClick={()=>postMessage('canvas.fix',{findings:scan?.findings})}>AI 수정안 만들기</button>}</div>}
       {visited.has('discord')&&<div hidden={pane!=='discord'}><DiscordPanel state={discord} events={events} enabled={notify} onEnabled={value=>notificationSettings(value)} post={postMessage} guilds={guilds} channels={channels} error={discordError}/></div>}

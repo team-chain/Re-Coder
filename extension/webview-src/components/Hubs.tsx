@@ -52,7 +52,7 @@ export const HUBS: Array<{ id: HubId; icon: HubIconName; title: string; subtitle
 export const FEATURES: FeatureDef[] = [
   { id: "code", hub: "develop", icon: "terminal", title: "코드 생성 · 수정", desc: "요청을 입력하고, 변경 내용을 검토해 적용하세요.", action: "시작", primary: true, gate: (c) => ({ enabled: c.isAiReady, hint: "AI 연결 필요" }) },
   { id: "build", hub: "develop", icon: "bug", title: "에러 분석", desc: "오류의 원인과 수정안을 확인하세요.", action: "분석", gate: (c) => ({ enabled: c.isAiReady, hint: "AI 연결 필요" }) },
-  { id: "map", hub: "develop", icon: "network", title: "아키텍처", desc: "파일과 함수가 어떻게 연결되는지 살펴보세요.", action: "보기" },
+  { id: "map", hub: "develop", icon: "network", title: "아키텍처", desc: "기능별 요구사항 · 설계 · 할 일을 한눈에 봅니다.", action: "보기" },
   { id: "adr", hub: "develop", icon: "file-text", title: "설계 기록 (ADR)", desc: "이전에 결정한 설계와 선택 이유를 찾아보세요.", action: "열기" },
   { id: "models", hub: "develop", icon: "coins", title: "AI 공급자 · 비용", desc: "작업마다 쓸 AI 를 고르고, 비용과 같은 요청의 결과를 비교하세요.", action: "열기" },
 
@@ -200,7 +200,7 @@ export const HubPage: React.FC<{ hub: HubId; ctx: ReadyCtx; onOpen: (f: FeatureI
 //: 그 아래 한 줄 탭에 허브의 모든 기능이 늘 보인다(카드 페이지를 한 번 더 거치지 않는다).
 export const HUB_TABS: Record<HubId, Array<{ view: string; label: string; feature?: FeatureId }>> = {
   develop: [{ view: "code", label: "코드 생성", feature: "code" }, { view: "build", label: "에러 분석", feature: "build" }, { view: "map", label: "아키텍처", feature: "map" }, { view: "adr", label: "설계 기록", feature: "adr" }, { view: "models", label: "AI 모델 · 비용", feature: "models" }],
-  deploy: [{ view: "hub:deploy", label: "배포 캔버스", feature: "deploy" }, { view: "ship", label: "로컬 Docker", feature: "ship" }, { view: "replay", label: "배포 기록 · 롤백", feature: "replay" }],
+  deploy: [{ view: "hub:deploy", label: "배포 캔버스", feature: "deploy" }, { view: "replay", label: "배포 기록", feature: "replay" }],
   security: [{ view: "hub:security", label: "전체 검사" }, { view: "scan", label: "취약점 스캔", feature: "scan" }, { view: "secrets", label: "시크릿 검사", feature: "secrets" }, { view: "policy", label: "정책 게이트", feature: "policy" }],
   monitor: [{ view: "hub:monitor", label: "상태" }, { view: "operate", label: "운영 대응", feature: "operate" }],
 };

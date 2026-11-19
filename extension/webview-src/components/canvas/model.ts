@@ -34,7 +34,7 @@ export function overview(snapshot: Snapshot | null, discord: string, security: b
   const locked = !snapshot?.aws.ready;
   const node = (id: string, name: string, subtitle: string, badge: string, x: number, y: number, target?: Target): SceneNode => ({ id, name, subtitle, badge, x, y, kind: id, color: colors[id as keyof typeof colors] || colors.project, target, locked: target === "ecs" || target === "s3" ? locked : false });
   const nodes = [
-    node("project", snapshot?.projectName || "프로젝트", "프로젝트 컨테이너", "클릭하여 파일 보기", 180, 245),
+    node("project", snapshot?.projectName || "프로젝트", "프로젝트 컨테이너", "클릭하여 요약 보기", 180, 245),
     node("gate", "보안 게이트", "소스 · 이미지 · 정책", gateLabel(snapshot), 460, 285),
     node("github", snapshot?.git.repository || "GitHub", snapshot?.git.branch || "저장소 연결", snapshot?.git.repository ? snapshot.git.head==='' ? "첫 커밋 필요" : "커밋된 변경 푸시" : "연결 필요", 750, 240, "github"),
     node("docker", "Docker", "로컬 컨테이너", "빌드 · 실행 · 롤백", 330, 510, "docker"),

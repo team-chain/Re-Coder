@@ -24,6 +24,8 @@ const SKIP_DIRS = new Set([
     'build', 'dist', '.aws-sam', 'site-packages', '.mypy_cache',
     '.pytest_cache', '.idea', '.vscode', 'migrations',
     'out', '.next', 'target', 'coverage', 'vendor', '.tox', '__pypackages__',
+    //: 보관·삭제 대기 폴더(ReCoder 가 백업을 두는 곳) — 지금 코드가 아니다(실사용 2026-11-19: _old 가 구조에 섞였다).
+    '_old', '_to_delete', '_backup', 'backup', 'backups',
 ]);
 const PY_EXT = ['.py'];
 const STYLE_EXT = ['.css', '.scss', '.sass', '.less'];

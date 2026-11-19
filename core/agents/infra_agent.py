@@ -609,8 +609,9 @@ class InfraAgent:
                 model_preference="haiku",
                 agent="infra_agent",
                 operation="summarize_scan",
-                max_tokens=512,
-            ), timeout=12)
+                #: 512 는 생각하는 모델에서 답이 잘렸다("응답 길이 제한에서 잘렸습니다" — 실사용 2026-11-18).
+                max_tokens=2048,
+            ), timeout=30)
             parsed = self._extract_json_dict(raw)
             return parsed.get("threat_summary", raw[:300])
         except Exception as exc:

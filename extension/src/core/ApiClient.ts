@@ -905,6 +905,20 @@ export class ApiClient {
         return resp.data;
     }
 
+    /** 명세(요구사항 · 설계 · 작업) — 계약 · 코드 · 마지막 통합 테스트 · 저장된 AI 검토. */
+    async getSpec(workspacePath: string): Promise<object> {
+        const resp = await this.request<object>('GET', `/api/project/spec?workspace_path=${encodeURIComponent(workspacePath)}`);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? '명세를 불러오지 못했습니다.'); }
+        return resp.data;
+    }
+
+    /** AI 검토 — 사용자가 누를 때만. 모델 응답을 기다리므로 길게 기다린다. */
+    async reviewSpec(workspacePath: string): Promise<object> {
+        const resp = await this.request<object>('POST', '/api/project/spec/review', { workspace_path: workspacePath }, false, 200000);
+        if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'AI 검토에 실패했습니다.'); }
+        return resp.data;
+    }
+
     async getDeploymentHistory(): Promise<object> {
         const resp = await this.request<object>('GET', '/api/deploy/history');
         if (!resp.success || !resp.data) { throw new Error(resp.error ?? '배포 이력을 불러오지 못했습니다.'); }

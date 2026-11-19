@@ -20,7 +20,8 @@ import { Replay } from "./components/Replay";
 import CodeMap, { requestMapMode } from "./components/CodeMap";
 import QuickWheel, { CloseReason } from "./components/QuickWheel";
 import { ALL_SLOTS, QuickSlot, QuickState, assignSlot, toState, viewFor } from "./components/quickAccessModel";
-import DeploymentCanvas from "./components/canvas/DeploymentCanvas";
+import DeploymentCanvas, { requestCanvasPane } from "./components/canvas/DeploymentCanvas";
+import SpecView, { taskPrompt } from "./components/SpecView";
 import { AwsConnection } from './components/AwsConnection';
 import { CanvasDrawer } from './components/canvas/CanvasDrawer';
 import { canvasStyles } from './components/canvas/styles';
@@ -220,7 +221,9 @@ interface WorkspaceLayoutProps {
 // ---------------------------------------------------------------------------
 const HubRouter: React.FC<{ view: ViewMode; ctx: ReadyCtx; externalTurn?: ExternalTurn | null; onSelectMode: (m: ViewMode) => void; onReviewRequired: () => void; connectionPending?: boolean; connectionError?: string }> = ({ view, ctx, externalTurn, onSelectMode, onReviewRequired, connectionPending, connectionError }) => {
   const [codeVisited, setCodeVisited] = useState(view === "code");
-  const deploying = view === 'hub:deploy' || view === 'deploy';
+  //: "로컬 Docker" 는 따로 화면이 아니라 배포 캔버스의 Docker 패널이다(4.0.1).
+  const deploying = view === 'hub:deploy' || view === 'deploy' || view === 'ship';
+  useEffect(() => { if (view === 'ship') requestCanvasPane('docker'); }, [view]);
   const [deployVisited, setDeployVisited] = useState(deploying);
   const [securityVisited, setSecurityVisited] = useState(view === 'hub:security');
   const [monitorVisited, setMonitorVisited] = useState(view === 'hub:monitor');
@@ -335,6 +338,16 @@ const WorkspaceConnection: React.FC = () => {
   </div>;
 };
 
+/** 아키텍처 — 명세(요구사항 · 설계 · 작업)가 첫 화면, 파일 구조 그래프는 그 아래 단계. */
+const ArchitecturePage: React.FC<{ onSelectMode: (m: ViewMode) => void }> = ({ onSelectMode }) => {
+  const [structure, setStructure] = useState(false);
+  if (structure) return <div>
+    <button type="button" className="rc-btn" style={{ marginBottom: 10 }} onClick={() => setStructure(false)}>← 명세</button>
+    <CodeMap isActive />
+  </div>;
+  return <SpecView onOpenStructure={() => setStructure(true)} onStartTask={(t) => { setPendingPrompt(taskPrompt(t)); onSelectMode("code"); }} />;
+};
+
 const FeatureRouter: React.FC<{ view: ViewMode; ctx: ReadyCtx; externalTurn?: ExternalTurn | null; onSelectMode: (m: ViewMode) => void }> = ({ view, ctx, externalTurn, onSelectMode }) => {
   const go = (v: string) => onSelectMode(v as ViewMode);
   if (view === "home") {
@@ -352,7 +365,7 @@ const FeatureRouter: React.FC<{ view: ViewMode; ctx: ReadyCtx; externalTurn?: Ex
   switch (feature) {
     case "code": body = <CodeAgent isActive={ctx.isAiReady} externalTurn={externalTurn} onOpenHub={h => onSelectMode(`hub:${h}`)} onOpenModels={() => onSelectMode("models")} />; break;
     case "build": body = <BuildMode isActive={ctx.isAiReady} onOpenDevelopment={() => onSelectMode("code")} />; break;
-    case "map": body = <CodeMap isActive />; break;
+    case "map": body = <ArchitecturePage onSelectMode={onSelectMode} />; break;
     case "adr": body = <AdrPanel />; break;
     case "models": body = <ModelRouting />; break;
     case "ship": body = <ShipMode isAiReady={ctx.isAiReady} isDockerReady={ctx.isDockerReady} />; break;
@@ -412,6 +425,17 @@ export const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
     window.addEventListener("recoder:go", go);
     return () => window.removeEventListener("recoder:go", go);
   }, [onSelectMode]);
+  //: 서랍·승인 카드는 머리글 아래에서 열린다 — 머리글(빠른 이동 · 연결 상태)을 덮거나 그 밑에 깔리지 않게(실사용 2026-11-19).
+  const headRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const el = headRef.current; if (!el) return;
+    const set = () => document.documentElement.style.setProperty("--rc-head-h", `${Math.round(el.getBoundingClientRect().bottom)}px`);
+    set();
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(set) : null;
+    ro?.observe(el);
+    window.addEventListener("resize", set);
+    return () => { ro?.disconnect(); window.removeEventListener("resize", set); document.documentElement.style.removeProperty("--rc-head-h"); };
+  }, []);
   return (
     <div className="rc-workspace rc-app">
       <style>{THEME_CSS}{`
@@ -421,7 +445,7 @@ export const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
         .rc-code-page{width:100%}.rc-code-page .rc-feature-body{max-width:1180px;margin:0 auto}
         .rc-workspace-connection{display:flex}
       `}</style>
-      <header className="rc-top rc-workspace-header">
+      <header className="rc-top rc-workspace-header" ref={headRef}>
         <button className="rc-brand" onClick={() => onSelectMode("home")} aria-label="ReCoder 홈"><BrandLogo size={28} />ReCoder</button>
         <ProjectChip />
         <nav className="rc-pills rc-global-nav" aria-label="작업 선택">

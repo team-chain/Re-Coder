@@ -391,6 +391,10 @@ async def _deploy(workspace: str | Path, *, scan: Scan, docker=None, http=None,
     record = {"id": deployment_id, "project": proj, "workspace": str(ws.resolve()), "at": datetime.now(timezone.utc).isoformat(),
               "services": [s["name"] for s in arch["services"]], "env_source": env_source,
               "checks": {"passed": sum(1 for c in result["checks"] if c["ok"]), "total": len(result["checks"])},
+              #: 명세 화면이 API 마다 통과·실패를 보이도록 검사별 결과를 남긴다(값·응답 본문은 남기지 않음).
+              "check_results": [{"name": str(c.get("name", ""))[:200], "ok": bool(c.get("ok")),
+                                 **({"status": c["status"]} if isinstance(c.get("status"), int) else {})}
+                                for c in result["checks"]][:500],
               "gate": {"unverified": gate["unverified"]}, "pins": {}}
     if not started_ok:
         down = [f["title"] for f in result["failures"]] or [compose_check._tail(up.stderr or up.stdout, 3, 300)]

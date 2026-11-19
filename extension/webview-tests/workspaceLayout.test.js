@@ -107,7 +107,9 @@ test('AI가 준비되지 않아도 홈에서 Deploy에 진입할 수 있다', ()
 });
 
 test('AI가 준비되지 않아도 Ship Mode가 템플릿 폴백 UI를 렌더한다', () => {
-  const html = renderWorkspace('ship', false);
+  //: 4.0.1 로컬 Docker 는 배포 캔버스의 Docker 패널이다 — 패널 내용(ShipMode)을 직접 그린다.
+  const { ShipMode } = require('../out/webview-test/components/ShipMode.js');
+  const html = renderToStaticMarkup(React.createElement(ShipMode, { isAiReady: false, isDockerReady: true }));
   assert.ok(html.includes('Dockerfile'), 'Dockerfile 생성 탭이 사라졌다');
   assert.ok(html.includes('Compose'), 'Compose 생성 탭이 사라졌다');
   assert.ok(
@@ -118,6 +120,12 @@ test('AI가 준비되지 않아도 Ship Mode가 템플릿 폴백 UI를 렌더한
     !html.includes('Ship Mode는 AI Ready가 필요합니다'),
     'AI Ready 전체 차단 화면이 되살아났다'
   );
+});
+
+test('4.0.1 로컬 Docker 바로가기(ship)는 따로 화면이 아니라 배포 캔버스를 연다 · 탭에 로컬 Docker 가 없다', () => {
+  const html = renderWorkspace('ship', false);
+  assert.ok(html.includes('aria-label="배포 캔버스"'), '배포 캔버스가 아니다');
+  assert.ok(!/<button[^>]*>로컬 Docker<\/button>/.test(html), '로컬 Docker 탭이 남았다');
 });
 
 for (const view of ['hub:deploy', 'deploy']) {
