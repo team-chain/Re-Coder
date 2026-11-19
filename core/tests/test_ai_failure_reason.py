@@ -59,64 +59,6 @@ def test_분류_불가_예외는_원문을_노출하지_않는다() -> None:
 
 
 # ---------------------------------------------------------------------------
-# /api/chat 배선 — 웹뷰 채팅 패널이 detail 을 그대로 띄운다
-# ---------------------------------------------------------------------------
-
-
-def _run_chat(monkeypatch: pytest.MonkeyPatch, error: Exception):
-    from api.routes import analyze
-    import llm.router as router_mod
-
-    class _Router:
-        def call(self, *args, **kwargs):
-            raise error
-
-    monkeypatch.setattr(router_mod, "get_router", lambda: _Router())
-
-    from fastapi import HTTPException
-
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(analyze.chat_route(analyze.ChatRequest(message="배포 어떻게 해?")))
-    return exc.value
-
-
-def test_채팅_실패는_분류된_원인을_detail에_싣는다(monkeypatch) -> None:
-    err = LLMError(
-        '429 {"error": {"status": "RESOURCE_EXHAUSTED", "internal": "projects/x/models/y"}}',
-        LLMErrorType.QUOTA_EXCEEDED,
-    )
-    result = _run_chat(monkeypatch, err)
-    assert result.status_code == 500
-    detail = str(result.detail)
-    assert "AI 대화 실패" in detail
-    assert "요청 한도" in detail, "원인 분류가 detail 에 없다 — 화면에 원인이 안 뜬다"
-    #: [음성 대조] provider 원문이 그대로 새면 안 된다.
-    assert "RESOURCE_EXHAUSTED" not in detail
-    assert "projects/x" not in detail
-
-
-def test_빈_응답은_전용_문장을_유지한다(monkeypatch) -> None:
-    """분류기를 거치면 '(RuntimeError)' 로 뭉개진다 — 이 경우는 원인이 명확하다."""
-    from api.routes import analyze
-    import llm.router as router_mod
-
-    class _Router:
-        def call(self, *args, **kwargs):
-            class _R:
-                text = "   "
-                model_used = "m"
-            return _R()
-
-    monkeypatch.setattr(router_mod, "get_router", lambda: _Router())
-
-    from fastapi import HTTPException
-
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(analyze.chat_route(analyze.ChatRequest(message="hi")))
-    assert "빈 응답" in str(exc.value.detail)
-
-
-# ---------------------------------------------------------------------------
 # 진단(AI 연결 확인) — 실패 이유가 화면으로 간다. 예전에는 core.log 에만 있었다(실기기 2026-11-15).
 # ---------------------------------------------------------------------------
 

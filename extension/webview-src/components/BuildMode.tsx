@@ -6,7 +6,7 @@
 import React, { useState, useCallback } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import ApprovalModal, { RiskLevel } from "./ApprovalModal";
-import CodeAgent, { ExternalTurn } from "./CodeAgent";
+import CodeAgent from "./CodeAgent";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -104,12 +104,11 @@ const DiffPreview: React.FC<DiffPreviewProps> = ({ patch }) => {
 
 interface BuildModeProps {
   isActive: boolean;
-  externalTurn?: ExternalTurn | null;
   onOpenDevelopment?: () => void;
 }
 
 // Workspace delegates development to its shared conversation and result engine.
-export const BuildMode: React.FC<BuildModeProps> = ({ isActive, externalTurn, onOpenDevelopment }) => {
+export const BuildMode: React.FC<BuildModeProps> = ({ isActive, onOpenDevelopment }) => {
   const { postMessage, useMessage } = useVSCodeApi();
 
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -335,7 +334,7 @@ export const BuildMode: React.FC<BuildModeProps> = ({ isActive, externalTurn, on
         </div>
       )}
 
-      {!onOpenDevelopment && <CodeAgent isActive={isActive} externalTurn={externalTurn} />}
+      {!onOpenDevelopment && <CodeAgent isActive={isActive} />}
 
 
     </div>

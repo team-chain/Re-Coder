@@ -392,4 +392,4 @@ def test_web_image_builds_on_glibc_so_native_build_tools_load():
     import compose_kit as K
     arch, _ = A.normalize({"services": [{"name": "web", "kind": "web", "port": 3000, "public": True}]})
     text = K.render_dockerfile(arch["services"][0])
-    assert "FROM node:22-bookworm-slim AS build" in text and "FROM nginxinc/nginx-unprivileged" in text
+    assert "FROM node:22-bookworm-slim AS build" in text and "FROM nginx:1.30.7-alpine" in text and "USER nginx" in text

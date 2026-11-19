@@ -223,23 +223,19 @@ export function activate(context: vscode.ExtensionContext): void {
         }
     );
 
-    // Attach to any terminal that gains Shell Integration support at runtime.
-    // onDidChangeTerminalShellIntegration became stable in VSCode 1.93.
-    // Use try/catch guard so activation succeeds on older versions too.
-    try {
-        context.subscriptions.push(
-            vscode.window.onDidChangeTerminalShellIntegration(({ terminal, shellIntegration }) => {
-                terminalCollector.attachShellIntegration(terminal, shellIntegration);
-            })
-        );
-    } catch (_e) {
-        // API not available on this VSCode version — Shell Integration auto-attach disabled.
+    // Shell Integration 은 VS Code 1.93 부터 정식 API 다. engines 는 1.85 이므로 있을 때만 쓴다(타입도 1.85 기준).
+    const shellApi = vscode.window as typeof vscode.window & {
+        onDidChangeTerminalShellIntegration?: (listener: (e: { terminal: vscode.Terminal; shellIntegration: unknown }) => void) => vscode.Disposable;
+    };
+    if (typeof shellApi.onDidChangeTerminalShellIntegration === 'function') {
+        context.subscriptions.push(shellApi.onDidChangeTerminalShellIntegration(({ terminal, shellIntegration }) => {
+            terminalCollector.attachShellIntegration(terminal, shellIntegration);
+        }));
     }
-
-    // Attach to terminals already open at activation time
     for (const terminal of vscode.window.terminals) {
-        if (terminal.shellIntegration) {
-            terminalCollector.attachShellIntegration(terminal, terminal.shellIntegration);
+        const integration = (terminal as vscode.Terminal & { shellIntegration?: unknown }).shellIntegration;
+        if (integration) {
+            terminalCollector.attachShellIntegration(terminal, integration);
         }
     }
 

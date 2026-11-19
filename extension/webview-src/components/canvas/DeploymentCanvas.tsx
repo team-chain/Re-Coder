@@ -49,7 +49,7 @@ const goView = (view: string) => typeof window.dispatchEvent === "function" && w
 const defaultConfig: Config = { target:"ecs",image_name:"recoder-app",tag:"v1",aws_region:"",ecs_cluster:"recoder-cluster",ecs_service:"recoder-app",task_family:"recoder-task",container_port:8000,cpu:"256",memory:"512",environment:"staging",dir:"" };
 const toolLabels: Record<string,string> = {pending:'대기',running:'검사 중',passed:'통과',findings:'발견 항목 있음',unverified:'미확인',not_run:'미실행',accepted:'요청 승인'};
 
-export default function DeploymentCanvas({ onOpenOperate, navigation, isAiReady=false, isDockerReady=false, isOpsReady=false }: { onOpenDocker?:()=>void; onOpenOperate?:()=>void; navigation?:React.ReactNode; isAiReady?:boolean; isDockerReady?:boolean; isOpsReady?:boolean }) {
+export default function DeploymentCanvas({ onOpenOperate, navigation, isAiReady=false, isDockerReady=false, isOpsReady=false }: { onOpenOperate?:()=>void; navigation?:React.ReactNode; isAiReady?:boolean; isDockerReady?:boolean; isOpsReady?:boolean }) {
   const {postMessage,useMessage}=useVSCodeApi();
   const [snapshot,setSnapshot]=useState<Snapshot|null>(null), [loading,setLoading]=useState(true);
   const [pane,setPane]=useState<Pane>('canvas'), [visited,setVisited]=useState<Set<Pane>>(new Set(['canvas']));

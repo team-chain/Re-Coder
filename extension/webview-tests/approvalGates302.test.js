@@ -236,10 +236,7 @@ test('3.0.2 AWS 연결 해제: Core 에서 해제되면 공유 Core 를 재시�
 
 // ── 13. 채팅 「모두 적용」 ───────────────────────────────────────────
 
-test('3.0.2 채팅 모두 적용: 생성 결과의 프로젝트 루트를 함께 보내고, 빠뜨려도 호스트가 그 루트에 쓴다', async () => {
-  const chat = read('../webview-src/components/ChatPanel.tsx');
-  assert.match(chat, /postMessage\("code\.applyAll", \{ ops, targetFolder: st\.targetFolder \?\? "", projectRoot: st\.projectRoot \?\? "" \}\)/);
-  assert.match(chat, /projectRoot: payload\.projectRoot \?\? st\.projectRoot/);
+test('3.0.2 모두 적용: 프로젝트 루트를 빠뜨려도 호스트가 생성한 프로젝트에 쓴다', async () => {
   const a = fs.mkdtempSync(path.join(os.tmpdir(), 'recoder-302-a-')), b = fs.mkdtempSync(path.join(os.tmpdir(), 'recoder-302-b-'));
   const before = vscode.workspace.workspaceFolders;
   vscode.workspace.workspaceFolders = [{ uri: vscode.Uri.file(b), name: 'b', index: 0 }, { uri: vscode.Uri.file(a), name: 'a', index: 1 }];

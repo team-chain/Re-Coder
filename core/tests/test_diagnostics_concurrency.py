@@ -75,17 +75,3 @@ def test_gateway_readiness_uses_gateway_without_aws(monkeypatch):
     monkeypatch.setattr(gateway_provider.GatewayProvider, 'call', lambda self, request: SimpleNamespace(model_used='gateway-model'))
     result = asyncio.run(first_run.check_ai_ready())
     assert result == (ReadyStatus.OK, 'gateway-model', '', 'gateway', False)
-
-
-def test_chat_passes_bounded_references_to_model(monkeypatch):
-    from api.routes import analyze
-    from llm import router
-    requests = []
-    def call(request, *args):
-        requests.append(request)
-        return SimpleNamespace(text='{"reply":"확인했습니다","action":null}', model_used='fixture')
-    monkeypatch.setattr(router, 'get_router', lambda: SimpleNamespace(call=call))
-    body = analyze.ChatRequest(message='이 파일 설명해줘', context_files=[{'path': 'app.ts', 'content': 'REFERENCE' + 'x' * 30000}])
-    asyncio.run(analyze.chat_route(body))
-    assert '파일: app.ts\nREFERENCE' in requests[0].prompt
-    assert len(requests[0].prompt) < 23000

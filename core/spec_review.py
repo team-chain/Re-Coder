@@ -276,7 +276,7 @@ def build(workspace: str) -> dict:
     totals = {"passed": sum(1 for r in results.values() if r.get("ok")), "total": len(results)}
     services = []
     for s in arch["services"]:
-        services.append({"name": s["name"], "kind": s["kind"], "language": s["language"], "port": s["port"],
+        services.append({"name": s["name"], "path": s.get("path", ""), "kind": s["kind"], "language": s["language"], "port": s["port"],
                          "public": bool(s.get("public")), "databases": s["databases"], "depends_on": s["depends_on"],
                          "purpose": s.get("purpose", ""), "api": sum(1 for e in arch["endpoints"] if e["service"] == s["name"])})
     return {

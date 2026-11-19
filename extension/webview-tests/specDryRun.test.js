@@ -74,3 +74,29 @@ test('명세 dry run: 게이트웨이 → 받는 서비스로 이어 DB 까지, 
   assert.deepEqual(r.counts, { ok: 2, warn: 1, fail: 1 });
   assert.equal(normPath('/a/{x}/b/<y>/:z/'), '/a/:/b/:/:');
 });
+
+test('전체 흐름 그림: 서비스 상자 안에 지나는 파일, 게이트웨이 → 받는 서비스 · 파일 → DB 선을 그린다', () => {
+  const React = require('react');
+  const { renderToStaticMarkup } = require('react-dom/server');
+  const { SystemFlow, systemLayout } = require('../out/webview-test/components/SystemFlow.js');
+  const g = analyzeFlow(project());
+  const spec = {
+    available: true,
+    services: [{ name: 'gateway', path: 'services/gateway', kind: 'api', depends_on: ['orders'], databases: [], api: 1 },
+      { name: 'orders', path: 'services/orders', kind: 'api', depends_on: [], databases: ['orders-db'], api: 1 }],
+    databases: [{ name: 'orders-db', engine: 'postgres', tables: [] }],
+    endpoints: [api('gateway', 'POST', '/api/orders', 'services/gateway/src/proxy.controller.ts', 6),
+      api('orders', 'POST', '/orders', 'services/orders/src/orders.controller.ts', 6)],
+  };
+  const dry = runSpec(spec, g);
+  const L = systemLayout(spec, g, dry);
+  const files = L.files.map(f => `${f.service}:${f.file.split('/').pop()}`).sort();
+  assert.deepEqual(files, ['gateway:proxy.controller.ts', 'gateway:proxy.service.ts', 'orders:orders.controller.ts', 'orders:orders.service.ts']);
+  const kinds = new Set(L.edges.map(e => e.kind));
+  assert.ok(kinds.has('hop') && kinds.has('db') && kinds.has('call'), [...kinds].join(','));
+  const gx = L.svcBoxes.find(b => b.name === 'gateway').x, ox = L.svcBoxes.find(b => b.name === 'orders').x;
+  assert.ok(gx < ox && ox < L.dbBoxes[0].x, '왼쪽 → 오른쪽 순서가 아니다');
+  const features = [{ key: 'orders', label: '주문', internal: false, services: [], status: 'ok', endpoints: spec.endpoints, criteria: [], counts: { api: 2, criteria: 0, ok: 0, fail: 0 } }];
+  const html = renderToStaticMarkup(React.createElement(SystemFlow, { spec, graph: g, dry, features, statusIcon: () => null, onOpenFile() {} }));
+  for (const t of ['전체 코드 흐름', 'proxy.controller.ts', 'orders.service.ts', 'orders-db', '/api/orders']) assert.ok(html.includes(t), t);
+});

@@ -244,25 +244,6 @@ export interface CodePlanResult {
     followups?: Record<string, Record<string, CodeDecision[] | 'ai'>>;
 }
 
-/** Workspace 오른쪽 대화 패널의 일반 AI 응답. 파일을 변경하지 않는 상담용 API다. */
-export interface ChatResult {
-    reply: string;
-    model: string;
-    //: 채팅이 구현 요청을 감지했을 때 함께 오는 제안. 웹뷰가 승인 카드로 그리고,
-    //: 사용자가 승인해야만 /api/code/plan 으로 이어진다. 채팅 자체는 파일을 쓰지 않는다.
-    action?: ChatAction | null;
-}
-
-export interface ChatAction {
-    type: 'code.plan';
-    instruction: string;
-    target_folder: string;
-    target_source: 'message' | 'workspace';
-    stack: string;
-    files: string[];
-    summary: string;
-}
-
 /** 2.0.35 배포 전 신뢰 점검 결과(core/trust_check.py). */
 export interface TrustItem { key: string; principle: string; status: 'pass' | 'warn' | 'block' | 'info'; title: string; detail: string; fix: string }
 export interface TrustPrinciple { key: string; label: string; summary: string; status: 'pass' | 'warn' | 'block'; items: TrustItem[] }
@@ -862,24 +843,6 @@ export class ApiClient {
         return resp.data;
     }
 
-    /** 일반 대화형 AI — 코드 생성과 달리 이 호출만으로 파일을 수정하지 않는다. */
-    async chat(
-        message: string,
-        history: Array<{ role: 'user' | 'assistant'; content: string }>,
-        workspacePath = '',
-        contextFiles: Array<{path: string; content: string}> = [],
-    ): Promise<ChatResult> {
-        const resp = await this.request<ChatResult>('POST', '/api/chat', {
-            message,
-            history,
-            workspace_path: workspacePath,
-            context_files: contextFiles,
-        }, false, 90000);
-        if (!resp.success || !resp.data) { throw new Error(resp.error ?? 'AI 대화 실패'); }
-        return resp.data;
-    }
-
-    /** 3.1 계약 대조 — 설계도(architecture.json)와 실제 코드의 차이. 읽기만 한다. */
     /** 4.0 진행 흐름 — 만들기 → 검증 → 보안 검사 → 로컬 실행 → 공격 테스트 → 운영 배포. */
     async getJourney(workspacePath: string): Promise<object> {
         const resp = await this.request<object>('GET', `/api/project/journey?workspace_path=${encodeURIComponent(workspacePath)}`);

@@ -3318,7 +3318,7 @@ def _dockerfile_from_template(
 
 #: 사용자에게 그대로 보여줄 문장. 원인 + **다음에 뭘 하면 되는지**까지 담는다.
 #: "Internal Server Error" 만 보여주면 사용자는 재시도 말고 할 수 있는 게 없다.
-#: 채팅 라우트(/api/chat)도 같은 문장이 필요해져 llm/failure.py 로 승격했다.
+#: 여러 라우트가 같은 문장을 쓰도록 llm/failure.py 에 둔다.
 def _public_ai_failure_reason(exc: Exception | None) -> str:
     """Return an actionable reason without exposing provider error details."""
     try:

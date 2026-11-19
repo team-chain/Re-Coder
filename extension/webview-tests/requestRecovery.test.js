@@ -9,20 +9,6 @@ const {AnalysisJob} = require('../out/codemap/analysisJob');
 const {ApiClient} = require('../out/core/ApiClient');
 const {SidebarProvider} = require('../out/sidebar/SidebarProvider');
 
-test('workspace approval survives a hidden sidebar ready and resumes only in its workspace', async()=>{
-  let pending={instruction:'test',targetFolder:'',ts:Date.now(),surface:'workspace'};
-  const memento={get:()=>pending,update:async(k,value)=>{pending=value;}};
-  const messages=[];
-  const provider=new SidebarProvider(vscode.Uri.file(__dirname),{}, {}, {getLastHealth:()=>null}, undefined, memento);
-  const view={postMessage:async m=>{messages.push(m);return true;}};
-  await provider.handleMessage({type:'webview.ready',payload:{layout:'sidebar'}},view);
-  assert.ok(pending);assert.equal(messages.filter(m=>m.type==='chat.actionAccepted').length,0);
-  await provider.handleMessage({type:'webview.ready',payload:{layout:'workspace'}},view);
-  assert.equal(pending,undefined);assert.equal(messages.filter(m=>m.type==='chat.actionAccepted').length,1);
-  await provider.handleMessage({type:'webview.ready',payload:{layout:'workspace'}},view);
-  assert.equal(messages.filter(m=>m.type==='chat.actionAccepted').length,1);
-});
-
 test('real project/file analysis responds without blocking host and supports cancel/retry', async()=>{
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'recoder-analysis-'));
   fs.writeFileSync(path.join(dir,'index.html'),'<script src="app.js"></script>');

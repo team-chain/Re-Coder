@@ -8,9 +8,9 @@
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
-import FlowDryRun from "./FlowDryRun";
+import SystemFlow from "./SystemFlow";
 import type { FlowGraph } from "./dryRunModel";
-import { apiKey, effectText, runSpec, SpecRun, Verdict } from "./specDryRun";
+import { runSpec, SpecRun } from "./specDryRun";
 
 export type Status = "ok" | "fail" | "missing" | "warn" | "partial" | "unknown";
 export interface SpecCriterion { cond: string; text: string; status: Status; source: "test" | "ai"; api?: string; test?: string; got?: number; note?: string }
@@ -23,7 +23,7 @@ export interface SpecFeature {
   endpoints: SpecApi[]; criteria: SpecCriterion[]; counts: { api: number; criteria: number; ok: number; fail: number };
 }
 export interface SpecTask { id: string; title: string; detail: string; severity: "high" | "medium" | "low"; feature: string; source: "rule" | "ai" }
-export interface SpecService { name: string; kind: string; language: string; port: number; public: boolean; databases: string[]; depends_on: string[]; purpose: string; api: number }
+export interface SpecService { name: string; path?: string; kind: string; language: string; port: number; public: boolean; databases: string[]; depends_on: string[]; purpose: string; api: number }
 export interface Spec {
   available: boolean; reason?: string; project?: string;
   features?: SpecFeature[]; services?: SpecService[]; databases?: { name: string; engine: string; tables: string[] }[];
@@ -80,15 +80,6 @@ export const SPEC_CSS = `
 .sp-link{all:unset;cursor:pointer;color:var(--rc-teal,#2f81f7);font:12px var(--sp-mono)}.sp-link:hover{text-decoration:underline}
 .sp-note{font-size:12px;color:var(--sp-mute)}
 .sp-pad{padding:20px 24px 24px}
-.sp-flow{width:100%;height:auto;display:block;margin-bottom:8px}
-.sp-flow .nd{cursor:pointer}
-.sp-flow .nd rect.bg{fill:var(--rc-solid,#0d1117);stroke:var(--sp-line)}
-.sp-flow .nd:hover rect.bg{stroke:rgba(148,178,210,.35)}
-.sp-flow .nd.sel rect.bg{stroke:var(--sp-fg);stroke-width:1.2}
-.sp-flow .nd text{fill:var(--sp-fg);font-size:12.5px;font-weight:500}
-.sp-flow .nd text.sub{fill:var(--sp-mute);font-size:11px;font-weight:400}
-.sp-flow path.ed{fill:none;stroke:rgba(148,178,210,.28);stroke-width:1}
-.sp-flow path.ed.hl{stroke:rgba(148,178,210,.75)}
 .sp-sev{font-size:11px;font-weight:500;padding:0 7px;border-radius:999px;border:1px solid var(--sp-line);color:var(--sp-fg2);line-height:18px;white-space:nowrap}
 .sp-sev.high{color:var(--sp-bad);border-color:rgba(248,81,73,.4)}
 .sp-sev.medium{color:var(--sp-warn);border-color:rgba(210,153,34,.4)}
@@ -97,26 +88,6 @@ export const SPEC_CSS = `
 .sp-dry-bar b{color:var(--sp-fg);font-weight:600;font-variant-numeric:tabular-nums}
 .sp-dry-bar .st{display:flex;align-items:center;gap:6px}
 .sp-dry-bar .sp-btn{margin-left:auto}
-.sp-dry{width:100%;border-collapse:collapse;font-size:12.5px;table-layout:fixed}
-.sp-dry .wrap{overflow:auto;max-width:100%}
-.sp-dry th{text-align:left;font-weight:500;font-size:12px;color:var(--sp-mute);padding:8px 12px;border-bottom:1px solid var(--sp-line);white-space:nowrap}
-.sp-dry td{padding:7px 12px;border-bottom:1px solid var(--sp-line);vertical-align:middle}
-.sp-dry tr.grp td{padding:14px 12px 6px 24px;font-weight:600;font-size:12px;color:var(--sp-fg2);border-bottom:1px solid var(--sp-line)}
-.sp-dry tr.r{cursor:pointer}.sp-dry tr.r:hover td{background:var(--sp-hover)}
-.sp-dry tr.r[aria-expanded=true] td{background:var(--sp-sel)}
-.sp-dry td.ic{width:28px;padding-left:24px}
-.sp-dry td.m{width:64px;font:600 11px var(--sp-mono);color:var(--sp-fg2)}
-.sp-dry td.p{font:12.5px var(--sp-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sp-dry td.c,.sp-dry td.e{overflow:hidden;text-overflow:ellipsis}
-.sp-dry td.c{color:var(--sp-fg2);white-space:nowrap}
-.sp-dry td.e{color:var(--sp-fg2);white-space:nowrap}
-.sp-dry td.n{color:var(--sp-mute);text-align:right;padding-right:24px;font-variant-numeric:tabular-nums;white-space:nowrap}
-.sp-dry tr.x td{padding:12px 24px 16px;background:rgba(148,178,210,.025)}
-.sp-why{margin:0 0 10px;padding:0;list-style:none;display:grid;gap:4px;font-size:12.5px}
-.sp-why li{display:flex;align-items:center;gap:8px}
-.sp-hops{display:flex;gap:4px;margin:0 0 10px}
-.sp-hops button{all:unset;cursor:pointer;padding:3px 10px;border-radius:6px;border:1px solid var(--sp-line);font-size:12px;color:var(--sp-fg2)}
-.sp-hops button[aria-pressed=true]{color:var(--sp-fg);border-color:rgba(148,178,210,.4);background:var(--sp-sel)}
 .sp-empty{padding:48px 20px;text-align:center;color:var(--sp-mute);font-size:13px}
 .sp-err{margin:12px 16px 0;padding:8px 12px;border-radius:6px;font-size:12px;border:1px solid rgba(248,81,73,.4);color:var(--sp-bad)}
 @media(max-width:760px){.sp-main{grid-template-columns:1fr}.sp-side{border-right:0;border-bottom:1px solid var(--sp-line);display:flex;overflow-x:auto;gap:2px}.sp-item{width:auto;white-space:nowrap}
@@ -160,84 +131,16 @@ const ApiRow: React.FC<{ a: SpecApi; criteria: SpecCriterion[]; open: boolean; o
   </>;
 };
 
-// ── 설계: 흐름도 ────────────────────────────────────────────────────────
-interface FlowNode { id: string; label: string; sub: string; kind: string; col: number; x: number; y: number }
-const NW = 156, NH = 48, CG = 56, RG = 12;
-
-/** 왼쪽(사용자 쪽)에서 오른쪽(DB)으로 — 서비스는 자기를 부르는 쪽보다 한 칸 오른쪽. */
-export function flowLayout(services: SpecService[], dbs: { name: string; engine: string }[]): { nodes: FlowNode[]; edges: [string, string][]; w: number; h: number } {
-  const names = new Set(services.map(s => s.name));
-  const depth: Record<string, number> = {};
-  const dep = (n: string, seen: Set<string>): number => {
-    if (depth[n] !== undefined) return depth[n];
-    if (seen.has(n)) return 0;
-    seen.add(n);
-    const parents = services.filter(s => s.depends_on.includes(n));
-    depth[n] = parents.length ? Math.max(...parents.map(p => dep(p.name, seen))) + 1 : 0;
-    return depth[n];
-  };
-  services.forEach(s => dep(s.name, new Set()));
-  const dbCol = services.length ? Math.max(...services.map(s => depth[s.name])) + 1 : 0;
-  const raw: Omit<FlowNode, "x" | "y">[] = [
-    ...services.map(s => ({ id: s.name, label: s.name, kind: s.kind === "web" ? "web" : s.kind === "worker" ? "worker" : "api", col: depth[s.name],
-      sub: s.kind === "web" ? "Web" : s.kind === "worker" ? "Worker" : `API ${s.api}${s.port ? ` · :${s.port}` : ""}` })),
-    ...dbs.map(d => ({ id: d.name, label: d.name, kind: "db", col: dbCol, sub: d.engine })),
-  ];
-  const cols: Record<number, typeof raw> = {};
-  raw.forEach(n => (cols[n.col] ??= []).push(n));
-  const maxRows = Math.max(1, ...Object.values(cols).map(c => c.length));
-  const h = maxRows * (NH + RG) - RG;
-  const nodes: FlowNode[] = [];
-  Object.entries(cols).forEach(([c, list]) => {
-    const off = (h - (list.length * (NH + RG) - RG)) / 2;
-    list.forEach((n, i) => nodes.push({ ...n, x: Number(c) * (NW + CG), y: off + i * (NH + RG) }));
-  });
-  const edges: [string, string][] = [];
-  services.forEach(s => {
-    s.depends_on.filter(d => names.has(d)).forEach(d => edges.push([s.name, d]));
-    s.databases.forEach(d => edges.push([s.name, d]));
-  });
-  return { nodes, edges, w: (dbCol + 1) * (NW + CG) - CG, h };
-}
-
-const KIND_GLYPH: Record<string, string> = {
-  web: "M2 3.75C2 2.784 2.784 2 3.75 2h8.5c.966 0 1.75.784 1.75 1.75v8.5A1.75 1.75 0 0 1 12.25 14h-8.5A1.75 1.75 0 0 1 2 12.25Zm1.5 2.75v5.75c0 .138.112.25.25.25h8.5a.25.25 0 0 0 .25-.25V6.5Zm9-1.5V3.75a.25.25 0 0 0-.25-.25h-8.5a.25.25 0 0 0-.25.25V5Z",
-  api: "M4.72 3.22a.75.75 0 0 1 1.06 1.06L2.06 8l3.72 3.72a.75.75 0 1 1-1.06 1.06L.47 8.53a.75.75 0 0 1 0-1.06Zm6.56 0a.75.75 0 1 0-1.06 1.06L13.94 8l-3.72 3.72a.75.75 0 1 0 1.06 1.06l4.25-4.25a.75.75 0 0 0 0-1.06Z",
-  worker: "M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Zm7-3.25v2.992l2.028.812a.75.75 0 0 1-.557 1.392l-2.5-1A.751.751 0 0 1 7 8.25v-3.5a.75.75 0 0 1 1.5 0Z",
-  db: "M1 3.5c0-.626.292-1.165.7-1.59.406-.422.956-.767 1.579-1.041C4.525.32 6.195 0 8 0c1.805 0 3.475.32 4.722.869.622.274 1.172.62 1.578 1.04.408.426.7.965.7 1.591v9c0 .626-.292 1.165-.7 1.59-.406.422-.956.767-1.579 1.041C11.476 15.68 9.806 16 8 16c-1.805 0-3.475-.32-4.721-.869-.623-.274-1.173-.62-1.579-1.04-.408-.426-.7-.965-.7-1.591Zm1.5 0c0 .133.058.318.282.551.227.237.591.483 1.101.707C4.898 5.205 6.353 5.5 8 5.5c1.646 0 3.101-.295 4.118-.742.508-.224.873-.471 1.1-.708.224-.232.282-.417.282-.55 0-.133-.058-.318-.282-.551-.227-.237-.591-.483-1.101-.707C11.102 1.795 9.647 1.5 8 1.5c-1.646 0-3.101.295-4.118.742-.508.224-.873.471-1.1.708-.224.232-.282.417-.282.55Zm0 4.5c0 .133.058.318.282.551.227.237.591.483 1.101.707C4.898 9.705 6.353 10 8 10c1.646 0 3.101-.295 4.118-.742.508-.224.873-.471 1.1-.708.224-.232.282-.417.282-.55V5.724c-.241.15-.503.286-.778.407C11.475 6.68 9.805 7 8 7c-1.805 0-3.475-.32-4.721-.869a6.15 6.15 0 0 1-.779-.407Zm0 2.225V12.5c0 .133.058.318.282.55.227.237.592.484 1.1.708 1.016.447 2.471.742 4.118.742 1.647 0 3.102-.295 4.117-.742.51-.224.874-.47 1.101-.707.224-.233.282-.418.282-.551v-2.275c-.241.15-.503.285-.778.406-1.247.549-2.917.869-4.722.869-1.805 0-3.475-.32-4.721-.869a6.327 6.327 0 0 1-.779-.406Z",
-};
-
-const Flow: React.FC<{ spec: Spec; sel: string; onSel: (n: string) => void }> = ({ spec, sel, onSel }) => {
-  const { nodes, edges, w, h } = useMemo(() => flowLayout(spec.services ?? [], spec.databases ?? []), [spec]);
-  const at = Object.fromEntries(nodes.map(n => [n.id, n]));
-  const live = spec.deploy?.services ?? {};
-  return <svg className="sp-flow" viewBox={`-2 -2 ${w + 4} ${h + 4}`} style={{ maxHeight: Math.max(160, h + 40) }} role="img" aria-label="서비스 구성도">
-    {edges.map(([a, b]) => { const p = at[a], q = at[b]; if (!p || !q) return null;
-      const x1 = p.x + NW, y1 = p.y + NH / 2, x2 = q.x, y2 = q.y + NH / 2, mx = (x1 + x2) / 2;
-      return <path key={`${a}-${b}`} className={`ed${sel === a || sel === b ? " hl" : ""}`} d={`M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`} />; })}
-    {nodes.map(n => { const st = live[n.id];
-      return <g key={n.id} className={`nd${sel === n.id ? " sel" : ""}`} transform={`translate(${n.x},${n.y})`} onClick={() => onSel(n.id)} role="button" aria-label={n.label}>
-        <rect className="bg" width={NW} height={NH} rx="6" />
-        <path d={KIND_GLYPH[n.kind]} transform="translate(12,16)" fill="var(--sp-mute)" />
-        <text x="36" y="21">{n.label.length > 15 ? n.label.slice(0, 14) + "…" : n.label}</text>
-        <text className="sub" x="36" y="37">{n.sub}</text>
-        {st && <circle cx={NW - 13} cy={NH / 2} r="3.5" fill={st === "ok" ? "var(--sp-ok)" : st === "fail" ? "var(--sp-bad)" : "var(--sp-mute)"}><title>{st === "ok" ? "실행 중" : st === "fail" ? "시작 못 함" : "확인 전"}</title></circle>}
-      </g>; })}
-  </svg>;
-};
-
 // ── 화면 ─────────────────────────────────────────────────────────────────
-export const SpecView: React.FC<{ initial?: Spec | null; onStartTask?: (task: SpecTask) => void; onOpenFile?: (file: string, line: number) => void; onOpenStructure?: () => void }> = ({ initial = null, onStartTask, onOpenFile, onOpenStructure }) => {
+type Tab = "dry" | "req" | "tasks";
+export const SpecView: React.FC<{ initial?: Spec | null; initialTab?: Tab; onStartTask?: (task: SpecTask) => void; onOpenFile?: (file: string, line: number) => void; onOpenStructure?: () => void }> = ({ initial = null, initialTab = "dry", onStartTask, onOpenFile, onOpenStructure }) => {
   const { postMessage, useMessage } = useVSCodeApi();
   const [spec, setSpec] = useState<Spec | null>(initial);
-  const [tab, setTab] = useState<"req" | "dry" | "design" | "tasks">("req");
+  const [tab, setTab] = useState<Tab>(initialTab);
   const [flow, setFlow] = useState<FlowGraph | null>(null);
   const [flowState, setFlowState] = useState<"idle" | "loading" | "error">("idle");
   const [flowError, setFlowError] = useState("");
-  const [openRun, setOpenRun] = useState("");
-  const [hop, setHop] = useState(0);
   const [sel, setSel] = useState<string>("");
-  const [node, setNode] = useState<string>("");
   const [openApi, setOpenApi] = useState<string>("");
   const [reviewing, setReviewing] = useState(false);
   const [error, setError] = useState("");
@@ -266,9 +169,6 @@ export const SpecView: React.FC<{ initial?: Spec | null; onStartTask?: (task: Sp
   const current = features.find(f => f.key === sel) ?? features[0];
   const tasks = spec?.tasks ?? [];
   const openFile = useCallback((f: string, l: number) => { if (onOpenFile) onOpenFile(f, l); else postMessage("map.openFile", { id: f, line: l }); }, [onOpenFile, postMessage]);
-  const busiest = useMemo(() => [...(spec?.services ?? [])].sort((a, b) => b.api - a.api)[0]?.name ?? "", [spec]);
-  const shownNode = node || busiest;
-  const nodeApis = useMemo(() => (spec?.endpoints ?? []).filter(a => a.service === shownNode), [spec, shownNode]);
   const dry: SpecRun | null = useMemo(() => (spec?.available && flow ? runSpec(spec, flow) : null), [spec, flow]);
 
   if (!spec) return <div className="rc-spec"><style>{SPEC_CSS}</style><div className="sp-empty">{error || "불러오는 중"}</div></div>;
@@ -283,9 +183,8 @@ export const SpecView: React.FC<{ initial?: Spec | null; onStartTask?: (task: Sp
       <div className="sp-head">
         <span className="sp-name" title={spec.project}>{spec.project}</span>
         <div className="sp-tabs" role="tablist" aria-label="명세">
+          <button role="tab" aria-selected={tab === "dry"} onClick={() => setTab("dry")}>전체 흐름{dry && dry.counts.fail + dry.counts.warn > 0 && <span className="sp-count">{dry.counts.fail + dry.counts.warn}</span>}</button>
           <button role="tab" aria-selected={tab === "req"} onClick={() => setTab("req")}>요구사항</button>
-          <button role="tab" aria-selected={tab === "dry"} onClick={() => setTab("dry")}>Dry run{dry && dry.counts.fail + dry.counts.warn > 0 && <span className="sp-count">{dry.counts.fail + dry.counts.warn}</span>}</button>
-          <button role="tab" aria-selected={tab === "design"} onClick={() => setTab("design")}>설계</button>
           <button role="tab" aria-selected={tab === "tasks"} onClick={() => setTab("tasks")}>작업{tasks.length > 0 && <span className="sp-count">{tasks.length}</span>}</button>
         </div>
         <div className="sp-right">
@@ -326,59 +225,15 @@ export const SpecView: React.FC<{ initial?: Spec | null; onStartTask?: (task: Sp
             <span className="st"><Ic s="ok" />적합 <b>{dry.counts.ok}</b></span>
             <span className="st"><Ic s="warn" />확인 필요 <b>{dry.counts.warn}</b></span>
             <span className="st"><Ic s="fail" />불일치 <b>{dry.counts.fail}</b></span>
-          </> : <span>{flowState === "loading" ? "호출 경로를 따라가는 중" : flowState === "error" ? flowError : "명세의 모든 API 를 코드에서 따라갑니다"}</span>}
-          <button type="button" className="sp-btn" aria-disabled={flowState === "loading"} title="코드를 실행하지 않고 호출 그래프만 따라갑니다" onClick={() => { if (flowState !== "loading") runDry(); }}>{flowState === "loading" ? "분석 중" : dry ? "다시 실행" : "Dry run 실행"}</button>
+          </> : <span>{flowState === "loading" ? "코드 전체의 호출 경로를 분석하는 중" : flowState === "error" ? flowError : "명세의 모든 API 를 코드에서 따라갑니다"}</span>}
+          <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+            {onOpenStructure && <button type="button" className="sp-btn" onClick={onOpenStructure}>파일 구조</button>}
+            <button type="button" className="sp-btn" aria-disabled={flowState === "loading"} title="코드를 실행하지 않고 호출 그래프만 따라갑니다" onClick={() => { if (flowState !== "loading") runDry(); }}>{flowState === "loading" ? "분석 중" : dry ? "다시 분석" : "분석"}</button>
+          </span>
         </div>
-        {dry && <table className="sp-dry">
-          <colgroup><col style={{ width: 52 }} /><col style={{ width: 76 }} /><col /><col style={{ width: "22%" }} /><col style={{ width: "24%" }} /><col style={{ width: 76 }} /></colgroup>
-          <thead><tr><th /><th>Method</th><th>경로</th><th>지나는 서비스</th><th>닿는 곳</th><th style={{ textAlign: "right", paddingRight: 24 }}>함수</th></tr></thead>
-          <tbody>
-            {features.map(f => <React.Fragment key={f.key}>
-              <tr className="grp"><td colSpan={6}>{f.label}</td></tr>
-              {f.endpoints.map(a => {
-                const run = dry.runs[apiKey(a)];
-                if (!run) return null;
-                const open = openRun === run.key;
-                const shown = run.hops[Math.min(hop, run.hops.length - 1)];
-                const v: Record<Verdict, Status> = { ok: "ok", warn: "warn", fail: "fail" };
-                return <React.Fragment key={run.key}>
-                  <tr className="r" aria-expanded={open} onClick={() => { setOpenRun(open ? "" : run.key); setHop(run.hops.length > 1 ? 1 : 0); }}>
-                    <td className="ic"><Ic s={v[run.verdict]} /></td>
-                    <td className="m">{a.method}</td>
-                    <td className="p" title={a.path}>{a.path}</td>
-                    <td className="c">{run.hops.map(h => h.service).join(" → ")}</td>
-                    <td className="e">{effectText(run.effects)}</td>
-                    <td className="n">{run.functions || "—"}</td>
-                  </tr>
-                  {open && <tr className="x"><td colSpan={6}>
-                    {run.reasons.length > 0 && <ul className="sp-why">{run.reasons.map((r, i) => <li key={i}><Ic s={run.verdict === "fail" ? "fail" : "warn"} size={12} />{r}</li>)}</ul>}
-                    {run.hops.length > 1 && <div className="sp-hops">{run.hops.map((h, i) => <button key={i} type="button" aria-pressed={i === Math.min(hop, run.hops.length - 1)} onClick={() => setHop(i)}>{h.service} · {h.api.method} {h.api.path}</button>)}</div>}
-                    {flow && shown.entry ? <div className="wrap"><FlowDryRun graph={flow} initialEntry={shown.entry} onOpen={openFile} /></div> : <p className="sp-note">이 단계의 코드를 찾지 못해 흐름을 그릴 수 없습니다.</p>}
-                  </td></tr>}
-                </React.Fragment>;
-              })}
-            </React.Fragment>)}
-          </tbody>
-        </table>}
-        {dry && <p className="sp-note" style={{ padding: "10px 24px 14px", margin: 0 }}>코드를 실행하지 않고 호출 그래프를 따라간 결과입니다. 실제 실행 순서 · 값과 다를 수 있습니다.</p>}
-      </div>}
-
-      {tab === "design" && <div className="sp-pad">
-        <Flow spec={spec} sel={shownNode} onSel={(n) => { setNode(n); setOpenApi(""); }} />
-        {nodeApis.length > 0 && <>
-          <div className="sp-sec">{shownNode} · API {nodeApis.length}개</div>
-          <div className="sp-list" aria-label={`${shownNode} API`}>
-            {nodeApis.map(raw => {
-              const id = `${raw.service} ${raw.method} ${raw.path}`;
-              //: 기능 쪽 API 가 테스트 결과를 들고 있다 — 같은 API 를 찾아 그 결과로 그린다.
-              const same = (x: SpecApi) => x.service === raw.service && x.method === raw.method && x.path === raw.path;
-              const f = features.find(x => x.endpoints.some(same));
-              const a = f?.endpoints.find(same) ?? raw;
-              return <ApiRow key={id} a={a} criteria={f?.criteria ?? []} open={openApi === id} onToggle={() => setOpenApi(openApi === id ? "" : id)} onOpenFile={openFile} />;
-            })}
-          </div>
-        </>}
-        {onOpenStructure && <p style={{ margin: "16px 0 0" }}><button type="button" className="sp-btn" onClick={onOpenStructure}>파일 구조 보기</button></p>}
+        {dry && flow && <SystemFlow spec={spec} graph={flow} dry={dry} features={features} onOpenFile={openFile}
+          statusIcon={(v, size) => <Ic s={v} size={size} />} />}
+        {dry && <p className="sp-note" style={{ padding: "10px 20px 14px", margin: 0, borderTop: "1px solid var(--sp-line)" }}>코드를 실행하지 않고 호출 그래프를 따라간 결과입니다. 실제 실행 순서 · 값과 다를 수 있습니다.</p>}
       </div>}
 
       {tab === "tasks" && <div className="sp-pad">

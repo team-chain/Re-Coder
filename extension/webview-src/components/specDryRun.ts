@@ -14,8 +14,9 @@ import type { Spec, SpecApi } from "./SpecView";
 
 export type Verdict = "ok" | "warn" | "fail";
 export interface Hop { service: string; api: SpecApi; entry: string | null }
+export interface RunStep { node: string; from?: string; depth: number; hop: number; revisit?: "seen" | "cycle" }
 export interface ApiRun {
-  key: string; api: SpecApi; hops: Hop[];
+  key: string; api: SpecApi; hops: Hop[]; steps: RunStep[];
   effects: Record<EffectKind, number>; functions: number; files: number;
   verdict: Verdict; reasons: string[]; truncated: boolean;
 }
@@ -54,8 +55,10 @@ export function runSpec(spec: Spec, graph: FlowGraph): SpecRun {
   const walk = (entry: string | null) => {
     const effects = EMPTY();
     const nodes = new Set<string>(), files = new Set<string>();
-    if (!entry) return { effects, nodes, files, truncated: false };
+    const steps: RunStep[] = [];
+    if (!entry) return { effects, nodes, files, truncated: false, steps };
     const r = dryRun(graph, entry);
+    for (const s of r.steps) steps.push({ node: s.node, from: s.from, depth: s.depth, hop: 0, revisit: s.revisit });
     for (const s of r.steps) {
       if (nodes.has(s.node)) continue;
       nodes.add(s.node);
@@ -64,7 +67,7 @@ export function runSpec(spec: Spec, graph: FlowGraph): SpecRun {
       files.add(n.file);
       for (const k of new Set(n.effects.map(f => f.kind))) effects[k] += 1;
     }
-    return { effects, nodes, files, truncated: Boolean(r.truncated) };
+    return { effects, nodes, files, truncated: Boolean(r.truncated), steps };
   };
   for (const api of spec.endpoints ?? []) {
     const reasons: string[] = [];
@@ -77,6 +80,7 @@ export function runSpec(spec: Spec, graph: FlowGraph): SpecRun {
     const effects = { ...a.effects };
     const nodes = new Set(a.nodes), files = new Set(a.files);
     let truncated = a.truncated;
+    const steps: RunStep[] = [...a.steps];
     let lastHop = a;
     if (!first.entry) worse("fail", "코드에서 이 경로를 찾지 못했습니다");
     const down = downstreamOf(spec, api);
@@ -86,6 +90,7 @@ export function runSpec(spec: Spec, graph: FlowGraph): SpecRun {
       const b = walk(hop.entry);
       (Object.keys(effects) as EffectKind[]).forEach(k => { effects[k] += b.effects[k]; });
       b.nodes.forEach(n => nodes.add(n)); b.files.forEach(f => files.add(f));
+      steps.push(...b.steps.map(st => ({ ...st, hop: 1 })));
       truncated = truncated || b.truncated;
       lastHop = b;
       if (!hop.entry) worse("fail", `${down.service} 에서 ${down.method} ${down.path} 를 찾지 못했습니다`);
@@ -97,7 +102,7 @@ export function runSpec(spec: Spec, graph: FlowGraph): SpecRun {
     }
     if (effects.exec > 0) worse("warn", "명령 실행 코드를 지납니다");
     if (truncated) worse("warn", "호출이 길어 일부만 따라갔습니다");
-    const run: ApiRun = { key: apiKey(api), api, hops, effects, functions: nodes.size, files: files.size, verdict, reasons, truncated };
+    const run: ApiRun = { key: apiKey(api), api, hops, steps, effects, functions: nodes.size, files: files.size, verdict, reasons, truncated };
     runs[run.key] = run;
     counts[verdict] += 1;
   }

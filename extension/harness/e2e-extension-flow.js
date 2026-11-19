@@ -3,7 +3,7 @@
 // 픽스처 LLM 을 물린 **실 HTTP 코어**를 직접 띄워 붙여, 사용자가 실기기에서
 // 밟는 메시지 사슬을 처음부터 끝까지 재현한다:
 //
-//   webview.ready → chat.send → chat.approveAction(빈 창 — 워크스페이스를 바꾸지 않고 외부 프로젝트로)
+//   webview.ready → 대상 폴더(빈 창 — 워크스페이스를 바꾸지 않고 외부 프로젝트로)
 //   → code.plan → code.planResult → code.spec → code.specResult → code.generate → code.result
 //   → code.applyAll → 파일이 실제 디스크에 존재
 //
@@ -37,7 +37,7 @@ Module._resolveFilename = function (request, ...rest) {
 const vscode = require('vscode');
 const { ApiClient } = require(path.join(EXT, 'out/core/ApiClient'));
 const { SidebarProvider } = require(path.join(EXT, 'out/sidebar/SidebarProvider'));
-const { initActiveProject, activeProjectPath } = require(path.join(EXT, 'out/activeProject'));
+const { initActiveProject, activeProjectPath, useExternalProject } = require(path.join(EXT, 'out/activeProject'));
 
 // ── 협력자 가짜 ──
 const fakeCoreManager = {
@@ -81,7 +81,7 @@ const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-proj-'));
 const memento = new Memento();
 //: 제품의 activate() 처럼 현재 프로젝트 모듈에 저장소를 물린다(외부 프로젝트 목록이 여기 저장된다).
 initActiveProject({ workspaceState: new Memento(), globalState: memento, subscriptions: [] });
-let sp, captured, wv, action, decisions, acceptedPayload, ops;
+let sp, captured, wv, decisions, acceptedPayload, ops;
 
 step('1. 빈 창(폴더 0개)에서 기동 + webview.ready', async () => {
     vscode.workspace.workspaceFolders = undefined;
@@ -91,51 +91,20 @@ step('1. 빈 창(폴더 0개)에서 기동 + webview.ready', async () => {
     await sp.handleMessage({ type: 'webview.ready', payload: {} }, wv);
 });
 
-step('2. chat.send → 승인 카드(action) 수신', async () => {
-    await sp.handleMessage({ type: 'chat.send', payload: { id: 'c1', message: '게시판 하나 만들어줘', history: [] } }, wv);
-    const resp = await waitFor(captured, 'chat.response');
-    assert.ok(resp.payload.reply, '채팅 응답이 비었다');
-    action = resp.payload.action;
-    assert.ok(action && action.type === 'code.plan', '승인 카드(action)가 없다');
-});
-
-step('3-A. 승인 → 워크스페이스를 바꾸지 않고(확장 재시작 없음) 승인한 폴더를 외부 프로젝트로 바로 이어 간다', async () => {
-    //: 26756bda 이후: 빈 창·단일 폴더 창에서 폴더를 워크스페이스에 넣으면 VS Code 가 확장을 재시작해 요청이 사라졌다.
-    //: 이제 워크스페이스는 건드리지 않는다 — 재시작이 없으니 인계 메모 없이 같은 화면에서 바로 승인된다.
+step('2. 빈 창에서 대상 폴더를 고르면 워크스페이스를 바꾸지 않고 그 폴더를 프로젝트로 쓴다', async () => {
+    //: 빈 창·단일 폴더 창에서 폴더를 워크스페이스에 넣으면 VS Code 가 확장을 재시작해 진행 중인 요청이 사라진다.
     let mutated = false;
     vscode.workspace.__onUpdateWorkspaceFolders = () => { mutated = true; };
     const target = path.join(ws, 'board-app');
-    await sp.handleMessage({ type: 'chat.approveAction', payload: { id: 'c1', instruction: action.instruction, targetFolder: target } }, wv);
+    fs.mkdirSync(target, { recursive: true });
+    await useExternalProject(target);
     vscode.workspace.__onUpdateWorkspaceFolders = null;
     assert.strictEqual(mutated, false, '워크스페이스 폴더를 바꾸면 확장이 재시작된다');
-    assert.ok(fs.existsSync(target), '대상 폴더 미생성');
-    const accepted = last(captured, 'chat.actionAccepted');
-    assert.ok(accepted && accepted.payload.requestId, '승인한 화면에서 바로 이어 가야 한다');
-    assert.strictEqual(accepted.payload.instruction, action.instruction);
-    assert.strictEqual(path.resolve(accepted.payload.absolutePath), path.resolve(target));
-    assert.strictEqual(path.resolve(activeProjectPath()), path.resolve(target), '승인한 폴더가 현재 프로젝트가 된다');
-    assert.strictEqual(memento.get('recoder.pendingChatAction'), undefined, '재시작이 없으니 인계 메모를 남기지 않는다(다음 ready 가 중복 발송)');
-    const before = captured.filter((m) => m.type === 'chat.actionAccepted').length;
-    await sp.handleMessage({ type: 'webview.ready', payload: {} }, wv);
-    assert.strictEqual(captured.filter((m) => m.type === 'chat.actionAccepted').length, before, '다시 ready 가 와도 같은 요청을 또 보내지 않는다');
+    assert.strictEqual(path.resolve(activeProjectPath()), path.resolve(target), '고른 폴더가 현재 프로젝트가 된다');
+    acceptedPayload = { instruction: '게시판 생성 - 글 작성/목록/삭제', targetFolder: '', absolutePath: target };
 });
 
-step('3-B. 재시작 후 새 프로바이더의 ready 가 요청을 이어받고, 중복 발송하지 않는다', async () => {
-    const m2 = new Memento({ 'recoder.pendingChatAction': { instruction: action.instruction, targetFolder: '', absolutePath: path.join(ws, 'board-app'), folderCreated: true, ts: Date.now() } });
-    const cap2 = [];
-    const w2 = makeWebview(cap2);
-    const sp2 = new SidebarProvider(vscode.Uri.file('/tmp/ext'), new ApiClient(fakeCoreManager), fakeCoreManager, fakePolling, undefined, m2);
-    await sp2.handleMessage({ type: 'webview.ready', payload: {} }, w2);
-    const restored = await waitFor(cap2, 'chat.actionAccepted', 3000);
-    assert.ok(restored.payload.restoredAfterReload, 'restoredAfterReload 표시 없음');
-    assert.strictEqual(m2.get('recoder.pendingChatAction'), undefined, '복구 후 메모 미삭제');
-    const before = cap2.filter((m) => m.type === 'chat.actionAccepted').length;
-    await sp2.handleMessage({ type: 'webview.ready', payload: {} }, w2);
-    assert.strictEqual(cap2.filter((m) => m.type === 'chat.actionAccepted').length, before, '두 번째 ready 가 중복 발송');
-});
-
-step('4. code.plan → 실 코어에서 설계 결정 수신', async () => {
-    acceptedPayload = last(captured, 'chat.actionAccepted').payload;
+step('3. code.plan → 실 코어에서 설계 결정 수신', async () => {
     await sp.handleMessage({ type: 'code.plan', payload: { requestId: 777, instruction: acceptedPayload.instruction, targetFolder: acceptedPayload.targetFolder, contextFiles: [] } }, wv);
     //: 확장이 요청을 받았다는 단계 알림이 먼저 가야 웹뷰가 "요청을 받지 못함"으로 끊지 않는다.
     const stages = captured.filter((x) => x.type === 'code.status' && x.payload.requestId === 777).map((x) => x.payload.stage);
@@ -149,7 +118,7 @@ step('4. code.plan → 실 코어에서 설계 결정 수신', async () => {
 });
 
 let choices, spec;
-step('4b. code.spec → 실 코어에서 명세(합격 조건) 초안 수신', async () => {
+step('3b. code.spec → 실 코어에서 명세(합격 조건) 초안 수신', async () => {
     choices = decisions.map((d) => ({ id: d.id, question: d.question, chosen_key: d.recommended_key || (d.options && d.options[0] && d.options[0].key), options: d.options, impact: d.impact || '' }));
     await sp.handleMessage({ type: 'code.spec', payload: { requestId: 777, instruction: acceptedPayload.instruction, targetFolder: acceptedPayload.targetFolder, contextFiles: [], decisions: choices } }, wv);
     const m = last(captured, 'code.specResult') || last(captured, 'code.specError');
@@ -159,7 +128,7 @@ step('4b. code.spec → 실 코어에서 명세(합격 조건) 초안 수신', a
     assert.deepStrictEqual(spec.criteria.map((c) => c.id), ['AC-1', 'AC-2']);
 });
 
-step('5. code.generate(결정·명세 확정) → 코드 + ADR + 명세 기록 수신', async () => {
+step('4. code.generate(결정·명세 확정) → 코드 + ADR + 명세 기록 수신', async () => {
     await sp.handleMessage({ type: 'code.generate', payload: { requestId: 777, instruction: acceptedPayload.instruction, targetFolder: acceptedPayload.targetFolder, contextFiles: [], decisions: choices, spec } }, wv);
     const g = last(captured, 'code.result') || last(captured, 'code.error');
     assert.ok(g, 'code.result/error 모두 없음');
@@ -170,7 +139,7 @@ step('5. code.generate(결정·명세 확정) → 코드 + ADR + 명세 기록 �
     assert.strictEqual(g.payload.spec && g.payload.spec.verified, false, '자동 확인 전임을 결과에 남긴다');
 });
 
-step('6. code.applyAll → 파일이 실제 디스크에 생성된다', async () => {
+step('5. code.applyAll → 파일이 실제 디스크에 생성된다', async () => {
     sp._view = { webview: wv }; // 제품에선 사이드바/편집기 패널이 이 자리
     const applyOps = ops.map((o) => ({ file: o.path || o.file, content: o.content, ackKey: o.path || o.file }));
     await sp.handleMessage({ type: 'code.applyAll', payload: { ops: applyOps, targetFolder: acceptedPayload.targetFolder } }, wv);

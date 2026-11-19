@@ -183,7 +183,7 @@ export class TerminalCollector {
      */
     attachShellIntegration(
         terminal: vscode.Terminal,
-        _shellIntegration: vscode.TerminalShellIntegration
+        _shellIntegration: unknown
     ): void {
         const id = this.getTerminalId(terminal);
         if (!this.outputBuffer.has(id)) {

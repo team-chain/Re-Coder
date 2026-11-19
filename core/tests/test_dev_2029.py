@@ -144,11 +144,6 @@ def test_verified_repair_cache_is_not_reused_after_tampering(tmp_path):
 
 # ── ASI09 승인 근거 · ASI07 MCP ─────────────────────────────────────────
 
-def test_chat_approval_card_shows_plan_data_and_labels_ai_summary():
-    src = (CORE.parent / "extension" / "webview-src" / "components" / "ChatPanel.tsx").read_text(encoding="utf-8")
-    assert 'data-testid="action-instruction"' in src and ">AI 설명<" in src
-
-
 def test_mcp_tool_calls_are_audited_without_values(tmp_path, monkeypatch):
     import asyncio
     import mcp_server

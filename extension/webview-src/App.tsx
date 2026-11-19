@@ -7,11 +7,9 @@ import { loadUiState, saveUiState } from "./hooks/useVSCodeApi";
 import { usePolling } from "./hooks/usePolling";
 import { BuildMode } from "./components/BuildMode";
 import CodeAgent, { setPendingPrompt, setPendingTargetFolder } from "./components/CodeAgent";
-import type { ExternalTurn } from "./components/CodeAgent";
 import { MonitorBadge, MonitorPage } from "./components/MonitorPage";
 import { FeatureFrame, AdrPanel, SecurityHub, SecurityScanPanel, PolicyPanel, HUBS, HUB_ENTRY, HubTabs, hubOf, isHubView, isFeatureView } from "./components/Hubs";
 import type { HubId, FeatureId, ReadyCtx } from "./components/Hubs";
-import { ShipMode } from "./components/ShipMode";
 import { OperateMode } from "./components/OperateMode";
 import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
 import { CostTracker } from "./components/CostTracker";
@@ -200,7 +198,7 @@ interface WorkspaceLayoutProps {
   view: ViewMode;
   //: 이 화면이 확장과 끊겼는지(useHostLink). 끊기면 맨 위에 다시 불러오기 안내를 띄운다.
   hostLost?: boolean;
-  externalTurn?: ExternalTurn | null;
+ 
   diagnostics: DiagnosticsResult | null;
   coreStatus: "ok" | "degraded" | "down" | null;
   showDiagnostics: boolean;
@@ -219,7 +217,7 @@ interface WorkspaceLayoutProps {
 // HubRouter — 홈 / 허브 페이지 / 기능 화면을 view 값으로 골라 그린다.
 // 사이드바와 Workspace 창이 같은 라우팅을 쓴다.
 // ---------------------------------------------------------------------------
-const HubRouter: React.FC<{ view: ViewMode; ctx: ReadyCtx; externalTurn?: ExternalTurn | null; onSelectMode: (m: ViewMode) => void; onReviewRequired: () => void; connectionPending?: boolean; connectionError?: string }> = ({ view, ctx, externalTurn, onSelectMode, onReviewRequired, connectionPending, connectionError }) => {
+const HubRouter: React.FC<{ view: ViewMode; ctx: ReadyCtx; onSelectMode: (m: ViewMode) => void; onReviewRequired: () => void; connectionPending?: boolean; connectionError?: string }> = ({ view, ctx, onSelectMode, onReviewRequired, connectionPending, connectionError }) => {
   const [codeVisited, setCodeVisited] = useState(view === "code");
   //: "로컬 Docker" 는 따로 화면이 아니라 배포 캔버스의 Docker 패널이다(4.0.1).
   const deploying = view === 'hub:deploy' || view === 'deploy' || view === 'ship';
@@ -234,7 +232,7 @@ const HubRouter: React.FC<{ view: ViewMode; ctx: ReadyCtx; externalTurn?: Extern
   return <>
     <div className="rc-code-page" hidden={view !== "code"}>
       {(codeVisited || view === "code") && <FeatureFrame feature="code" ctx={ctx} onGo={go}>
-        <CodeAgent isActive={ctx.isAiReady} externalTurn={externalTurn} onReviewRequired={onReviewRequired} connectionPending={connectionPending} connectionError={connectionError} onOpenHub={h => onSelectMode(`hub:${h}`)} onOpenModels={() => onSelectMode("models")} />
+        <CodeAgent isActive={ctx.isAiReady} onReviewRequired={onReviewRequired} connectionPending={connectionPending} connectionError={connectionError} onOpenHub={h => onSelectMode(`hub:${h}`)} onOpenModels={() => onSelectMode("models")} />
       </FeatureFrame>}
     </div>
     <div hidden={!deploying}>{(deployVisited || deploying) && <FeatureRouter view="hub:deploy" ctx={ctx} onSelectMode={onSelectMode} />}</div>
@@ -243,7 +241,7 @@ const HubRouter: React.FC<{ view: ViewMode; ctx: ReadyCtx; externalTurn?: Extern
       <HubTabs hub="monitor" current="hub:monitor" ctx={ctx} onGo={go} />
       <MonitorPage active={view === 'hub:monitor'} onOpenDeploy={() => onSelectMode('hub:deploy')} onOpenOperate={() => onSelectMode('operate')} />
     </>}</div>
-    {view !== "code" && !deploying && view !== 'hub:security' && view !== 'hub:monitor' && <FeatureRouter view={view} ctx={ctx} externalTurn={externalTurn} onSelectMode={onSelectMode} />}
+    {view !== "code" && !deploying && view !== 'hub:security' && view !== 'hub:monitor' && <FeatureRouter view={view} ctx={ctx} onSelectMode={onSelectMode} />}
   </>;
 };
 
@@ -348,7 +346,7 @@ const ArchitecturePage: React.FC<{ onSelectMode: (m: ViewMode) => void }> = ({ o
   return <SpecView onOpenStructure={() => setStructure(true)} onStartTask={(t) => { setPendingPrompt(taskPrompt(t)); onSelectMode("code"); }} />;
 };
 
-const FeatureRouter: React.FC<{ view: ViewMode; ctx: ReadyCtx; externalTurn?: ExternalTurn | null; onSelectMode: (m: ViewMode) => void }> = ({ view, ctx, externalTurn, onSelectMode }) => {
+const FeatureRouter: React.FC<{ view: ViewMode; ctx: ReadyCtx; onSelectMode: (m: ViewMode) => void }> = ({ view, ctx, onSelectMode }) => {
   const go = (v: string) => onSelectMode(v as ViewMode);
   if (view === "home") {
     return <HomeBento active go={go} />;
@@ -356,20 +354,19 @@ const FeatureRouter: React.FC<{ view: ViewMode; ctx: ReadyCtx; externalTurn?: Ex
   if (isHubView(view) && view !== "hub:deploy") {
     //: 허브마다 첫 화면이 있다(Develop → 코드 생성). 예전 카드 페이지는 거치지 않는다.
     const entry = HUB_ENTRY[view.slice(4) as HubId];
-    if (entry && entry !== view && isFeatureView(entry)) return <FeatureRouter view={entry as ViewMode} ctx={ctx} externalTurn={externalTurn} onSelectMode={onSelectMode} />;
+    if (entry && entry !== view && isFeatureView(entry)) return <FeatureRouter view={entry as ViewMode} ctx={ctx} onSelectMode={onSelectMode} />;
     return null;
   }
   if (view !== "hub:deploy" && !isFeatureView(view)) { return null; }
   const feature: FeatureId = view === "hub:deploy" ? "deploy" : view;
   let body: React.ReactNode = null;
   switch (feature) {
-    case "code": body = <CodeAgent isActive={ctx.isAiReady} externalTurn={externalTurn} onOpenHub={h => onSelectMode(`hub:${h}`)} onOpenModels={() => onSelectMode("models")} />; break;
+    case "code": body = <CodeAgent isActive={ctx.isAiReady} onOpenHub={h => onSelectMode(`hub:${h}`)} onOpenModels={() => onSelectMode("models")} />; break;
     case "build": body = <BuildMode isActive={ctx.isAiReady} onOpenDevelopment={() => onSelectMode("code")} />; break;
     case "map": body = <ArchitecturePage onSelectMode={onSelectMode} />; break;
     case "adr": body = <AdrPanel />; break;
     case "models": body = <ModelRouting />; break;
-    case "ship": body = <ShipMode isAiReady={ctx.isAiReady} isDockerReady={ctx.isDockerReady} />; break;
-    case "deploy": return <FeatureFrame feature="deploy" ctx={ctx} onGo={go}><DeploymentCanvas navigation={HUBS.map(h=><button key={h.id} aria-pressed={h.id==='deploy'} onClick={()=>onSelectMode(HUB_ENTRY[h.id] as ViewMode)}>{h.title}</button>)} onOpenDocker={() => onSelectMode("ship")} onOpenOperate={() => onSelectMode("operate")} isAiReady={ctx.isAiReady} isDockerReady={ctx.isDockerReady} isOpsReady={ctx.isOpsReady} /></FeatureFrame>;
+    case "deploy": return <FeatureFrame feature="deploy" ctx={ctx} onGo={go}><DeploymentCanvas navigation={HUBS.map(h=><button key={h.id} aria-pressed={h.id==='deploy'} onClick={()=>onSelectMode(HUB_ENTRY[h.id] as ViewMode)}>{h.title}</button>)} onOpenOperate={() => onSelectMode("operate")} isAiReady={ctx.isAiReady} isDockerReady={ctx.isDockerReady} isOpsReady={ctx.isOpsReady} /></FeatureFrame>;
     case "replay": body = <Replay />; break;
     case "operate": body = <OperateMode isActive={ctx.isOpsReady} />; break;
     case "scan": body = <SecurityScanPanel kinds={["trivy", "hadolint"]} title="취약점 스캔" note="이미지 · 의존성은 Trivy, Dockerfile 은 Hadolint 로 검사합니다. 결과는 배포 승인 카드의 위험도에 반영됩니다." />; break;
@@ -412,13 +409,13 @@ const ProjectChip: React.FC = () => {
 //: 경로(CodeAgent)가 살아있는지가 회귀 대상이다 — 예전에 여기서만 숨겨져서
 //: Workspace 창에서 결정 카드가 뜨지 않는 버그가 있었다.
 export const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
-  view, externalTurn, diagnostics, coreStatus, showDiagnostics, diagnosticsPending, diagnosticsError, isAiReady, isDockerReady, isOpsReady,
+  view, diagnostics, coreStatus, showDiagnostics, diagnosticsPending, diagnosticsError, isAiReady, isDockerReady, isOpsReady,
   costSummary, onSelectMode, onToggleDiagnostics, hostLost,
 }) => {
   const activeHub = isHubView(view) ? view.slice(4) : isFeatureView(view) ? hubOf(view) : '';
   const showReview = useCallback(() => onSelectMode("code"), [onSelectMode]);
   //: 코드 생성(자기 입력칸이 있다) · 배포 캔버스 · 로컬 Docker(아래쪽 조작부가 있다)에서는 아래 요청창을 감춘다.
-  const dock = !["code", "hub:develop", "hub:deploy", "deploy", "ship"].includes(view);
+  const dock = !["code", "hub:develop", "hub:deploy", "deploy", "ship", "map"].includes(view);
   //: 화면 안 다른 부품이 "그 단계 화면으로 가기" 를 요청할 때(예: 공격 테스트 → 로컬 실행).
   useEffect(() => {
     const go = (e: Event) => { const v = (e as CustomEvent<string>).detail; if (typeof v === "string") onSelectMode(v as ViewMode); };
@@ -468,7 +465,7 @@ export const WorkspaceLayout: React.FC<WorkspaceLayoutProps> = ({
       {showDiagnostics && <div id="workspace-diagnostics" style={{ margin: "0 22px 10px", border: "1px solid var(--rc-line2)", borderRadius: 14, background: "var(--rc-solid)", maxHeight: 280, overflowY: "auto" }}><DiagnosticsPanel diagnostics={diagnostics} /><CostTracker costSummary={costSummary} /></div>}
 
       <main className={`rc-main rc-workspace-content${dock ? "" : " rc-no-dock"}`}>
-        <HubRouter view={view === "hub:develop" ? "code" : view} ctx={{ isAiReady, isDockerReady, isOpsReady }} externalTurn={externalTurn} onSelectMode={onSelectMode} onReviewRequired={showReview} connectionPending={diagnosticsPending || coreStatus === null} connectionError={diagnosticsError || (coreStatus && coreStatus !== "ok" ? "Core에 연결할 수 없습니다." : "")} />
+        <HubRouter view={view === "hub:develop" ? "code" : view} ctx={{ isAiReady, isDockerReady, isOpsReady }} onSelectMode={onSelectMode} onReviewRequired={showReview} connectionPending={diagnosticsPending || coreStatus === null} connectionError={diagnosticsError || (coreStatus && coreStatus !== "ok" ? "Core에 연결할 수 없습니다." : "")} />
       </main>
       {dock && <Dock onSubmit={(t) => { setPendingPrompt(t); onSelectMode("code"); }} />}
     </div>
@@ -493,7 +490,6 @@ const App: React.FC = () => {
   });
   useEffect(() => { if (isWorkspacePanel) saveUiState({ view }); }, [view, isWorkspacePanel]);
   //: 채팅 승인 카드에서 넘어온 코드 생성 요청. Build 화면을 열고 CodeAgent 에 넘긴다.
-  const [externalTurn, setExternalTurn] = useState<ExternalTurn | null>(null);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsResult | null>(null);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [diagnosticsPending, setDiagnosticsPending] = useState(true);
@@ -564,13 +560,6 @@ const App: React.FC = () => {
         setPendingTargetFolder((payload as { folder?: string })?.folder ?? "");
         setView("code");
       }
-      if (type === "chat.actionAccepted") {
-        const p = payload as Partial<ExternalTurn>;
-        if (typeof p.requestId === "number" && p.instruction) {
-          setExternalTurn({ requestId: p.requestId, instruction: p.instruction, targetFolder: p.targetFolder ?? "", contextFiles: p.contextFiles ?? [] });
-          setView("code");
-        }
-      }
     }, [])
   );
 
@@ -606,7 +595,7 @@ const App: React.FC = () => {
   if (isWorkspacePanel) {
     return <><Dialogs /><WorkspaceLayout
       view={view}
-      externalTurn={externalTurn}
+     
       diagnostics={diagnostics}
       coreStatus={coreHealth?.status ?? null}
       showDiagnostics={showDiagnostics}

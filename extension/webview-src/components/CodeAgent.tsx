@@ -143,10 +143,6 @@ const EXAMPLES: { label: string; text: string }[] = [
   { label: "에러 고치기", text: "이 에러를 고쳐줘: " },
 ];
 
-//: 채팅 승인 카드에서 넘어온 요청. App 이 chat.actionAccepted 를 받아 내려준다.
-//: requestId 는 확장 호스트가 정한 값(Date.now())이라 이 컴포넌트의 턴 번호와 겹치지 않는다.
-export interface ExternalTurn { requestId: number; instruction: string; targetFolder: string; contextFiles?: CtxFile[]; }
-
 //: 탐색기 "여기에 코드 생성" 으로 들어온 대상 폴더 — 코드 화면이 아직 없을 때 App 이 받아 두고,
 //: 코드 화면이 처음 그려질 때 꺼내 쓴다(메시지가 화면보다 먼저 와서 사라지던 문제).
 let pendingTargetFolder: string | null = null;
@@ -197,7 +193,7 @@ export const ComposeVerification: React.FC<{v: NonNullable<CodeResult["verificat
   );
 };
 
-export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTurn | null; onReviewRequired?: () => void; connectionPending?: boolean; connectionError?: string; onOpenHub?: (hub: "deploy" | "security") => void; onOpenModels?: () => void }> = ({ isActive, externalTurn, onReviewRequired, connectionPending, connectionError, onOpenHub, onOpenModels }) => {
+export const CodeAgent: React.FC<{ isActive: boolean; onReviewRequired?: () => void; connectionPending?: boolean; connectionError?: string; onOpenHub?: (hub: "deploy" | "security") => void; onOpenModels?: () => void }> = ({ isActive, onReviewRequired, connectionPending, connectionError, onOpenHub, onOpenModels }) => {
   const { postMessage, useMessage } = useVSCodeApi();
 
   //: 쓰던 요청은 화면이 다시 그려져도(창 다시 불러오기·확장 재시작) 남는다.
@@ -273,7 +269,6 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
   }, [dialogKey]);
   const inputRef = React.useRef<HTMLTextAreaElement | null>(null);
   const pendingRequestsRef = React.useRef<Record<number, PendingRequest>>({});
-  const handledExternalRef = React.useRef<number | null>(null);
   const responseTimers = React.useRef(new Map<number, ReturnType<typeof setTimeout>>());
   const expiredRequests = React.useRef(new Set<number>());
   // A ref also guards rapid clicks/shortcuts before React commits the busy state.
@@ -311,21 +306,6 @@ export const CodeAgent: React.FC<{ isActive: boolean; externalTurn?: ExternalTur
   const acknowledgedRequests = React.useRef(new Set<number>());
   useEffect(() => () => { responseTimers.current.forEach(clearTimeout); }, []);
 
-  //: 채팅에서 승인된 요청을 이 패널의 턴으로 등록하고 곧장 code.plan 을 보낸다.
-  //: 이후 결정 모달 → 생성 → diff → 적용은 직접 입력한 턴과 완전히 같은 경로다.
-  useEffect(() => {
-    if (!externalTurn) { return; }
-    if (handledExternalRef.current === externalTurn.requestId) { return; }
-    handledExternalRef.current = externalTurn.requestId;
-    const { requestId, instruction, targetFolder: folder } = externalTurn;
-    activeRequest.current = requestId;
-    const files = externalTurn.contextFiles ?? [];
-    pendingRequestsRef.current[requestId] = { instruction, targetFolder: folder, contextFiles: files };
-    setTargetFolder(folder);
-    setTurns((ts) => [...ts, { id: requestId, prompt: instruction, targetFolder: folder, contextNames: files.map((f) => f.path), status: "planning" }]);
-    waitForResponse(requestId, 30);
-    postMessage("code.plan", { requestId, instruction, targetFolder: folder, contextFiles: files });
-  }, [externalTurn, postMessage]);
 
   useMessage(useCallback((msg) => {
     const { type, payload } = msg;

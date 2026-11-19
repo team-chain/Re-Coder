@@ -448,7 +448,7 @@ async def _deploy(workspace: str | Path, *, scan: Scan, docker=None, http=None,
         lang = any(str(f.get("class")) == "lang-pkgs" for items in blocked_by.values() for f in items)
         os_ = any(str(f.get("class")) in ("os-pkgs", "") for items in blocked_by.values() for f in items)
         fix = ("기본 이미지를 새로 받고 다시 빌드해도 남았습니다. " if os_ and retried else "") + \
-              ("Dockerfile 의 FROM 을 더 최신 태그로 바꾸세요. " if os_ else "") + \
+              ("Dockerfile 의 FROM 을 → 오른쪽 버전이 담긴 태그로 고정하세요(stable · latest 같은 움직이는 태그는 새 빌드가 늦게 반영됩니다). " if os_ else "") + \
               ("package.json 등에서 위 패키지를 → 오른쪽 버전 이상으로 올리세요. " if lang else "") + "기존에 돌던 서비스는 그대로입니다."
         _restore_tags(docker, proj, current_pins)
         return fail("scan", "이미지 보안 검사에서 막았습니다", "; ".join(gate["blockers"]), fix.strip())

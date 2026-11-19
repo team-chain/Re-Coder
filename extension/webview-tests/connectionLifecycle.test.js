@@ -59,24 +59,6 @@ test('sidebar and workspace startup share credentials and a diagnostic before an
   assert.equal(f.events.filter(e => e === 'diagnose').length, 2);
 });
 
-test('slow diagnosis does not delay a chat request and selected references survive its proposal', async () => {
-  const f = fixture();
-  let finish;
-  f.api.runDiagnostics = () => new Promise(resolve => {finish=resolve;});
-  f.api.chat = async (...args) => {
-    f.events.push('chat');
-    assert.deepEqual(args[3], [{path:'app.ts',content:'reference'}]);
-    return {reply:'fixture',model:'fixture',action:{type:'code.plan',instruction:'fix',target_folder:'',target_source:'workspace',files:[]}};
-  };
-  const diagnostics = f.provider.runDiagnosticsShared(false);
-  await delay(20);
-  const messages=[];
-  await f.provider.handleMessage({type:'chat.send',payload:{id:'first',message:'fix',targetFolder:'src',contextFiles:[{path:'app.ts',content:'reference'}]}},{postMessage: m => messages.push(m)});
-  assert.equal(messages.at(-1).type,'chat.response');
-  assert.match(messages.at(-1).payload.action.target_folder, /src$/);
-  finish(ready); await diagnostics;
-});
-
 test('failed diagnostics leave Core health untouched and do not retry paid probes on every poll', async () => {
   const f=fixture();
   f.api.runDiagnostics=async()=>{f.events.push('failed');throw new Error('AI timeout');};
@@ -122,18 +104,6 @@ test('generic operation errors do not downgrade live Core health, including befo
   assert.equal(state.coreHealth.status,'ok');assert.equal(state.isConnected,true);
   receive({type:'core.stopped'});
   assert.equal(state.coreHealth.status,'down');
-});
-
-test('approval preserves selected reference files when handed to the result engine', async () => {
-  const f=fixture(), messages=[];
-  const files=[{path:'fixture.ts',content:'original reference'}];
-  const original=vscode.workspace.workspaceFolders;
-  vscode.workspace.workspaceFolders=[{uri:vscode.Uri.file(__dirname)}];
-  try {
-    await f.provider.handleMessage({type:'chat.approveAction',payload:{id:'approve',instruction:'fix',targetFolder:'',contextFiles:files}},{postMessage:m=>messages.push(m)});
-    const accepted=messages.find(m=>m.type==='chat.actionAccepted');
-    assert.deepEqual(accepted.payload.contextFiles,files);
-  } finally {vscode.workspace.workspaceFolders=original;}
 });
 
 test('cancelling a design reports its request identity to the shared conversation', async () => {

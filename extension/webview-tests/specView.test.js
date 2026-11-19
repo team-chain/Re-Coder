@@ -31,8 +31,8 @@ const SPEC = {
 };
 
 test('요구사항 탭: 기능 목록 · 수용 기준 · API 표 — 이모티콘 · 색 배지 없이 상태는 아이콘으로', () => {
-  const html = renderToStaticMarkup(React.createElement(SpecView, { initial: SPEC, onStartTask() {} }));
-  for (const t of ['shop', '요구사항', '설계', '작업', '테스트 44/45', 'AI 검토', '회원가입 · 로그인', '주문 · 결제', '수용 기준', '올바른 이메일·비밀번호로 로그인하면 토큰을 준다', '/api/auth/login', '공개', '로그인', 'aria-label="실패"']) assert.ok(html.includes(t), t);
+  const html = renderToStaticMarkup(React.createElement(SpecView, { initial: SPEC, initialTab: 'req', onStartTask() {} }));
+  for (const t of ['shop', '전체 흐름', '요구사항', '작업', '테스트 44/45', 'AI 검토', '회원가입 · 로그인', '주문 · 결제', '수용 기준', '올바른 이메일·비밀번호로 로그인하면 토큰을 준다', '/api/auth/login', '공개', '로그인', 'aria-label="실패"']) assert.ok(html.includes(t), t);
   assert.match(html, /aria-selected="true"[^>]*>요구사항/);
   assert.match(html, /작업<span class="sp-count">1<\/span>/);
   // 테스트 기준은 API 를 펼칠 때만.
@@ -43,17 +43,16 @@ test('요구사항 탭: 기능 목록 · 수용 기준 · API 표 — 이모티�
 
 test('AI 검토 전에는 수용 기준 목록이 없다 — 지어낸 요구사항이 없다', () => {
   const spec = { ...SPEC, features: [{ ...SPEC.features[0], criteria: SPEC.features[0].criteria.filter(c => c.source === 'test') }] };
-  const html = renderToStaticMarkup(React.createElement(SpecView, { initial: spec }));
+  const html = renderToStaticMarkup(React.createElement(SpecView, { initial: spec, initialTab: 'req' }));
   assert.ok(!html.includes('수용 기준'));
 });
 
 test('설계 흐름도: 화면 → 게이트웨이 → DB 순서로 왼쪽에서 오른쪽', () => {
-  const { flowLayout } = require('../out/webview-test/components/SpecView.js');
+  const { serviceColumns } = require('../out/webview-test/components/SystemFlow.js');
   const svc = (name, kind, depends_on = [], databases = []) => ({ name, kind, language: 'ts', port: 0, public: false, databases, depends_on, purpose: '', api: 1 });
-  const { nodes, edges } = flowLayout([svc('web', 'web', ['gateway']), svc('gateway', 'api', ['users']), svc('users', 'api', [], ['users-db'])], [{ name: 'users-db', engine: 'postgres' }]);
-  const x = Object.fromEntries(nodes.map(n => [n.id, n.x]));
-  assert.ok(x.web < x.gateway && x.gateway < x.users && x.users < x['users-db']);
-  assert.deepEqual(edges, [['web', 'gateway'], ['gateway', 'users'], ['users', 'users-db']]);
+  const { col, dbCol } = serviceColumns([svc('web', 'web', ['gateway']), svc('gateway', 'api', ['users']), svc('users', 'api', [], ['users-db'])]);
+  assert.deepEqual(col, { web: 0, gateway: 1, users: 2 });
+  assert.equal(dbCol, 3);
 });
 
 test('계약이 없는 프로젝트는 이유만 보인다', () => {

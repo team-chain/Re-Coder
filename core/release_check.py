@@ -134,7 +134,7 @@ def run(app) -> int:
         scheduler.add_job(lambda: None, 'interval', seconds=60)
         checks.append('scheduler plugins')
         paths = app.openapi()['paths']
-        for endpoint in ('/api/health', '/api/status', '/api/chat', '/api/code/plan', '/api/code/spec',
+        for endpoint in ('/api/health', '/api/status', '/api/code/plan', '/api/code/spec',
                          '/api/code/generate', '/api/code/generate/stream', '/api/deploy/dockerfile', '/api/deploy/execute', '/api/deploy/settings', '/api/deploy/db-choice',
                          '/api/deploy/canvas', '/api/github/repository/connect', '/api/git/push'):
             assert endpoint in paths, f'route missing: {endpoint}'

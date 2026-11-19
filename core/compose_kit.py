@@ -26,12 +26,22 @@ MARKER = "# ReCoder 검증 compose"
 DOCKER_MARKER = "# ReCoder 검증 Dockerfile"
 NODE_IMAGE = "node:22-alpine"
 PYTHON_IMAGE = "python:3.12-slim"
-#: 1.27 은 이미지 보안 검사에서 심각 취약점으로 막혔다(실사용 2026-11-18) — 유지되는 안정판 + OS 패키지 업데이트.
-WEB_IMAGE = "nginxinc/nginx-unprivileged:stable-alpine"
+#: 화면 서버 — 공식 nginx 를 **버전 고정** + 비루트로 돌린다.
+#: 실사용 2026-11-19: nginx 1.30.6 의 심각 취약점(CVE-2026-123007 등, 2026-11-18 공개)이 이미지 검사에서 막혔다.
+#: stable-alpine 같은 움직이는 태그는 새 빌드가 늦게 반영되고, nginx-unprivileged 는 고친 버전이 아직 없었다.
+#: 고친 버전이 담긴 공식 태그를 고정하고, 비루트 설정(pid · 캐시 경로 · 사용자)은 여기서 한다.
+WEB_IMAGE = "nginx:1.30.7-alpine"
 #: 화면 빌드 단계만 glibc 이미지 — alpine(musl)에서는 vite·rollup·esbuild 같은 네이티브 빌드 도구가
 #: 다른 OS 에서 만든 package-lock 으로 설치되면 실행 파일을 못 찾아 빌드가 깨진다(실사용 2026-11-18: web 이미지 빌드 실패).
 #: 결과물은 정적 파일이라 실행 이미지(nginx)와 무관하다.
 WEB_BUILD_IMAGE = "node:22-bookworm-slim"
+#: 공식 nginx 이미지를 비루트(nginx 사용자)로 — OS 보안 업데이트, master 를 root 로 띄우지 않으니 user 지시문 제거,
+#: pid 와 임시 파일을 nginx 사용자가 쓸 수 있는 곳으로.
+WEB_RUNTIME_SETUP = [
+    "RUN apk upgrade --no-cache \\",
+    "    && sed -i -e '/^user /d' -e 's#^pid .*#pid /tmp/nginx.pid;#' /etc/nginx/nginx.conf \\",
+    "    && chown -R nginx:nginx /var/cache/nginx /etc/nginx/conf.d",
+]
 DB_IMAGES = {"postgres": "postgres:16-alpine", "mysql": "mysql:8.4", "mongodb": "mongo:7", "redis": "redis:7-alpine"}
 DB_USER = "app"
 
@@ -160,9 +170,10 @@ def render_dockerfile(svc: dict) -> str:
     if svc["kind"] == "web":
         return head + "\n".join([
             f"FROM {WEB_BUILD_IMAGE} AS build", "WORKDIR /app", "COPY package*.json ./", _install(), "COPY . .", "RUN npm run build", "",
-            f"FROM {WEB_IMAGE}", "USER root", "RUN apk upgrade --no-cache", "USER 101",
-            "COPY nginx.conf /etc/nginx/conf.d/default.conf",
-            f"COPY --from=build /app/{svc['output']} /usr/share/nginx/html", f"EXPOSE {svc['port']}", ""])
+            f"FROM {WEB_IMAGE}", *WEB_RUNTIME_SETUP,
+            "COPY --chown=nginx:nginx nginx.conf /etc/nginx/conf.d/default.conf",
+            f"COPY --from=build --chown=nginx:nginx /app/{svc['output']} /usr/share/nginx/html", "USER nginx",
+            f"EXPOSE {svc['port']}", ""])
     if svc["language"] == "node":
         lines = [f"FROM {NODE_IMAGE} AS build", "WORKDIR /app", "COPY package*.json ./", _install(), "COPY . .",
                  "RUN npm run build --if-present && npm prune --omit=dev", "",

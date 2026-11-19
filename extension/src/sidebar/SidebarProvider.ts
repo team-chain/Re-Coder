@@ -163,9 +163,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         private readonly _coreManager: CoreManager,
         private readonly _pollingService: PollingService,
         private readonly _openWorkspace?: () => void,
-        //: 확장 호스트 재시작을 살아남는 저장소(context.globalState). 채팅 승인이
-        //: 빈 창에 폴더를 추가하면 VSCode 가 확장을 통째로 재시작하는데, 그때
-        //: 아직 발송 못 한 chat.actionAccepted 를 여기 적어 두고 이어서 보낸다.
+        //: 확장 호스트 재시작을 살아남는 저장소(context.globalState) — 화면 상태 · AI 공급자 선택.
         private readonly _globalState?: vscode.Memento,
         private readonly _secrets?: vscode.SecretStorage,
         private readonly _storageUri?: vscode.Uri,
@@ -237,9 +235,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         if (!saved?.state || saved.scope !== this._uiStateScope() || typeof saved.ts !== 'number' || Date.now() - saved.ts > 30 * 60 * 1000) { return null; }
         return saved.state;
     }
-
-    /** 재시작을 넘겨야 하는 채팅 승인 요청의 globalState 키. */
-    private static readonly PENDING_CHAT_ACTION_KEY = 'recoder.pendingChatAction';
 
     resolveWebviewView(
         webviewView: vscode.WebviewView,
@@ -890,8 +885,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             const detail = error instanceof Error ? error.message : String(error);
             console.error(`[ReCoder] failed ${message.type}: ${detail}`);
             const reply = message.type.startsWith('canvas.') ? 'canvas.error'
-                : message.type.startsWith('code.') ? 'code.error'
-                : message.type.startsWith('chat.') ? 'chat.error' : 'errorMessage';
+                : message.type.startsWith('code.') ? 'code.error' : 'errorMessage';
             this.postMessageToWebview(requestWebview, reply, { ...p, context: message.type, message: detail });
         } finally {
             if (codeRequest) { this._codeRequests--; this.postMessage('ai.activity', this.aiActivity()); }
@@ -1985,36 +1979,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 const health = this._pollingService.getLastHealth();
                 if (health) { this.postMessage('healthUpdate', health); }
                 if (this._state.costSummary) { this.postMessage('costUpdate', this._state.costSummary); }
-                //: 채팅 승인 인계 — 승인 카드가 빈 창에 폴더를 추가하면 확장이
-                //: 재시작돼 chat.actionAccepted 가 유실된다(위 handleChatApproveAction
-                //: 주석 참고). 재시작 전에 globalState 에 적어 둔 요청이 있으면
-                //: **먼저 ready 를 보낸 웹뷰 하나가** 이어받아 발송한다. 키를 먼저
-                //: 지워서 사이드바·큰 화면이 둘 다 ready 를 보내도 한 번만 나간다.
-                const pending = this._globalState?.get<{
-                    instruction: string; targetFolder: string; absolutePath: string;
-                    folderCreated: boolean; ts: number; surface?: string; contextFiles?: Array<{path: string; content: string}>;
-                }>(SidebarProvider.PENDING_CHAT_ACTION_KEY);
-                if (pending) {
-                    const layout = (payload as {layout?:string})?.layout;
-                    // A hidden sidebar must not consume the workspace's approval.
-                    if (layout && pending.surface && layout !== pending.surface) { break; }
-                    void this._globalState?.update(SidebarProvider.PENDING_CHAT_ACTION_KEY, undefined);
-                    //: 오래된 메모(10분 초과)는 버린다 — 사용자가 이미 다른 일을
-                    //: 시작한 창에 옛 요청이 불쑥 끼어드는 것을 막는다.
-                    if (Date.now() - pending.ts <= 10 * 60 * 1000 && pending.instruction) {
-                        this.postMessageToWebview(requestWebview, 'chat.actionAccepted', {
-                            id: `restored-${pending.ts}`,
-                            requestId: Date.now(),
-                            instruction: pending.instruction,
-                            contextFiles: pending.contextFiles ?? [],
-                            targetFolder: pending.targetFolder,
-                            absolutePath: pending.absolutePath,
-                            folderCreated: pending.folderCreated,
-                            addedToWorkspace: true,
-                            restoredAfterReload: true,
-                        });
-                    }
-                }
                 break;
             }
             // ── AWS Credentials / Status (§S-2 — /api/aws/* 라우트) ────────
@@ -2605,38 +2569,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 }
                 break;
             }
-            case 'chat.send': {
-                const p = (payload ?? {}) as {
-                    id?: string;
-                    message?: string;
-                    history?: Array<{ role: 'user' | 'assistant'; content: string }>;
-                    targetFolder?: string;
-                    contextFiles?: Array<{path: string; content: string}>;
-                };
-                await this.handleChat(p.id ?? '', p.message ?? '', p.history ?? [], requestWebview, p.targetFolder, p.contextFiles);
-                break;
-            }
-            case 'chat.approveAction': {
-                //: 승인 카드의 [승인하고 생성]. 여기서만 채팅이 코드 생성으로 넘어간다.
-                const p = (payload ?? {}) as { id?: string; instruction?: string; targetFolder?: string; contextFiles?: Array<{path: string; content: string}> };
-                await this.handleChatApproveAction(p.id ?? '', p.instruction ?? '', p.targetFolder ?? '', requestWebview, p.contextFiles);
-                break;
-            }
-            case 'chat.pickActionFolder': {
-                //: 승인 카드의 [위치 변경]. 워크스페이스 밖 폴더도 고를 수 있고, 그 경우
-                //: 절대경로를 그대로 돌려준다 — 예전 code.pickFolder 처럼 조용히 루트('')로
-                //: 바꾸지 않는다.
-                const p = (payload ?? {}) as { id?: string };
-                const picked = await vscode.window.showOpenDialog({
-                    canSelectFolders: true, canSelectFiles: false, canSelectMany: false,
-                    openLabel: '이 폴더에 생성',
-                    defaultUri: activeProjectUri(),
-                });
-                if (picked && picked[0]) {
-                    this.postMessageToWebview(requestWebview, 'chat.actionFolderPicked', { id: p.id ?? '', folder: this._describeTargetFolder(picked[0].fsPath).display });
-                }
-                break;
-            }
             case 'code.apply': {
                 const { file, content, targetFolder, ackKey, projectRoot } = (payload ?? {}) as { file?: string; content?: string; targetFolder?: string; ackKey?: string; projectRoot?: string };
                 await this.handleCodeApply(file ?? '', content ?? '', targetFolder ?? '', ackKey ?? '', projectRoot || this._generatedRootFor(ackKey));
@@ -3175,49 +3107,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
     }
 
-    /** 오른쪽 대화 패널 — 대화만 수행하며 파일 쓰기/코드 적용은 절대 하지 않는다. */
-    private async handleChat(
-        id: string,
-        message: string,
-        history: Array<{ role: 'user' | 'assistant'; content: string }>,
-        requestWebview?: vscode.Webview,
-        targetFolder = '',
-        contextFiles: Array<{path: string; content: string}> = [],
-    ): Promise<void> {
-        if (!message.trim()) { return; }
-        const workspacePath = activeProjectPath();
-        try {
-            await this.ensureConnection();
-            const result = await this._apiClient.chat(message, history, workspacePath, contextFiles);
-            let action = result.action ?? null;
-            if (action) {
-                if (targetFolder && action.target_source !== 'message') { action = { ...action, target_folder: targetFolder }; }
-                //: 경로를 사람이 읽을 형태로 정리해 카드에 보여준다. 실제 폴더 생성·워크스페이스
-                //: 추가는 승인을 누른 뒤(handleChatApproveAction)에만 한다.
-                const desc = this._describeTargetFolder(action.target_folder || '');
-                action = { ...action, target_folder: desc.display };
-                this.postMessageToWebview(requestWebview, 'chat.response', {
-                    id, reply: result.reply, model: result.model, action,
-                    target: { display: desc.display, absolute: desc.absolute, insideWorkspace: desc.insideWorkspace, exists: desc.exists, workspaceName: desc.workspaceName },
-                });
-                return;
-            }
-            this.postMessageToWebview(requestWebview, 'chat.response', { id, reply: result.reply, model: result.model, action: null });
-        } catch (err) {
-            const error = err instanceof Error ? err.message : String(err);
-            this.postMessageToWebview(requestWebview, 'chat.error', { id, message: error });
-        }
-    }
-
-    /**
-     * 대상 폴더 문자열을 해석한다.
-     *
-     * - ''            → 워크스페이스 루트
-     * - 상대경로       → 워크스페이스 루트 기준
-     * - ~/..., 절대경로 → 그대로. 워크스페이스 안이면 상대경로로 바꿔 표시한다.
-     *
-     * 반환 display 는 웹뷰·Core 에 넘기는 값이다: 안이면 상대경로(''=루트), 밖이면 절대경로.
-     */
     private _describeTargetFolder(input: string): { display: string; absolute: string; insideWorkspace: boolean; exists: boolean; workspaceName: string } {
         const root = activeProjectPath();
         const workspaceName = root ? path.basename(root) : '';
@@ -3239,57 +3128,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         let exists = false;
         try { exists = fs.existsSync(absolute); } catch { /* ignore */ }
         return { display, absolute, insideWorkspace, exists, workspaceName };
-    }
-
-    /**
-     * 승인 카드 [승인하고 생성].
-     *
-     * 1) 대상 폴더가 없으면 만든다.
-     * 2) 워크스페이스 밖이면 워크스페이스 폴더로 추가한다 — 이후 파일 쓰기는 항상
-     *    워크스페이스 안으로만 향한다는 기존 안전장치를 그대로 유지하기 위해서다.
-     * 3) 웹뷰에 chat.actionAccepted 를 보낸다. App 이 Build 화면으로 전환하고 CodeAgent 가
-     *    이 요청을 자기 턴으로 등록해 code.plan 을 보낸다. 결정 카드 → 생성 → diff → 적용은
-     *    전부 기존 흐름이다.
-     */
-    private async handleChatApproveAction(id: string, instruction: string, targetFolder: string, requestWebview?: vscode.Webview, contextFiles: Array<{path: string; content: string}> = []): Promise<void> {
-        //: 회신은 **승인을 누른 웹뷰에만** 보낸다. 사이드바와 큰 작업 화면은 같은 React 앱을
-        //: 각각 띄우고 있어서, 전체에 뿌리면 두 CodeAgent 가 저마다 code.plan 을 보내
-        //: 설계 결정이 두 번 만들어지고 모달이 엉뚱한 창에 뜬다.
-        if (!instruction.trim()) {
-            this.postMessageToWebview(requestWebview, 'chat.actionError', { id, message: '생성할 내용이 비어 있습니다.' });
-            return;
-        }
-        const desc = this._describeTargetFolder(targetFolder);
-        let folderCreated = false;
-        let addedToWorkspace = false;
-        try {
-            if (!desc.exists) {
-                await vscode.workspace.fs.createDirectory(vscode.Uri.file(desc.absolute));
-                folderCreated = true;
-            }
-            if (!desc.insideWorkspace && !isInsideProjectRoot(desc.absolute)) {
-                //: 예전에는 여기서 폴더를 워크스페이스에 추가했고, 빈 창·단일 폴더 창에서는 VS Code 가
-                //: 확장을 재시작해 요청이 유실됐다(인계 메모로 버텼다). 이제 워크스페이스는 건드리지 않고
-                //: 승인한 폴더를 외부 프로젝트로 쓴다 — 재시작이 없으니 요청이 그대로 이어진다.
-                await useExternalProject(desc.absolute);
-                addedToWorkspace = true;
-            }
-        } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            this.postMessageToWebview(requestWebview, 'chat.actionError', { id, message: `폴더 준비 실패: ${msg}` });
-            return;
-        }
-        //: CodeAgent 의 턴 번호(1,2,3…)와 겹치지 않도록 시각 기반 id 를 쓴다.
-        const requestId = Date.now();
-        this.postMessageToWebview(requestWebview, 'chat.actionAccepted', {
-            id, requestId, instruction, contextFiles,
-            targetFolder: desc.display,
-            absolutePath: desc.absolute,
-            folderCreated, addedToWorkspace,
-        });
-        //: 재시작 없이 여기까지 왔으면 인계 메모는 필요 없다 — 지워서
-        //: 다음 webview.ready 가 같은 요청을 중복 발송하지 않게 한다.
-        await this._globalState?.update(SidebarProvider.PENDING_CHAT_ACTION_KEY, undefined);
     }
 
     /** 3.0.2 — 생성 요청 번호(ackKey 의 앞부분)별로 그 결과를 만든 프로젝트 루트. */

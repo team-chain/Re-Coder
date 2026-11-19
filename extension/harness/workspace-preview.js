@@ -80,7 +80,7 @@ if(process.env.HARNESS_SPEC_FILE) {
 api.getHealth = async()=>({status:'ok',uptime:1,ai_connected:true});
 api.getCostSummary = async()=>({total_cost:0,budget_limit:10});
 const polling = {start(fn){fn({status:'ok',version:'fixture',uptime:1});},stop(){},poll:async()=>({status:'ok'}),getLastHealth:()=>({status:'ok'})};
-const saved = process.env.HARNESS_RESTORE ? {'recoder.pendingChatAction':{instruction:'게시판 생성 - 글 작성/목록/삭제',targetFolder:'',absolutePath:workspace,folderCreated:true,ts:Date.now(),surface:'workspace'}} : {};
+const saved = {};
 const memento = {get:key=>saved[key],update:async(key,value)=>{if(value===undefined)delete saved[key];else saved[key]=value;}};
 const secretValues=new Map();
 const secrets={get:async key=>secretValues.get(key),store:async(key,value)=>secretValues.set(key,value),delete:async key=>secretValues.delete(key)};
