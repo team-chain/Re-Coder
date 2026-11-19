@@ -51,12 +51,14 @@ export interface FlowDryRunProps {
   onOpen?: (file: string, line: number) => void;
   /** 재생 간격(ms) — 시험용 */
   intervalMs?: number;
+  /** 처음 고를 진입점(명세 dry run 에서 API 를 눌러 열 때) */
+  initialEntry?: string;
 }
 
 const nodeLabel = (n: FlowNode) => (n.cls ? `${n.cls}.${n.name}` : n.name);
 const shortFile = (f: string) => { const parts = f.split("/"); return parts.length > 2 ? `…/${parts.slice(-2).join("/")}` : f; };
 
-export const FlowDryRun: React.FC<FlowDryRunProps> = ({ graph, changed, removed, affected, findings, findingsPrefix, onOpen, intervalMs = 1100 }) => {
+export const FlowDryRun: React.FC<FlowDryRunProps> = ({ graph, changed, removed, affected, findings, findingsPrefix, onOpen, intervalMs = 1100, initialEntry }) => {
   const wrapRef = useRef<HTMLDivElement>(null);
   const byId = useMemo(() => new Map(graph.nodes.map((n) => [n.id, n])), [graph]);
   const affectedSet = useMemo(() => new Set(affected ?? []), [affected]);
@@ -77,7 +79,8 @@ export const FlowDryRun: React.FC<FlowDryRunProps> = ({ graph, changed, removed,
     return [...entries, ...unreached, ...extra].sort((a, b) => order.indexOf(a.group) - order.indexOf(b.group));
   }, [graph, affectedSet, affected, changed, byId]);
 
-  const [entry, setEntry] = useState<string>(() => choices[0]?.id ?? "");
+  const [entry, setEntry] = useState<string>(() => (initialEntry && choices.some((c) => c.id === initialEntry) ? initialEntry : choices[0]?.id ?? ""));
+  useEffect(() => { if (initialEntry && choices.some((c) => c.id === initialEntry)) setEntry(initialEntry); }, [initialEntry, choices]);
   useEffect(() => { if (!choices.some((c) => c.id === entry)) setEntry(choices[0]?.id ?? ""); }, [choices, entry]);
 
   const result = useMemo(() => (entry ? dryRun(graph, entry, { changed }) : null), [graph, entry, changed]);

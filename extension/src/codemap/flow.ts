@@ -92,7 +92,8 @@ const EFFECT_RULES: EffectRule[] = [
     { kind: 'fs', re: /\bopen\s*\([^)\n]*,\s*['"](w|a|wb|ab|w\+|a\+)['"]/g, detail: m => `파일 쓰기(${m[1]})` },
     { kind: 'fs', re: /\b(shutil\s*\.\s*(rmtree|move|copy\w*)|os\s*\.\s*(remove|unlink|rename|makedirs))\s*\(/g, detail: m => `파일 ${m[2] || m[3]}` },
     // 명령 실행
-    { kind: 'exec', re: /\b(exec|execSync|spawn|spawnSync|execFile|execFileSync)\s*\(/g, detail: m => `명령 실행 ${m[1]}` },
+    //: 정규식의 /…/.exec(문자열) · db.exec 는 명령 실행이 아니다(실사용 2026-11-19: Bearer 토큰 파싱이 "명령 실행" 으로 보였다).
+    { kind: 'exec', re: /(?:(?<![\w$.])|\b(?:child_process|childProcess|cp)\s*\.\s*)(exec|execSync|spawn|spawnSync|execFile|execFileSync)\s*\(/g, detail: m => `명령 실행 ${m[1]}` },
     { kind: 'exec', re: /\b(subprocess\s*\.\s*(run|Popen|call|check_output|check_call)|os\s*\.\s*(system|popen))\s*\(/g, detail: m => `명령 실행 ${m[2] || m[3]}` },
     { kind: 'exec', re: /(?<![\w.])eval\s*\(|\bnew\s+Function\s*\(/g, detail: () => '코드 실행(eval)' },
 ];
@@ -434,6 +435,39 @@ function parseJs(id: string, src: string): FileInfo {
             }
         }
         routes.push({ method: m[2].toUpperCase(), path: m[4], router: m[1], at: m.index, handlers });
+    }
+    // NestJS — @Controller('prefix') class X { @Get(':id') method() {…} }. 메서드 위 데코레이터가 경로, 메서드가 처리 함수.
+    re = /@Controller\s*\(\s*(?:(['"`])([^'"`]*)\1|\{[^}]*?\bpath\s*:\s*(['"`])([^'"`]*)\3[^}]*\})?\s*\)/g;
+    while ((m = re.exec(keep))) {
+        const prefix = m[2] ?? m[4] ?? '';
+        const clsRe = /\bclass\s+([A-Za-z_$][\w$]*)[^{;]{0,400}\{/g;
+        clsRe.lastIndex = re.lastIndex;
+        const cm = clsRe.exec(code);
+        if (!cm) { continue; }
+        const open = clsRe.lastIndex - 1;
+        const close = matchClose(code, open, '{', '}');
+        const methods = defs.filter(d => d.cls === cm[1]).sort((x, y) => x.start - y.start);
+        const dre = /@(Get|Post|Put|Patch|Delete|All|Options|Head)\s*\(\s*(?:(['"`])([^'"`]*)\2)?\s*\)/g;
+        dre.lastIndex = open;
+        let dm: RegExpExecArray | null;
+        while ((dm = dre.exec(keep)) && dm.index < close) {
+            const at = dm.index;
+            const handler = methods.find(d => d.start > at);
+            if (!handler) { continue; }
+            routes.push({ method: dm[1].toUpperCase() === 'ALL' ? 'ANY' : dm[1].toUpperCase(), path: joinRoute(prefix, dm[3] ?? ''), router: '', at, handlers: [{ inline: handler }] });
+        }
+    }
+    // NestJS 의존성 주입 — constructor(private readonly orders: OrdersService) 의 this.orders.x() 를 그 클래스 메서드로 잇는다.
+    re = /\bconstructor\s*\(/g;
+    while ((m = re.exec(code))) {
+        const open = re.lastIndex - 1;
+        const close = matchClose(code, open, '(', ')');
+        const params = code.slice(open + 1, close);
+        const pre = /(?:@\w+\s*\([^()]*\)\s*)*(?:(?:public|private|protected|readonly)\s+)+([A-Za-z_$][\w$]*)\s*\??\s*:\s*([A-Za-z_$][\w$]*)/g;
+        let pm: RegExpExecArray | null;
+        while ((pm = pre.exec(params))) {
+            if (!objects.has(pm[1])) { objects.set(pm[1], { binding: imports.has(pm[2]) ? pm[2] : null, cls: pm[2] }); }
+        }
     }
     // app.use('/api/cart', requireAuth, cartRouter) — 마지막 인자가 붙이는 라우터, 그 앞은 그 경로 전체의 미들웨어
     const mounts: Mount[] = [];

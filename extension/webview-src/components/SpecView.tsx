@@ -8,6 +8,9 @@
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
+import FlowDryRun from "./FlowDryRun";
+import type { FlowGraph } from "./dryRunModel";
+import { apiKey, effectText, runSpec, SpecRun, Verdict } from "./specDryRun";
 
 export type Status = "ok" | "fail" | "missing" | "warn" | "partial" | "unknown";
 export interface SpecCriterion { cond: string; text: string; status: Status; source: "test" | "ai"; api?: string; test?: string; got?: number; note?: string }
@@ -90,6 +93,30 @@ export const SPEC_CSS = `
 .sp-sev.high{color:var(--sp-bad);border-color:rgba(248,81,73,.4)}
 .sp-sev.medium{color:var(--sp-warn);border-color:rgba(210,153,34,.4)}
 .sp-sub{display:block;font-size:12px;color:var(--sp-mute);margin-top:1px}
+.sp-dry-bar{display:flex;align-items:center;gap:16px;padding:12px 24px;border-bottom:1px solid var(--sp-line);font-size:12.5px;color:var(--sp-fg2)}
+.sp-dry-bar b{color:var(--sp-fg);font-weight:600;font-variant-numeric:tabular-nums}
+.sp-dry-bar .st{display:flex;align-items:center;gap:6px}
+.sp-dry-bar .sp-btn{margin-left:auto}
+.sp-dry{width:100%;border-collapse:collapse;font-size:12.5px;table-layout:fixed}
+.sp-dry .wrap{overflow:auto;max-width:100%}
+.sp-dry th{text-align:left;font-weight:500;font-size:12px;color:var(--sp-mute);padding:8px 12px;border-bottom:1px solid var(--sp-line);white-space:nowrap}
+.sp-dry td{padding:7px 12px;border-bottom:1px solid var(--sp-line);vertical-align:middle}
+.sp-dry tr.grp td{padding:14px 12px 6px 24px;font-weight:600;font-size:12px;color:var(--sp-fg2);border-bottom:1px solid var(--sp-line)}
+.sp-dry tr.r{cursor:pointer}.sp-dry tr.r:hover td{background:var(--sp-hover)}
+.sp-dry tr.r[aria-expanded=true] td{background:var(--sp-sel)}
+.sp-dry td.ic{width:28px;padding-left:24px}
+.sp-dry td.m{width:64px;font:600 11px var(--sp-mono);color:var(--sp-fg2)}
+.sp-dry td.p{font:12.5px var(--sp-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sp-dry td.c,.sp-dry td.e{overflow:hidden;text-overflow:ellipsis}
+.sp-dry td.c{color:var(--sp-fg2);white-space:nowrap}
+.sp-dry td.e{color:var(--sp-fg2);white-space:nowrap}
+.sp-dry td.n{color:var(--sp-mute);text-align:right;padding-right:24px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.sp-dry tr.x td{padding:12px 24px 16px;background:rgba(148,178,210,.025)}
+.sp-why{margin:0 0 10px;padding:0;list-style:none;display:grid;gap:4px;font-size:12.5px}
+.sp-why li{display:flex;align-items:center;gap:8px}
+.sp-hops{display:flex;gap:4px;margin:0 0 10px}
+.sp-hops button{all:unset;cursor:pointer;padding:3px 10px;border-radius:6px;border:1px solid var(--sp-line);font-size:12px;color:var(--sp-fg2)}
+.sp-hops button[aria-pressed=true]{color:var(--sp-fg);border-color:rgba(148,178,210,.4);background:var(--sp-sel)}
 .sp-empty{padding:48px 20px;text-align:center;color:var(--sp-mute);font-size:13px}
 .sp-err{margin:12px 16px 0;padding:8px 12px;border-radius:6px;font-size:12px;border:1px solid rgba(248,81,73,.4);color:var(--sp-bad)}
 @media(max-width:760px){.sp-main{grid-template-columns:1fr}.sp-side{border-right:0;border-bottom:1px solid var(--sp-line);display:flex;overflow-x:auto;gap:2px}.sp-item{width:auto;white-space:nowrap}
@@ -203,7 +230,12 @@ const Flow: React.FC<{ spec: Spec; sel: string; onSel: (n: string) => void }> = 
 export const SpecView: React.FC<{ initial?: Spec | null; onStartTask?: (task: SpecTask) => void; onOpenFile?: (file: string, line: number) => void; onOpenStructure?: () => void }> = ({ initial = null, onStartTask, onOpenFile, onOpenStructure }) => {
   const { postMessage, useMessage } = useVSCodeApi();
   const [spec, setSpec] = useState<Spec | null>(initial);
-  const [tab, setTab] = useState<"req" | "design" | "tasks">("req");
+  const [tab, setTab] = useState<"req" | "dry" | "design" | "tasks">("req");
+  const [flow, setFlow] = useState<FlowGraph | null>(null);
+  const [flowState, setFlowState] = useState<"idle" | "loading" | "error">("idle");
+  const [flowError, setFlowError] = useState("");
+  const [openRun, setOpenRun] = useState("");
+  const [hop, setHop] = useState(0);
   const [sel, setSel] = useState<string>("");
   const [node, setNode] = useState<string>("");
   const [openApi, setOpenApi] = useState<string>("");
@@ -218,9 +250,13 @@ export const SpecView: React.FC<{ initial?: Spec | null; onStartTask?: (task: Sp
     postMessage(kind, { requestId: req.current });
   }, [postMessage]);
   useEffect(() => { if (!initial) load(); }, [initial, load]);
+  const runDry = useCallback(() => { setFlowState("loading"); setFlowError(""); postMessage("map.flow", {}); }, [postMessage]);
+  useEffect(() => { if (tab === "dry" && !flow && flowState === "idle") runDry(); }, [tab, flow, flowState, runDry]);
   useMessage(useCallback(({ type, payload }) => {
     const p = (payload ?? {}) as { requestId?: string; spec?: Spec; message?: string; review?: boolean };
-    if (type === "canvas.projectChanged") { load(); return; }
+    if (type === "canvas.projectChanged") { load(); setFlow(null); setFlowState("idle"); return; }
+    if (type === "map.flowResult") { setFlow(payload as FlowGraph); setFlowState("idle"); return; }
+    if (type === "map.flowError") { setFlowState("error"); setFlowError((payload as { message?: string })?.message || "분석하지 못했습니다."); return; }
     if (p.requestId !== req.current) return;
     if (type === "spec.result" && p.spec) { setSpec(p.spec); setReviewing(false); }
     if (type === "spec.error") { setReviewing(false); setError(p.message || "불러오지 못했습니다."); }
@@ -233,6 +269,7 @@ export const SpecView: React.FC<{ initial?: Spec | null; onStartTask?: (task: Sp
   const busiest = useMemo(() => [...(spec?.services ?? [])].sort((a, b) => b.api - a.api)[0]?.name ?? "", [spec]);
   const shownNode = node || busiest;
   const nodeApis = useMemo(() => (spec?.endpoints ?? []).filter(a => a.service === shownNode), [spec, shownNode]);
+  const dry: SpecRun | null = useMemo(() => (spec?.available && flow ? runSpec(spec, flow) : null), [spec, flow]);
 
   if (!spec) return <div className="rc-spec"><style>{SPEC_CSS}</style><div className="sp-empty">{error || "불러오는 중"}</div></div>;
   if (!spec.available) return <div className="rc-spec"><style>{SPEC_CSS}</style><div className="sp-empty">{spec.reason}</div></div>;
@@ -247,6 +284,7 @@ export const SpecView: React.FC<{ initial?: Spec | null; onStartTask?: (task: Sp
         <span className="sp-name" title={spec.project}>{spec.project}</span>
         <div className="sp-tabs" role="tablist" aria-label="명세">
           <button role="tab" aria-selected={tab === "req"} onClick={() => setTab("req")}>요구사항</button>
+          <button role="tab" aria-selected={tab === "dry"} onClick={() => setTab("dry")}>Dry run{dry && dry.counts.fail + dry.counts.warn > 0 && <span className="sp-count">{dry.counts.fail + dry.counts.warn}</span>}</button>
           <button role="tab" aria-selected={tab === "design"} onClick={() => setTab("design")}>설계</button>
           <button role="tab" aria-selected={tab === "tasks"} onClick={() => setTab("tasks")}>작업{tasks.length > 0 && <span className="sp-count">{tasks.length}</span>}</button>
         </div>
@@ -279,6 +317,50 @@ export const SpecView: React.FC<{ initial?: Spec | null; onStartTask?: (task: Sp
             {current.endpoints.map(a => { const id = `${a.service} ${a.method} ${a.path}`; return <ApiRow key={id} a={a} criteria={current.criteria} open={openApi === id} onToggle={() => setOpenApi(openApi === id ? "" : id)} onOpenFile={openFile} />; })}
           </div>
         </section> : <div className="sp-empty">API가 없습니다.</div>}
+      </div>}
+
+      {tab === "dry" && <div>
+        <div className="sp-dry-bar">
+          {dry ? <>
+            <span className="st"><b>API {dry.total}</b></span>
+            <span className="st"><Ic s="ok" />적합 <b>{dry.counts.ok}</b></span>
+            <span className="st"><Ic s="warn" />확인 필요 <b>{dry.counts.warn}</b></span>
+            <span className="st"><Ic s="fail" />불일치 <b>{dry.counts.fail}</b></span>
+          </> : <span>{flowState === "loading" ? "호출 경로를 따라가는 중" : flowState === "error" ? flowError : "명세의 모든 API 를 코드에서 따라갑니다"}</span>}
+          <button type="button" className="sp-btn" aria-disabled={flowState === "loading"} title="코드를 실행하지 않고 호출 그래프만 따라갑니다" onClick={() => { if (flowState !== "loading") runDry(); }}>{flowState === "loading" ? "분석 중" : dry ? "다시 실행" : "Dry run 실행"}</button>
+        </div>
+        {dry && <table className="sp-dry">
+          <colgroup><col style={{ width: 52 }} /><col style={{ width: 76 }} /><col /><col style={{ width: "22%" }} /><col style={{ width: "24%" }} /><col style={{ width: 76 }} /></colgroup>
+          <thead><tr><th /><th>Method</th><th>경로</th><th>지나는 서비스</th><th>닿는 곳</th><th style={{ textAlign: "right", paddingRight: 24 }}>함수</th></tr></thead>
+          <tbody>
+            {features.map(f => <React.Fragment key={f.key}>
+              <tr className="grp"><td colSpan={6}>{f.label}</td></tr>
+              {f.endpoints.map(a => {
+                const run = dry.runs[apiKey(a)];
+                if (!run) return null;
+                const open = openRun === run.key;
+                const shown = run.hops[Math.min(hop, run.hops.length - 1)];
+                const v: Record<Verdict, Status> = { ok: "ok", warn: "warn", fail: "fail" };
+                return <React.Fragment key={run.key}>
+                  <tr className="r" aria-expanded={open} onClick={() => { setOpenRun(open ? "" : run.key); setHop(run.hops.length > 1 ? 1 : 0); }}>
+                    <td className="ic"><Ic s={v[run.verdict]} /></td>
+                    <td className="m">{a.method}</td>
+                    <td className="p" title={a.path}>{a.path}</td>
+                    <td className="c">{run.hops.map(h => h.service).join(" → ")}</td>
+                    <td className="e">{effectText(run.effects)}</td>
+                    <td className="n">{run.functions || "—"}</td>
+                  </tr>
+                  {open && <tr className="x"><td colSpan={6}>
+                    {run.reasons.length > 0 && <ul className="sp-why">{run.reasons.map((r, i) => <li key={i}><Ic s={run.verdict === "fail" ? "fail" : "warn"} size={12} />{r}</li>)}</ul>}
+                    {run.hops.length > 1 && <div className="sp-hops">{run.hops.map((h, i) => <button key={i} type="button" aria-pressed={i === Math.min(hop, run.hops.length - 1)} onClick={() => setHop(i)}>{h.service} · {h.api.method} {h.api.path}</button>)}</div>}
+                    {flow && shown.entry ? <div className="wrap"><FlowDryRun graph={flow} initialEntry={shown.entry} onOpen={openFile} /></div> : <p className="sp-note">이 단계의 코드를 찾지 못해 흐름을 그릴 수 없습니다.</p>}
+                  </td></tr>}
+                </React.Fragment>;
+              })}
+            </React.Fragment>)}
+          </tbody>
+        </table>}
+        {dry && <p className="sp-note" style={{ padding: "10px 24px 14px", margin: 0 }}>코드를 실행하지 않고 호출 그래프를 따라간 결과입니다. 실제 실행 순서 · 값과 다를 수 있습니다.</p>}
       </div>}
 
       {tab === "design" && <div className="sp-pad">

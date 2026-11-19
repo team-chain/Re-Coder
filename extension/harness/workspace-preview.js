@@ -11,9 +11,12 @@ Module._resolveFilename = function(name, ...args) {
 const vscode = require('vscode');
 const { SidebarProvider } = require('../out/sidebar/SidebarProvider');
 const { ApiClient } = require('../out/core/ApiClient');
-const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'recoder-workspace-preview-'));
-fs.writeFileSync(path.join(workspace, 'index.html'), '<script src="app.js"></script>');
-fs.writeFileSync(path.join(workspace, 'app.js'), 'function render() { loadPosts(); }\nfunction loadPosts() { return []; }\nrender();');
+//: HARNESS_WORKSPACE — 실제 프로젝트 폴더로 화면을 확인할 때(읽기만 한다).
+const workspace = process.env.HARNESS_WORKSPACE || fs.mkdtempSync(path.join(os.tmpdir(), 'recoder-workspace-preview-'));
+if (!process.env.HARNESS_WORKSPACE) {
+  fs.writeFileSync(path.join(workspace, 'index.html'), '<script src="app.js"></script>');
+  fs.writeFileSync(path.join(workspace, 'app.js'), 'function render() { loadPosts(); }\nfunction loadPosts() { return []; }\nrender();');
+}
 vscode.workspace.workspaceFolders = [{uri:vscode.Uri.file(workspace)}];
 const core = {getPort:()=>Number(process.env.HARNESS_PORT || 18795), getSessionToken:()=>'harness-token-123', ensureRunning:async()=>true, refreshToken:async()=>true,coreInstanceKey:()=> 'fixture-core', getStoredAwsConnection:async()=>null, getAwsRoleArn:async()=>'', isBrowserAwsLogin:()=>false, getManagedAwsConnection:async()=>undefined};
 const api = new ApiClient(core);
