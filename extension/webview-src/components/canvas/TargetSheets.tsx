@@ -8,7 +8,7 @@
 import React from "react";
 import { Box, Button, Collapse, KvRow, Section, SheetHead, AWS_REGIONS, regionName } from "../ui/kit";
 import { EcsProtection, monthlyExtra, type Protection } from "../EcsProtection";
-import { Logo } from "./Scene";
+import { Logo } from "./Logo";
 import type { Config } from "./ApprovalCard";
 
 type Field = "ecs_service" | "tag" | "aws_region" | "dir";

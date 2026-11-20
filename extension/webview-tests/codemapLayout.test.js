@@ -94,6 +94,4 @@ test('스타일 파일은 고립으로 표시하지 않는다 — import/link/@i
  for(const id of ['vite.config.js','tailwind.config.js']){assert.ok(!n(id).flags.includes('orphan'),id);assert.ok(n(id).flags.includes('config'),id);}
  const {projSub}=require('../out/webview-test/components/CodeMap.js');
  assert.equal(projSub(n('legacy/unused.css')),'스타일 파일');assert.equal(projSub(n('src/app.css')),'1곳에서 사용하는 스타일');
- const {flagText}=require('../out/webview-test/components/canvas/model.js');
- assert.equal(flagText(n('legacy/unused.css').flags),'스타일');assert.equal(flagText(['orphan']),'고립');
 });

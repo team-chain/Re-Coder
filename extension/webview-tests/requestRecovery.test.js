@@ -47,16 +47,3 @@ test('exceptions before code API calls still return a correlated error to the re
   assert.equal(messages.at(-1).payload.requestId,74);assert.match(messages.at(-1).payload.message,/scope error/);
 });
 
-test('canvas requests return real source analysis and missing workspace errors to their own view', async()=>{
-  const messages=[];
-  const provider=new SidebarProvider(vscode.Uri.file(__dirname),{}, {}, {});
-  const view={postMessage:async m=>{messages.push(m);return true;}};
-  vscode.workspace.workspaceFolders=[{uri:vscode.Uri.file(path.join(__dirname,'../harness'))}];
-  await provider.handleMessage({type:'canvas.graph',payload:{requestId:'graph-1'}},view);
-  assert.equal(messages.at(-1).type,'canvas.graphResult');assert.equal(messages.at(-1).payload.requestId,'graph-1');
-  assert.ok(messages.at(-1).payload.graph.nodes.some(n=>n.name==='vscode-mock.js'));
-  vscode.workspace.workspaceFolders=[];
-  await provider.handleMessage({type:'canvas.graph',payload:{requestId:'graph-2'}},view);
-  assert.equal(messages.at(-1).type,'canvas.error');assert.equal(messages.at(-1).payload.requestId,'graph-2');
-  provider.detachWorkspacePanel(view);
-});

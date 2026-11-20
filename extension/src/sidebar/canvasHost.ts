@@ -6,7 +6,6 @@ import { createHash, randomUUID } from 'crypto';
 import { ApiClient } from '../core/ApiClient';
 import * as fs from 'fs';
 import { ensurePortableTool,toolEnvironment } from '../runtime/portableTools';
-import { AnalysisJob } from '../codemap/analysisJob';
 import { collectStaticFiles, describeExcludedFiles, pickStaticDir } from '../deploy/staticSite';
 import { buildFailureSummary, buildFrontend, detectFrontendProject, needsBuild, FrontendProject, BuildOutcome } from '../deploy/frontendBuild';
 import {ManagedContainerReference} from '../security/managedContainerContract';
@@ -208,8 +207,7 @@ export function validateConfig(raw: Record<string, unknown>): CanvasConfig {
 
 /** Per-webview plans bind explicit approval to a frozen request; existing deploy handlers execute it. */
 export class CanvasHost {
-    private analysis = new AnalysisJob();
-    dispose(): void { this.analysis.cancel(); }
+    dispose(): void { /* 남은 작업 없음 */ }
     private plans = new Map<string, Plan>();
     private executing = false;
     private prepareGeneration = 0;
@@ -225,25 +223,14 @@ export class CanvasHost {
         const p = (raw ?? {}) as Record<string, unknown>, requestId = String(p.requestId || '');
         const workspace = activeProjectPath();
         try {
-            if (type === 'canvas.graph.cancel') { this.analysis.cancel(); return; }
             if (type === 'canvas.fix') {
                 if (!workspace) throw new Error('프로젝트 폴더를 먼저 여세요.');
                 const findings = Array.isArray(p.findings) ? p.findings.slice(0,20).map(f => {
                     const item=f as Record<string,unknown>;
                     return `${String(item.tool||'')} ${String(item.location||'')}: ${String(item.fix||'보안 문제 수정')}`.slice(0,500);
                 }).join('\n') : '';
-                send('chat.actionAccepted', { requestId:Date.now(), instruction:`배포 보안 검사에서 발견한 다음 항목을 해결하는 최소 수정안을 제안해 주세요. 기존 기능을 보존하고 시크릿 원문을 답변에 포함하지 마세요.\n${findings}`, targetFolder:'' });
+                send('code.prefill', { instruction:`배포 보안 검사에서 발견한 다음 항목을 해결하는 최소 수정안을 제안해 주세요. 기존 기능을 보존하고 시크릿 원문을 답변에 포함하지 마세요.\n${findings}` });
                 return;
-            }
-            if (type === 'canvas.graph') {
-                if (!workspace) throw new Error('분석할 프로젝트 폴더가 없습니다.');
-                const id = String(p.file || '');
-                send('canvas.graphStarted', { requestId });
-                if (!id) { send('canvas.graphResult', { requestId, file: '', graph: await this.analysis.run(workspace) }); return; }
-                const root = fs.realpathSync(workspace), file = fs.realpathSync(path.resolve(root,id));
-                const relative = path.relative(root,file);
-                if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error('프로젝트 안의 파일만 분석할 수 있습니다.');
-                send('canvas.graphResult', { requestId, file:id, graph:await this.analysis.run(workspace,file) }); return;
             }
             if (type === 'canvas.ecs.stop') {
                 //: ECS 서비스를 0개로 — 배포 후 켜 둔 Fargate 태스크는 계속 과금된다(검토: 멈출 버튼이 없었다).
@@ -259,14 +246,14 @@ export class CanvasHost {
             if (type === 'canvas.selectProject') {
                 if (this.executing || this.committing || this.connecting) throw new Error('진행 중인 배포·Git 작업이 끝난 뒤 프로젝트를 바꾸세요.');
                 if (!await selectActiveProject(String(p.path || ''))) throw new Error('워크스페이스에 열린 폴더만 선택할 수 있습니다.');
-                this.plans.clear(); this.commitPreview = undefined; this.analysis.cancel();
+                this.plans.clear(); this.commitPreview = undefined;
                 send('canvas.projectChanged', { requestId, workspace: activeProjectPath(), projects: projectFolders() });
                 return;
             }
             if (type === 'canvas.pickProject') {
                 if (this.executing || this.committing || this.connecting) throw new Error('진행 중인 배포·Git 작업이 끝난 뒤 프로젝트를 바꾸세요.');
                 const outcome = await pickProjectFolder();
-                if (outcome === 'selected') { this.plans.clear(); this.commitPreview = undefined; this.analysis.cancel(); }
+                if (outcome === 'selected') { this.plans.clear(); this.commitPreview = undefined; }
                 // 'added' 는 워크스페이스 변경 이벤트가 새 폴더를 현재 프로젝트로 알린다(확장이 재시작될 수도 있다).
                 send('canvas.projectChanged', { requestId, workspace: activeProjectPath(), projects: projectFolders(), outcome });
                 return;

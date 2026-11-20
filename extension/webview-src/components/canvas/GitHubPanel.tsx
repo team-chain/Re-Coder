@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Checkbox } from "../Check";
 import { Box, Button, Collapse, Line, Section, Segmented, SheetHead } from "../ui/kit";
 import { Icon } from "../ui/icons";
-import { Logo } from "./Scene";
+import { Logo } from "./Logo";
 
 /** `git status --porcelain` 두 글자 → 사람이 읽는 말. */
 export function gitStatusText(status: string): string {

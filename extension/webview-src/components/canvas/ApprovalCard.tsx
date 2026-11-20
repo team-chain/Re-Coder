@@ -5,7 +5,7 @@ import { TrustCheck, TrustReport } from "../TrustCheck";
 import { Box, Button, Collapse, Kit, KvRow, Line, Section, SheetHead, regionName } from "../ui/kit";
 import { Icon } from "../ui/icons";
 import { DEFAULT_PROTECTION, monthlyExtra } from "../EcsProtection";
-import { Logo } from "./Scene";
+import { Logo } from "./Logo";
 export interface Config { target: "ecs" | "s3" | "github"; image_name: string; tag: string; aws_region: string; ecs_cluster: string; ecs_service: string; task_family: string; container_port: number; cpu: string; memory: string; environment: string; dir: string; env_vars?: Record<string,string>; secret_refs?: Record<string,string>; target_group_arn?: string; cloudfront_domain?: string; assign_public_ip?: boolean; subnet_ids?: string[]; security_group_ids?: string[];
   /** 2.0.25 보호·운영 */
   shield?: boolean; shield_level?: "loose" | "normal" | "strict"; alerts?: boolean; alert_email?: string;

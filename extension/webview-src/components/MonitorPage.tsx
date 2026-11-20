@@ -9,7 +9,7 @@ import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import { Button, Kit, Line } from "./ui/kit";
 import { Icon } from "./ui/icons";
 import { AreaChart } from "./shell/parts";
-import { Logo } from "./canvas/Scene";
+import { Logo } from "./canvas/Logo";
 import {
   AlertView, MonitorCurrentView, MonitorData, Offer, TimelineItem, clock, hero, kindIcon, minutesAgo, pendingAlerts, revOf,
   sourceText, timeline,

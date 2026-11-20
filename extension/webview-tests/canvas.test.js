@@ -2,8 +2,8 @@ const test=require('node:test');
 const assert=require('node:assert/strict');
 const React=require('react');
 const {renderToStaticMarkup}=require('react-dom/server');
-const {overview,deploymentScene,dropTargetAt,analysisScene,available,colors}=require('../out/webview-test/components/canvas/model.js');
-const {Scene}=require('../out/webview-test/components/canvas/Scene.js');
+const {overview,deploymentScene,available,colors}=require('../out/webview-test/components/canvas/model.js');
+const {FlatBoard}=require('../out/webview-test/components/canvas/FlatBoard.js');
 const {ApprovalCard}=require('../out/webview-test/components/canvas/ApprovalCard.js');
 const snapshot=(extra={})=>({workspace:'/project',projectName:'real-app',aws:{ready:false,region:'',account:''},git:{repository:'org/repo',branch:'main'},deployment:{running:false,stage:'idle'},resource:null,topology:null,scan:null,s3:null,warnings:[],...extra});
 const config={target:'ecs',image_name:'app',tag:'v1',aws_region:'us-east-1',ecs_cluster:'custom-cluster',ecs_service:'custom-service',task_family:'task',container_port:8000,cpu:'256',memory:'512',environment:'staging',dir:''};
@@ -44,9 +44,10 @@ test('AWS disconnected targets are visible, locked and unavailable; Docker and G
  const s=snapshot(),scene=overview(s,'',false);
  for(const target of ['ecs','s3']) {assert.equal(available(target,s),false);assert.equal(scene.nodes.find(n=>n.target===target).locked,true);}
  for(const target of ['docker','github']) assert.equal(available(target,s),true);
- const html=renderToStaticMarkup(React.createElement(Scene,{...scene,busy:false,onActivate(){},onDrop(){},force2D:true}));
- assert.ok(html.includes('AWS 연결 필요'));assert.ok(html.includes('data-canvas-target="ecs"'));
- assert.ok(html.includes('2D'));assert.ok(!html.includes('https://'));
+ const spec={available:true,services:[{name:'web',kind:'web',port:3000,depends_on:[],databases:[]}],databases:[],deploy:{status:'success',services:{web:'ok'},failures:[],url:'',at:'',id:'d'}};
+ const html=renderToStaticMarkup(React.createElement(FlatBoard,{nodes:deploymentScene(s,'',false).nodes,busy:false,onActivate(){},onDrop(){},initialSpec:spec}));
+ assert.ok(html.includes('AWS 연결 필요'));assert.ok(html.includes('aria-label="AWS ECS — AWS 연결 필요"'));
+ assert.ok(html.includes('draggable="true"'),'프로젝트 카드를 끌 수 없다');assert.ok(html.includes('실행 중'));assert.ok(!html.includes('https://'));
 });
 test('connected canvas names and task identities come from the snapshot, not reference illustrations',()=>{
  const s=snapshot({aws:{ready:true,region:'eu-west-1',account:'123'},resource:{cluster:'custom-cluster',service:'custom-service'},s3:{bucket:'my-real-bucket',region:'eu-west-1'},topology:{service:'custom-service',running:1,desired:3,tasks:[{id:'real-task-id',status:'RUNNING',health:'HEALTHY'}]}});
@@ -70,24 +71,6 @@ test('drag-first overview keeps all destinations and reveals security or full hi
  assert.ok(blocked.edges.some(e=>e.to==='ecs'));
 });
 
-test('drag hit testing accepts the platform and respects empty space and locked destinations',()=>{
- const {nodes}=deploymentScene(snapshot(),'',false);
- // The platform extends below the clickable foreignObject, so DOM hit tests missed it.
- assert.equal(dropTargetAt(nodes,710,570)?.target,'ecs');
- assert.equal(dropTargetAt(nodes,710,570)?.locked,true);
- assert.equal(dropTargetAt(nodes,750,255)?.target,'github');
- assert.equal(dropTargetAt(nodes,330,535)?.target,'docker');
- assert.equal(dropTargetAt(nodes,450,370),undefined);
- assert.equal(dropTargetAt(nodes,180,245),undefined);
-});
-test('large graph folders preserve all files, search and actual graph edges',()=>{
- const nodes=Array.from({length:100},(_,i)=>({id:`src/f${i}.ts`,name:`f${i}`,flags:i===0?['orphan']:i===1?['overloaded']:[],in_degree:0,out_degree:1}));
- const graph={kind:'project',nodes,edges:[{from:nodes[0].id,to:nodes[1].id}],findings:[]};
- const grouped=analysisScene(graph,null,'');assert.equal(grouped.grouped,true);assert.equal(grouped.nodes.length,1);
- const expanded=analysisScene(graph,'src','');assert.equal(expanded.nodes.length,100);assert.equal(expanded.edges.length,1);
- assert.equal(expanded.nodes[0].color,colors.bad);assert.equal(expanded.nodes[1].color,colors.warn);
- assert.equal(analysisScene(graph,null,'f99').nodes[0].id,'src/f99.ts');
-});
 test('approval discloses exact target, rollback and unknown budget; cross-region requires separate acknowledgement',()=>{
  const plan={id:'p',config,projectName:'my-app',repository:'org/repo',branch:'main',commit:'sha',dirty:true,account:'123',coreRegion:'ap-northeast-2',preflight:{blocked:false},targetState:{exists:true,task_definition:'td:previous',images:[{image:'app:v0',digest:'sha256:previous'}],budget:null,warnings:[]}};
  const html=renderToStaticMarkup(React.createElement(ApprovalCard,{plan,rollback:'td:previous',onApprove(){},onCancel(){},onFix(){}}));
@@ -212,7 +195,7 @@ test('S3 approval selects the build directory and binds the actual filtered file
 
 test('S3·ECS 노드는 AWS 공식 아키텍처 아이콘, Docker·GitHub·Discord 는 상표 모양을 쓴다',()=>{
  const React=require('react');const {renderToStaticMarkup}=require('react-dom/server');
- const {Logo}=require('../out/webview-test/components/canvas/Scene.js');
+ const {Logo}=require('../out/webview-test/components/canvas/Logo.js');
  const s3=renderToStaticMarkup(React.createElement(Logo,{kind:'s3'})),ecs=renderToStaticMarkup(React.createElement(Logo,{kind:'ecs'}));
  assert.match(s3,/aria-label="Amazon S3"/);assert.match(s3,/fill="#7aa116"/);assert.match(s3,/viewBox="0 0 64 64"/);
  assert.match(ecs,/aria-label="Amazon ECS"/);assert.match(ecs,/fill="#ed7100"/);

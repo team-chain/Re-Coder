@@ -37,7 +37,7 @@ function mount(){
  const render=()=>{cursor=0;tree=exports.default({onOpenDocker(){}});effects.splice(0).forEach(fn=>fn());};
  function nodes(n=tree){return React.isValidElement(n)?[n,...React.Children.toArray(n.props.children).flatMap(nodes)]:[];}
  render();
- return {messages,emit(type,payload){receive({type,payload});render();},panel(){nodes().find(n=>n.type.name==='Scene').props.onActivate({id:'discord'});render();return nodes().find(n=>n.type.name==='DiscordPanel').props;},events:()=>messages.filter(m=>m.type==='canvas.discord.event')};
+ return {messages,emit(type,payload){receive({type,payload});render();},panel(){nodes().find(n=>n.type.name==='FlatBoard').props.onActivate({id:'discord'});render();return nodes().find(n=>n.type.name==='DiscordPanel').props;},events:()=>messages.filter(m=>m.type==='canvas.discord.event')};
 }
 const status={mode:'oauth',project_id:'a',canvas_project_id:'a',active_channel_id:'channel',authenticated:true};
 function snapshot(ui,workspace='/project-a'){

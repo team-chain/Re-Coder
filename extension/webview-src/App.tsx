@@ -555,6 +555,11 @@ const App: React.FC = () => {
         //: 빠른 이동 "흐름 dry run"/"아키텍처" — 지도 화면 안의 모드까지 맞춘다.
         if (v === "map" && (p.mapMode === "flow" || p.mapMode === "project")) requestMapMode(p.mapMode);
       }
+      if (type === "code.prefill" && isWorkspacePanel) {
+        //: 배포 보안 검사의 "AI 수정안 만들기" — 코드 생성 입력창에 요청을 채워 두고 그 화면으로 간다(보내기는 사람이).
+        const text = (payload as { instruction?: string })?.instruction ?? "";
+        if (text) { setPendingPrompt(text); setView("code"); }
+      }
       if (type === "code.setTargetFolder" && isWorkspacePanel) {
         //: 탐색기 "여기에 코드 생성" — 코드 화면으로 옮기고 그 폴더를 대상으로 둔다.
         setPendingTargetFolder((payload as { folder?: string })?.folder ?? "");

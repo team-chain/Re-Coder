@@ -2,8 +2,6 @@ import type { EcsProgressStatus } from "../EcsDeploymentProgress";
 
 export type Target = "docker" | "github" | "ecs" | "s3";
 export interface Finding { node: string; kind: string; severity: string; title: string; detail: string; fix: string }
-export interface AnalysisNode { id: string; name: string; module?: string; layer?: string; cls?: string | null; flags: string[]; in_degree: number; out_degree: number }
-export interface AnalysisGraph { kind: "project" | "file"; root?: string; path?: string; name?: string; files_scanned?: number; functions_scanned?: number; nodes: AnalysisNode[]; edges: Array<{ from: string; to: string }>; findings: Finding[] }
 export interface Scan { blocked: boolean; gaps: string[]; tools: Array<{ tool: string; state: string; detail: string }>; findings: Array<{ tool: string; severity: string; rule: string; title: string; location: string; fix: string }> }
 export interface Snapshot {
   workspace: string; projectName: string;
@@ -77,38 +75,4 @@ export function deploymentScene(snapshot: Snapshot | null, discord: string, secu
   return { nodes, edges: scene.edges.filter(e => ids.has(e.from) && ids.has(e.to)) };
 }
 
-/** Hit the whole visible target, including its platform, independent of DOM pointer capture. */
-export function dropTargetAt(nodes: SceneNode[], x: number, y: number): SceneNode | undefined {
-  return nodes.filter(n => n.target && Math.abs(x - n.x) <= 90 && y >= n.y - 150 && y <= n.y + 65)
-    .sort((a,b) => Math.hypot(x-a.x,y-a.y+35) - Math.hypot(x-b.x,y-b.y+35))[0];
-}
 
-/** 분석 표시 — 스타일 파일은 '고립' 대신 중립 '스타일'(연결을 못 찾은 표시는 따로 붙이지 않는다). */
-export function flagText(flags: string[]): string {
-  return flags.filter(f => f !== "style_unlinked")
-    .map(f => f === "orphan" ? "고립" : f === "overloaded" ? "과부하" : f === "style" ? "스타일" : f === "config" ? "도구 설정" : f).join(" · ");
-}
-
-/** Folder aggregation is lossless: every node remains reachable through a folder or search. */
-export function analysisScene(graph: AnalysisGraph, folder: string | null, search: string): { nodes: SceneNode[]; edges: SceneEdge[]; grouped: boolean } {
-  const term = search.trim().toLocaleLowerCase();
-  const grouped = graph.kind === "project" && graph.nodes.length > 45 && folder === null && !term;
-  const key = (n: AnalysisNode) => n.id.includes("/") ? n.id.split("/")[0] : ".";
-  let items = graph.nodes.filter(n => (!term || `${n.id} ${n.name}`.toLocaleLowerCase().includes(term)) && (folder === null || key(n) === folder));
-  const mapping = new Map<string, string>();
-  if (grouped) {
-    const groups = new Map<string, AnalysisNode[]>();
-    for (const n of items) { const k = key(n); mapping.set(n.id, k); groups.set(k, [...(groups.get(k) || []), n]); }
-    items = [...groups].map(([id, members]) => ({ id, name: `${id} /`, module: `${members.length}개 파일`, flags: [...new Set(members.flatMap(n => n.flags))], in_degree: 0, out_degree: 0 }));
-  }
-  const cols = Math.min(5, Math.max(2, Math.ceil(Math.sqrt(items.length))));
-  const nodes = items.map((n, i): SceneNode => ({ id: n.id, name: n.name, subtitle: n.module || (graph.kind === "file" ? "함수" : n.id), badge: grouped ? n.module || "" : `참조 ${n.in_degree} · ${flagText(n.flags) || "분석됨"}`, flags: n.flags, kind: grouped ? "folder" : graph.kind === "file" ? "fn" : "file", color: n.flags.includes("orphan") ? colors.bad : n.flags.includes("overloaded") ? colors.warn : n.flags.includes("style") || n.flags.includes("config") ? colors.style : graph.kind === "file" ? colors.fn : colors.file, x: 130 + (i % cols) * (940 / cols), y: 180 + Math.floor(i / cols) * 195 + (i % 2) * 22 }));
-  const ids = new Set(nodes.map(n => n.id));
-  const seen = new Set<string>();
-  const edges = graph.edges.flatMap(e => {
-    const from = mapping.get(e.from) || e.from, to = mapping.get(e.to) || e.to, k = `${from}|${to}`;
-    if (from === to || !ids.has(from) || !ids.has(to) || seen.has(k)) return [];
-    seen.add(k); return [{ from, to, color: colors.file }];
-  });
-  return { nodes, edges, grouped };
-}
