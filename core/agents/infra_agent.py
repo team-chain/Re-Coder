@@ -712,6 +712,8 @@ class InfraAgent:
                     "class": result.get("Class", ""),
                     "type": result.get("Type", ""),
                     "pkg_path": vuln.get("PkgPath", ""),
+                    #: 화면이 "무슨 일이 생길 수 있는지"를 고를 때 쓴다(CWE-400 → 서버 멈춤 등).
+                    "cwe": [c for c in (vuln.get("CweIDs") or []) if isinstance(c, str)][:5],
                 }
                 if severity == "CRITICAL":
                     critical.append(entry)

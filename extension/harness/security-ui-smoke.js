@@ -29,7 +29,7 @@ async function main(){
   const visibleText=()=>evaluate("document.body?.innerText||''");
   await until(async()=> (await visibleText()).includes('Security'),'navigation');await click('Security');
   await until(async()=> (await visibleText()).includes('보안 검사 시작'),'security dashboard');await click('보안 검사 시작');
-  await until(async()=> (await visibleText()).includes('확인할 보안 항목 2개'),'existing checks finish');
+  await until(async()=> (await visibleText()).includes('확인할 항목이 있어요'),'existing checks finish');
   const sent=await evaluate('window.uiRequests');
   assert.deepEqual(sent.filter(x=>x.type==='runScan').map(x=>x.scanType).sort(),['gitleaks','hadolint','trivy']);
   assert.ok(sent.some(x=>x.type==='security.check'&&x.kind==='code'));assert.ok(sent.some(x=>x.type==='security.check'&&x.kind==='policy'));
@@ -43,14 +43,14 @@ async function main(){
   await click('레드팀 테스트');await until(async()=> (await visibleText()).includes('내 PC의 테스트 앱'),'red team options');
   assert.equal((await evaluate('window.uiRequests')).some(x=>x.type==='security.redteam'),false,'opening the red-team entry must not query or provision cloud resources');
   await click('내 PC의 테스트 앱');await until(async()=> (await visibleText()).includes('레드팀 테스트 시작'),'local panel');await click('레드팀 테스트 시작');const startCard=async()=>{await until(()=>evaluate(`!!document.querySelector('[data-testid=redteam-start] .rc-rt-opt')`),'start card');await evaluate(`document.querySelector('[data-testid=redteam-start] label.rc-ck').click();true`);await click('시작');};await startCard();
-  await until(async()=> (await visibleText()).includes('UI 예시 · 검사 환경 삭제 완료'),'fixture report');await click('닫기');
+  await until(async()=> (await visibleText()).includes('UI 예시 · 검사 환경 삭제 완료'),'fixture report');await click('공격 테스트 닫기');
   const screen=await cmd('Page.captureScreenshot',{format:'png'});await fs.writeFile(path.join(root,'security-3.0.7-ui.png'),Buffer.from(screen.data,'base64'));
   console.log('PASS: red-team execution is explicit, independent, and renders fixture evidence');
   await evaluate(`window.dispatchEvent(new MessageEvent('message',{data:{type:'canvas.projectChanged',payload:{workspace:'next-project'}}}));true`);
-  await until(async()=> (await visibleText()).includes('아직 확인하지 못한 검사가 있습니다'),'project state reset');
+  await until(async()=> (await visibleText()).includes('검사 전'),'project state reset');
   const oldScan=sent.find(x=>x.type==='runScan');
   await evaluate(`window.dispatchEvent(new MessageEvent('message',{data:{type:'scanResult',payload:${JSON.stringify({scan_type:oldScan.scanType,requestId:oldScan.requestId,status:'ok',findings:[{message:'OLD PROJECT MUST NOT APPEAR'}],critical_count:99})}}}));true`);
-  assert.ok((await visibleText()).includes('아직 확인하지 못한 검사가 있습니다'));
+  assert.ok((await visibleText()).includes('검사 전'));assert.ok(!(await visibleText()).includes('OLD PROJECT'));
   await cmd('Emulation.setDeviceMetricsOverride',{width:700,height:1000,deviceScaleFactor:1,mobile:false});
   assert.equal(await evaluate('document.documentElement.scrollWidth<=window.innerWidth'),true,'narrow layout must not overflow');
   assert.deepEqual(errors,[]);console.log('PASS: old project results ignored; 700px layout fits; no runtime exceptions');

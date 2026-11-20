@@ -31,6 +31,29 @@ if (process.env.HARNESS_SECURITY === '1') {
   let sampleRun=null;
   let redteamPolls=0;
   require('../out/security/redTeamHost').RedTeamHost.prototype.handle=async action=>{
+    //: HARNESS_REDTEAM_PROGRESS=2 — 화면 확인용 진행 예시. 상태를 물을 때마다 요청이 몇 개씩 늘어난다(실제 검사 아님).
+    if(process.env.HARNESS_REDTEAM_PROGRESS==='2'){
+      const paths=[['GET','/'],['GET','/api/products?q=test'],['GET',"/api/products?q=' OR 1=1--"],['GET','/api/products?q=%27%20AND%201%3D2--'],['POST','/api/auth/login'],['POST','/api/auth/login'],['GET','/api/orders/1025'],['GET','/api/admin/orders'],['GET','/api/users/me'],['GET','/../../etc/passwd']];
+      const statuses=[200,200,400,400,401,401,403,403,401,404];
+      const titles=['앱 경로 탐색','상품 검색 입력 · DB 공격 시도','로그인 우회 시도','남의 주문 열어 보기','관리자 화면 접근'];
+      if(action==='localStart'){redteamPolls=0;sampleRun={session:'ui-demo',target:'http://localhost:3000/',createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),phase:'running',step:'UI 예시 · 공격 테스트 진행 중',isolationVerified:true,httpEvents:[],tasks:titles.map((t,i)=>({id:String(i+1),title:t,status:i===0?'running':'created',result:''}))};}
+      if(action==='localStatus'&&sampleRun&&sampleRun.phase==='running'){
+        redteamPolls++;const n=sampleRun.httpEvents.length;
+        for(let k=0;k<3;k++){const j=(n+k)%paths.length;sampleRun.httpEvents.push({id:n+k+1,method:paths[j][0],path:paths[j][1],status:statuses[j],durationMs:20+((n+k)*17)%90,blocked:false});}
+        const cur=Math.min(titles.length-1,Math.floor(redteamPolls/2));sampleRun.tasks.forEach((t,i)=>{t.status=i<cur?'finished':i===cur?'running':'created';});
+        sampleRun.updatedAt=new Date().toISOString();
+        if(redteamPolls>=10){sampleRun.phase='removed';sampleRun.outcome='finished';sampleRun.step='UI 예시 · 검사 환경 삭제 완료';sampleRun.tasks.forEach(t=>t.status='finished');
+          sampleRun.tasks[4].result='```recoder-report\n'+JSON.stringify({schema:1,checks:[
+            {kind:'discovery',status:'tested',reason:'UI 예시',requests:['GET /']},
+            {kind:'sql_injection',status:'tested',reason:'UI 예시',requests:['GET /api/products?q=test','GET /api/products?q=1%27%20OR%201%3D1--','GET /api/products?q=1%27%20AND%201%3D2--']},
+            {kind:'authentication',status:'tested',reason:'UI 예시',requests:['POST /api/auth/login']},
+            {kind:'authorization',status:'tested',reason:'UI 예시',requests:['GET /api/orders/1025']},
+            {kind:'input_handling',status:'not_tested',reason:'UI 예시 · 시간 제한',requests:[]}],findings:[],limitations:['UI 예시']})+'\n```';
+          sampleRun.assessment=require('../out/security/pentagiAssessment').assessPentagi(sampleRun.tasks,[],sampleRun.target);}
+      }
+      if(action==='localStop'&&sampleRun){sampleRun.phase='removed';sampleRun.outcome='cancelled';sampleRun.step='UI 예시 · 중단 후 환경 삭제 완료';}
+      return {localMode:true,local:sampleRun,localHistory:[]};
+    }
     if(process.env.HARNESS_REDTEAM_PROGRESS==='1'){
       if(action==='localStart'){redteamPolls=0;sampleRun={session:'ui-fixture',target:'http://localhost:3000/ · UI 예시',createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),phase:'running',step:'UI 예시 · SQL 입력과 대조 응답 검사',tasks:[{id:'1',title:'앱 경로 탐색',status:'finished',result:'UI 예시: /search 입력 확인'},{id:'2',title:'SQL 입력 · 대조 응답 비교',status:'running',result:''}]};}
       if(action==='localStart')Object.assign(sampleRun,{target:'http://localhost:3000/',isolationVerified:true,httpEvents:[{id:1,method:'GET',path:'/search',status:200,durationMs:42,blocked:false},{id:2,method:'GET',path:'/search',status:200,durationMs:58,blocked:false}]});
@@ -55,6 +78,8 @@ if (process.env.HARNESS_SECURITY === '1') {
     return {};
   };
   api.runScan = async scanType => {await new Promise(resolve=>setTimeout(resolve,300));return {scan_type:scanType,status:'ok',findings:[],critical_count:0,high_count:0,medium_count:0};};
+  //: HARNESS_SCAN_FILE — 화면 확인용 검사 결과(종류별 JSON). 실제 검사를 대신하지 않는다.
+  if(process.env.HARNESS_SCAN_FILE){const sample=JSON.parse(fs.readFileSync(process.env.HARNESS_SCAN_FILE,'utf8'));api.runScan=async scanType=>{await new Promise(r=>setTimeout(r,400));return {scan_type:scanType,critical_count:0,high_count:0,medium_count:0,findings:[],status:'ok',...(sample[scanType]||{})};};}
   if(process.env.HARNESS_MANAGED==='1') {
     // Explicit UI samples. The real host tests cover consent and dispatch separately.
     require('../out/security/managedSecurityHost').ManagedSecurityHost.prototype.handle=async(_action,_workspace,mode='redteam')=>{
