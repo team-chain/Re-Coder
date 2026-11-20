@@ -128,7 +128,9 @@ jobs:
   macos-arm64-vsix:
     needs: version-check
     # Apple Silicon 전용. Intel Mac 은 grpcio 등 잠근 의존성의 x86_64 휠이 없어 대상에서 뺐다.
-    runs-on: macos-14
+    #: macos-14 이미지는 GitHub 에서 내려가 작업이 1초 만에 취소됐다("The configuration 'macos-14-arm64-us-default' is not supported").
+    #: 그 바람에 릴리스 실행 전체가 취소로 끝나 publish 가 돌지 못했다. CI 코어 시험이 이미 쓰는 macos-latest(Apple Silicon)로 맞춘다.
+    runs-on: macos-latest
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5

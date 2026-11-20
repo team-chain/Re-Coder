@@ -393,8 +393,10 @@ def test_deployed_ports_are_local_only_by_default():
     public = [s for s in a["services"] if s["public"] and s["port"]]
     assert public
     for s in public:
-        assert f'"${{RECODER_LOCAL_BIND:-127.0.0.1}}:{s['port']}:{s['port']}"' in text or \
-            f"${{RECODER_LOCAL_BIND:-127.0.0.1}}:{s['port']}:{s['port']}" in text
+        #: CI 의 기본 Python 3.11 은 f-string 안에서 같은 따옴표를 다시 쓰지 못한다(3.12 부터 허용).
+        port = s["port"]
+        assert f'"${{RECODER_LOCAL_BIND:-127.0.0.1}}:{port}:{port}"' in text or \
+            f"${{RECODER_LOCAL_BIND:-127.0.0.1}}:{port}:{port}" in text
 
 
 def test_service_waiting_on_failed_dependency_is_not_blamed(tmp_path):
