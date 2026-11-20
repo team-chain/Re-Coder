@@ -144,3 +144,12 @@ test('Core pipeline output: plain titles, honest locations, and fix buttons only
  assert.equal(fixFor(m.risks.find(r=>r.source==='secret'),proposals).kind,'auto');
  assert.equal(m.risks.find(r=>r.source==='secret').details[0].title,n.gitleaks.findings[0].secret_type);
 });
+
+test('Core-unreachable errors are translated once at the host→webview boundary, other errors kept verbatim',()=>{
+ const {humanizeNetworkErrors,CORE_UNREACHABLE}=require('../out/core/networkErrors');
+ for(const e of ['fetch failed','TypeError: fetch failed','connect ECONNREFUSED 127.0.0.1:8765','Error: socket hang up','read ECONNRESET'])
+  assert.equal(humanizeNetworkErrors({requestId:'1',error:e}).error,CORE_UNREACHABLE,e);
+ const keep={error:'AWS 권한이 부족합니다: ecs:UpdateService'};assert.equal(humanizeNetworkErrors(keep),keep);
+ assert.equal(humanizeNetworkErrors({message:'설명에 fetch failed 가 들어간 긴 문장'}).message,'설명에 fetch failed 가 들어간 긴 문장');
+ assert.equal(humanizeNetworkErrors('fetch failed'),'fetch failed','문자열 payload 는 그대로');assert.deepEqual(humanizeNetworkErrors([1]),[1]);
+});

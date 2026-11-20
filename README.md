@@ -218,7 +218,7 @@ VS Code 확장은 **Develop · Deploy · Security** 세 화면으로 구성됩�
 | 기능 | 설명 |
 |---|---|
 | 로컬 Docker 배포 | Dockerfile 생성 → 검사 → 빌드 → 실행 → 헬스 체크, 실패 시 이전 이미지로 복구 |
-| 배포 캔버스 | GitHub · Docker · ECS · S3 Drag & Drop 배포(3D 캔버스), 승인 · 보안 검사 · 실행 상태 표시 |
+| 배포 캔버스 | 프로젝트 카드를 GitHub · Docker · ECS · S3 대상으로 끌어다 놓아 배포, 승인 · 보안 검사 · 실행 상태 표시 |
 | 제로 트러스트 점검 | 배포 승인 화면에서 5가지 원칙 기준으로 통과 · 주의 · 막힘 표시 |
 | 롤백 · Replay | 배포 · 롤백 이력과 이전 버전 복귀 대상 확인 |
 | 운영 대응 | 장애 감지 → 원인 분석 → 조치 제안, 실행은 승인 후 |
@@ -265,7 +265,7 @@ VS Code 확장은 **Develop · Deploy · Security** 세 화면으로 구성됩�
 
 ```text
 Re-Coder/
-├── extension/            VS Code 확장 (TypeScript · React · Tailwind · three.js)
+├── extension/            VS Code 확장 (TypeScript · React · Tailwind)
 │   ├── src/              확장 본체 — Core 실행, 명령 23개, 웹뷰 메시지 처리
 │   └── webview-src/      Develop · Deploy · Security 화면, 배포 캔버스, AI Village
 ├── core/                 Local Core (Python · FastAPI)
@@ -389,7 +389,7 @@ AI 에이전트가 사용자 PC에서 코드를 만들고 실행하는 만큼, R
 
 | 영역 | 기술 |
 |---|---|
-| **VS Code 확장** | ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=for-the-badge&logo=typescript&logoColor=white) ![React](https://img.shields.io/badge/React-20232A?style=for-the-badge&logo=react&logoColor=61DAFB) ![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-06B6D4?style=for-the-badge&logo=tailwindcss&logoColor=white) ![three.js](https://img.shields.io/badge/three.js-000000?style=for-the-badge&logo=threedotjs&logoColor=white) ![Webpack](https://img.shields.io/badge/Webpack-8DD6F9?style=for-the-badge&logo=webpack&logoColor=black) |
+| **VS Code 확장** | ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=for-the-badge&logo=typescript&logoColor=white) ![React](https://img.shields.io/badge/React-20232A?style=for-the-badge&logo=react&logoColor=61DAFB) ![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-06B6D4?style=for-the-badge&logo=tailwindcss&logoColor=white) ![Webpack](https://img.shields.io/badge/Webpack-8DD6F9?style=for-the-badge&logo=webpack&logoColor=black) |
 | **Local Core** | ![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white) ![Docker](https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white) ![PyInstaller](https://img.shields.io/badge/PyInstaller-4B8BBE?style=for-the-badge) |
 | **AI** | ![Amazon Bedrock](https://img.shields.io/badge/Amazon_Bedrock-232F3E?style=for-the-badge) ![Claude API](https://img.shields.io/badge/Claude_API-D97757?style=for-the-badge&logo=anthropic&logoColor=white) ![OpenAI API](https://img.shields.io/badge/OpenAI_API-412991?style=for-the-badge) ![RAG](https://img.shields.io/badge/RAG_%28BM25_%2B_E5%29-6E40C9?style=for-the-badge) |
 | **보안** | ![OPA](https://img.shields.io/badge/OPA_%28Rego%29-566366?style=for-the-badge) ![Trivy](https://img.shields.io/badge/Trivy-1904DA?style=for-the-badge) ![Hadolint](https://img.shields.io/badge/Hadolint-2F3B45?style=for-the-badge) ![Gitleaks](https://img.shields.io/badge/Gitleaks-C8102E?style=for-the-badge) ![Syft](https://img.shields.io/badge/Syft_%28SBOM%29-0E6E8C?style=for-the-badge) |

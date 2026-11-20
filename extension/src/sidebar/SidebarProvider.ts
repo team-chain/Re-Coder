@@ -1,4 +1,5 @@
 import { LocalPentagiHost } from '../security/localPentagiHost';
+import { humanizeNetworkErrors } from '../core/networkErrors';
 import { runAiConnectCommand, saveRoutingSettings, switchAiProvider } from '../ai/aiKeys';
 import { SEEN_KEY, pendingCount } from '../ops/monitorDigest';
 import { AI_KEY_SECRET, AI_PROVIDERS, AI_PROVIDER_STATE, AiKeyProvider, currentAiProvider, isAiKeyProvider, isEconomyProvider, pricesEnv, storedAiKeys } from '../ai/aiKeyEnv';
@@ -357,7 +358,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     private postMessageToWebview(webview: vscode.Webview | undefined, type: string, payload: unknown): void {
-        if (/^(canvas\.graph|canvas\.error|code\.|chat\.)/.test(type)) {
+        payload = humanizeNetworkErrors(payload);
+        if (/^(canvas\.error|code\.)/.test(type)) {
             const id = (payload as { requestId?: unknown; id?: unknown })?.requestId ?? (payload as { id?: unknown })?.id ?? '';
             console.info(`[ReCoder] reply ${type} id=${String(id)}`);
         }
