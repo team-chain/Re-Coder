@@ -308,6 +308,12 @@ export function MonitorView(props: MonitorViewProps) {
       </div>
       {message && <div className="msg"><Line icon={message.tone === "ok" ? "check" : "alert"} tone={message.tone}>{message.text}</Line></div>}
       {error && <div className="msg"><Line icon="alert" tone="bad">{error}</Line></div>}
+      {!cur && loading && !error && (
+        <div className="card empty" data-testid="mon-loading" role="status" aria-busy="true">
+          <Icon name="refresh" size={22} /><b>운영 상태를 불러오는 중…</b>
+          배포한 서비스의 상태와 최근 기록을 확인하고 있어요
+        </div>
+      )}
       {!cur && !loading && !error && (
         <div className="card empty" data-testid="mon-no-monitors">
           <Icon name="pulse" size={22} /><b>배포된 앱이 없습니다</b>
