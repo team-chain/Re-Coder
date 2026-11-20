@@ -26,6 +26,7 @@ import { mergeDeployment, SnapshotRequests } from "./state";
 import { DockerNotifications } from './dockerNotifications';
 import {GroundedRepairPanel} from '../GroundedRepairPanel';
 import {ProjectSummary} from './ProjectSummary';
+import { DiscordOpsRequest, opsFor, opsOutcome } from './discordOps';
 
 type Pane = "canvas" | "details" | "history" | "aws" | "docker" | "security" | "discord" | "status" | "project";
 type OpenablePane = "docker" | "project" | "history";
@@ -71,6 +72,9 @@ export default function DeploymentCanvas({ onOpenOperate, navigation, isAiReady=
   const dockerNotifications=useRef(new DockerNotifications());
   const discordRef=useRef<DiscordState|null>(null), notificationPreference=useRef(false), notificationRequest=useRef('');
   const lastEventStatus=useRef(''),lastEventDeployment=useRef('');
+  //: Discord 에서 온 배포·롤백 요청(확장이 들고 있다). 이 화면에서 승인·결과가 나오면 그 채널에 답한다.
+  const [ops,setOps]=useState<DiscordOpsRequest[]>([]);
+  const opsRef=useRef<DiscordOpsRequest[]>([]),s3UrlRef=useRef('');
   const requestId=()=>`canvas-${Date.now()}-${++ids.current}`;
   const refresh=useCallback((force=false)=> { const id=`snapshot-${Date.now()}-${++ids.current}`; if(!snapshotRequests.current.begin(id,force))return; setLoading(true);postMessage('canvas.snapshot',{requestId:id}); },[postMessage]);
   const openPane=(next:Pane)=>{setSelection(null);setPane(next);setVisited(v=>new Set([...v,next]));};
@@ -100,6 +104,13 @@ export default function DeploymentCanvas({ onOpenOperate, navigation, isAiReady=
     const enabled=notifyRef.current;
     setEvents(items=>[{id,title,detail,at:new Date().toISOString(),delivery:enabled?'전송 중…':'이 화면에 기록됨'},...items].slice(0,60));
     if(enabled) postMessage('canvas.discord.event',{requestId:`event:${id}`,enabled:true,eventId:id,title,detail});
+    const op=opsFor(opsRef.current,snapshotRef.current?.workspace);
+    const outcome=op&&opsOutcome(op,title,detail);
+    if(op&&outcome) postMessage('canvas.discord.opsReply',{requestId:`ops-${id}`,opsId:op.requestId,...outcome,
+      url:outcome.state==='done'?(title==='S3 배포 완료'?s3UrlRef.current:liveRef.current?.service_url||''):''});
+  },[postMessage]);
+  const replyOps=useCallback((op:DiscordOpsRequest,state:'accepted'|'failed'|'declined',title:string,detail:string)=>{
+    postMessage('canvas.discord.opsReply',{requestId:`ops-${state}-${Date.now()}`,opsId:op.requestId,ok:state==='accepted',state,title,detail});
   },[postMessage]);
   const finish=()=>{busyRef.current=false;setBusy(false);};
   const gateRunning=useRef(false);
@@ -142,7 +153,8 @@ export default function DeploymentCanvas({ onOpenOperate, navigation, isAiReady=
     if(event.type==='canvas.error') {
       if(String(p.context).startsWith('canvas.discord')) {setDiscordError(p.message);if(p.requestId===notificationRequest.current){notificationPreference.current=false;applyNotificationPreference();}if(String(p.requestId).startsWith('event:')) setEvents(items=>items.map(e=>`event:${e.id}`===p.requestId?{...e,delivery:'전송 실패'}:e));return;}
       if(snapshotRequests.current.finish(p.requestId)) {setLoading(false);setError(p.message);return;}
-      if(p.requestId===actionRequest.current) {if(actionTarget.current==='s3')setS3Progress({step:'error',message:p.message});finish();setError(p.message);setMessage('');} return;
+      if(p.requestId===actionRequest.current) {if(actionTarget.current==='s3')setS3Progress({step:'error',message:p.message});finish();setError(p.message);setMessage('');
+        const op=opsFor(opsRef.current,snapshotRef.current?.workspace);if(op?.accepted&&op.action==='deploy')replyOps(op,'failed','배포 실패',p.message||'');} return;
     }
     if(event.type==='canvas.executing'&&p.requestId===actionRequest.current) setMessage(p.message);
     if(event.type==='canvas.completed'&&p.requestId===actionRequest.current) {finish();setMessage(p.message);addEvent(p.requestId,'GitHub 푸시 완료','승인한 브랜치의 커밋을 푸시했습니다.');refresh();}
@@ -159,7 +171,7 @@ export default function DeploymentCanvas({ onOpenOperate, navigation, isAiReady=
     if(event.type==='workspace.deploy.ecs.statusError'&&p.deploymentId===expectedId.current) setError(p.message||'배포 상태 조회 실패');
     if(event.type==='workspace.deploy.s3.dirs'&&!dirTouched.current) setConfig(c=>({...c,dir:p.suggested||''}));
     if(event.type==='workspace.deploy.s3.progress') {setS3Progress(p);setMessage('');}
-    if(event.type==='workspace.deploy.s3.result') {finish();setS3Progress(p.ok?{step:'done',result:{status:'success'}}:{step:'error',message:p.message||'S3 배포 실패'});if(p.ok) {setS3Result(p.result);setMessage('');addEvent(`s3-${Date.now()}`,'S3 배포 완료',p.result?.bucket||'');refresh();}else setError(p.message||'S3 배포 실패');}
+    if(event.type==='workspace.deploy.s3.result') {finish();setS3Progress(p.ok?{step:'done',result:{status:'success'}}:{step:'error',message:p.message||'S3 배포 실패'});if(p.ok) {s3UrlRef.current=p.result?.url||'';setS3Result(p.result);setMessage('');addEvent(`s3-${Date.now()}`,'S3 배포 완료',p.result?.bucket||'');refresh();}else {setError(p.message||'S3 배포 실패');const op=opsFor(opsRef.current,snapshotRef.current?.workspace);if(op?.accepted&&op.action==='deploy')replyOps(op,'failed','S3 배포 실패',p.message||'');}}
     if(event.type==='workspace.deploy.remediationResult') {finish();setMessage(p.message||'수정을 적용했습니다. 다시 승인 내용을 확인하세요.');setBlocked([]);refresh();const again=reopenAfterFix.current;reopenAfterFix.current=null;if(again)setTimeout(()=>prepareRef.current(again),0);}
     if(event.type==='workspace.deploy.remediationError') reopenAfterFix.current=null;
     if(event.type==='workspace.deploy.remediationError') {finish();setError(p.message);}
@@ -168,12 +180,13 @@ export default function DeploymentCanvas({ onOpenOperate, navigation, isAiReady=
     if(event.type==='workspace.deploy.ecs.rollbackResult'||event.type==='replay.rollbackResult'||event.type==='deploy.rollbackResult') {addEvent(`rollback-${p.deployment_id||p.deploymentId||p.requestId||Date.now()}`,'롤백 결과',p.message||p.status||'결과 확인');refresh();}
     if(event.type==='canvas.discord.statusResult') {discordRef.current=p;setDiscord(p);setDiscordError('');applyNotificationPreference();}
     if(event.type==='canvas.discord.notificationsResult'&&p.requestId===notificationRequest.current&&p.workspace===snapshotRef.current?.workspace) {notificationPreference.current=p.enabled===true;applyNotificationPreference();setDiscordError('');}
+    if(event.type==='canvas.discord.ops'&&Array.isArray(p.requests)) {opsRef.current=p.requests;setOps(p.requests);}
     if(event.type==='canvas.discord.guildsResult') setGuilds(p.guilds||[]);
     if(event.type==='canvas.discord.channelsResult') setChannels(p.channels||[]);
     if(event.type==='canvas.discord.eventResult') {setEvents(items=>items.map(e=>e.id===p.event_id?{...e,delivery:'채널 전송 완료'}:e));setDiscordError('');}
   },[addEvent,postMessage,refresh]));
 
-  useEffect(()=>{refresh();postMessage('canvas.discord.status');const timer=window.setInterval(refresh,15000);return()=>window.clearInterval(timer);},[refresh,postMessage]);
+  useEffect(()=>{refresh();postMessage('canvas.discord.status');postMessage('canvas.discord.opsPending',{requestId:requestId()});const timer=window.setInterval(refresh,15000);return()=>window.clearInterval(timer);},[refresh,postMessage]);
   useEffect(()=>{if(!live?.running||!live.deployment_id)return;const id=live.deployment_id;const timer=window.setInterval(()=>postMessage('workspace.deploy.ecs.status',{deploymentId:id}),4000);return()=>window.clearInterval(timer);},[live?.running,live?.deployment_id,postMessage]);
   const choose=(target:Target)=>{
     if(busyRef.current||live?.running)return;
@@ -196,7 +209,9 @@ export default function DeploymentCanvas({ onOpenOperate, navigation, isAiReady=
   const prepare=(chosen=config)=>{if(busyRef.current||live?.running)return;try { if(chosen.target==='ecs')chosen={...chosen,...parseRuntimeEnvironment(runtimeDraft),...protectionRequest(protection)}; } catch(err) {setError(String(err));return;}busyRef.current=true;setBusy(true);setError('');setMessage('배포 대상과 사전 검사 결과를 확인 중…');const id=requestId();actionRequest.current=id;postMessage('canvas.prepare',{requestId:id,config:chosen,autoDir:chosen.target==='s3'&&!dirTouched.current});};
   prepareRef.current=prepare;
   const drop=(target:Target)=>{choose(target);};
-  const approve=()=>{if(!plan||busyRef.current)return;actionTarget.current=plan.config.target;busyRef.current=true;setBusy(true);if(plan.config.target==='s3'){setS3Result(null);setS3Progress({step:'plan',message:'승인한 파일을 확인합니다'});}setMessage('승인한 요청의 보안·권한 검사를 시작합니다…');setError('');const id=requestId();actionRequest.current=id;postMessage('canvas.execute',{requestId:id,planId:plan.id,approved:true});setPlan(null);};
+  const approve=()=>{if(!plan||busyRef.current)return;
+    {const op=opsFor(opsRef.current,snapshotRef.current?.workspace);const where=plan.config.target==='s3'?'S3 정적 사이트':plan.config.target==='ecs'?'ECS':'GitHub';
+     if(op&&op.action==='deploy'&&!op.accepted)replyOps(op,'accepted','VS Code에서 배포를 승인했어요',`${where}로 배포를 시작합니다. 끝나면 결과를 알려 드릴게요.`);}actionTarget.current=plan.config.target;busyRef.current=true;setBusy(true);if(plan.config.target==='s3'){setS3Result(null);setS3Progress({step:'plan',message:'승인한 파일을 확인합니다'});}setMessage('승인한 요청의 보안·권한 검사를 시작합니다…');setError('');const id=requestId();actionRequest.current=id;postMessage('canvas.execute',{requestId:id,planId:plan.id,approved:true});setPlan(null);};
   const fix=(id:string)=>{cancel();busyRef.current=true;setBusy(true);postMessage('workspace.deploy.remediation.apply',{proposalId:id});};
   //: [모두 적용] 뒤에는 같은 설정으로 승인 카드를 다시 연다 — 고친 결과를 다시 검사해 바로 승인할 수 있게.
   const reopenAfterFix=useRef<Config|null>(null);
@@ -234,6 +249,18 @@ export default function DeploymentCanvas({ onOpenOperate, navigation, isAiReady=
       </div></details>
     </div>
     {!drawerOpen&&notice}
+    {(()=>{const here=opsFor(ops,snapshot?.workspace),other=here?undefined:ops.find(o=>!o.accepted);const op=here||other;if(!op)return null;
+      const label=op.action==='deploy'?'배포':'롤백';
+      return <div className="rc-discord-request" role="status" data-testid="discord-request">
+        <span className="rc-dr-badge" aria-hidden="true">Discord</span>
+        <div className="rc-dr-copy"><strong>{op.requester}님이 {other?`${op.projectName} `:''}{label}{label==='배포'?'를':'을'} 요청했어요</strong>
+          <small>{other?'다른 프로젝트의 요청이에요. 그 프로젝트로 바꾼 뒤 진행하세요.':op.accepted?'승인했어요. 결과가 나오면 Discord 채널에 알려 드려요.':op.action==='deploy'?'배포할 곳을 고르고 승인하면 진행하고, 결과를 채널에 알려 드려요.':'이력·롤백에서 되돌릴 배포를 고르면 결과를 채널에 알려 드려요.'}</small></div>
+        <div className="rc-dr-actions">
+          {other&&<button disabled={running} onClick={()=>postMessage('canvas.selectProject',{requestId:requestId(),path:op.workspace})}>이 프로젝트로 바꾸기</button>}
+          {!other&&!op.accepted&&op.action==='rollback'&&pane!=='history'&&<button onClick={()=>openPane('history')}>이력 열기</button>}
+          {!op.accepted&&<button className="rc-dr-decline" onClick={()=>replyOps(op,'declined',`${label} 요청을 거절했어요`,'VS Code에서 요청을 거절했어요.')}>거절</button>}
+        </div>
+      </div>;})()}
     {rollbackPending&&['pending','failed'].includes(rollbackPending.status||'')&&<div className="rc-inline-alert" role="alert"><span>롤백 승인이 필요합니다</span><button onClick={()=>openPane('details')}>확인</button></div>}
     {scan?.blocked&&<div className="rc-inline-alert" role="alert"><span>보안 게이트 차단</span><button onClick={()=>openPane('security')}>검사 결과와 조치 보기</button></div>}
     <DeploymentActivity target="s3" event={s3Progress}/>

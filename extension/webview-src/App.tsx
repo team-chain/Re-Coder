@@ -541,19 +541,22 @@ const App: React.FC = () => {
         //: 확장이 다시 시작되거나 창을 다시 불러와 화면이 새로 그려졌다 — 보던 화면·쓰던 요청으로 돌아간다.
         const saved = (payload ?? {}) as Record<string, unknown>;
         //: 한 번만 쓰는 요청(지도 모드)은 화면 상태로 남기지 않는다 — 나중에 다시 불러올 때 또 적용되지 않게.
-        const { mapMode: _once, ...keep } = saved;
+        const { mapMode: _once, canvasPane: _pane, ...keep } = saved;
         saveUiState(keep);
         const v = saved.view;
         if (typeof v === "string" && (v === "home" || isHubView(v) || isFeatureView(v))) setView(v as ViewMode);
         if (v === "map" && (saved.mapMode === "flow" || saved.mapMode === "project")) requestMapMode(saved.mapMode);
+        if (v === "hub:deploy" && saved.canvasPane === "history") requestCanvasPane("history");
       }
       if (type === "ui.openView" && isWorkspacePanel) {
         //: 2.0.25 — 알림의 [자세히] 등 확장이 특정 화면을 열게 할 때.
-        const p = (payload ?? {}) as { view?: string; mapMode?: string };
+        const p = (payload ?? {}) as { view?: string; mapMode?: string; canvasPane?: string };
         const v = p.view;
         if (typeof v === "string" && (v === "home" || isHubView(v) || isFeatureView(v))) setView(v as ViewMode);
         //: 빠른 이동 "흐름 dry run"/"아키텍처" — 지도 화면 안의 모드까지 맞춘다.
         if (v === "map" && (p.mapMode === "flow" || p.mapMode === "project")) requestMapMode(p.mapMode);
+        //: Discord 롤백 요청 — 배포 화면의 이력·롤백 칸까지 연다.
+        if (v === "hub:deploy" && p.canvasPane === "history") requestCanvasPane("history");
       }
       if (type === "code.prefill" && isWorkspacePanel) {
         //: 배포 보안 검사의 "AI 수정안 만들기" — 코드 생성 입력창에 요청을 채워 두고 그 화면으로 간다(보내기는 사람이).

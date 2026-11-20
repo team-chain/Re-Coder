@@ -25,6 +25,33 @@ import connection_store as store
 
 PREFIX = '/api/v1/connect'
 
+#: Discord 에서 받은 배포·롤백·상태 요청. 실제 진행은 연결된 VS Code 가 승인한 뒤에만 한다.
+OPS_LABEL = {'deploy': '배포', 'rollback': '롤백', 'status': '상태'}
+#: 일반 채팅에서 "배포해줘"처럼 **짧은 명령 한 줄**만 운영 요청으로 본다 — "배포 버튼 만들어줘" 같은 개발 요청은 그대로 개발로 간다.
+_OPS_WORD = (r'(배포\s*상태|배포|롤백|되돌려|되돌리기|상태|deploy|rollback|status)')
+_OPS_TAIL = (r'(?:\s*(?:좀|다시))?\s*(해\s*줘|해\s*주세요|해\s*줄래|해|하자|할게|줘|주세요|확인\s*해\s*줘|확인|알려\s*줘|보여\s*줘|어때|는)?')
+OPS_INTENT = re.compile(r'^(?:지금\s*|바로\s*|이제\s*)?' + _OPS_WORD + _OPS_TAIL + r'\s*[.!?~]*$', re.IGNORECASE)
+OPS_APPROVAL_SECONDS = 2 * 60 * 60
+OPS_STATUS_SECONDS = 20
+
+
+def ops_intent(text):
+    """'배포해줘' → 'deploy', '롤백' → 'rollback', '상태 알려줘' → 'status'. 그 밖의 문장은 None."""
+    match = OPS_INTENT.match((text or '').strip())
+    if not match:
+        return None
+    word = re.sub(r'\s+', '', match.group(1).lower())
+    tail = re.sub(r'\s+', '', match.group(2) or '')
+    if word in ('배포상태', '상태', 'status') or tail in ('어때', '는', '확인', '확인해줘', '알려줘', '보여줘'):
+        return 'status'
+    if word in ('롤백', '되돌려', '되돌리기', 'rollback'):
+        return 'rollback'
+    return 'deploy'
+
+
+class OpsError(Exception):
+    """사용자에게 그대로 보여 줄 운영 요청 실패 이유."""
+
 
 class ConnectionService:
     def __init__(self, get_bot):
@@ -35,6 +62,8 @@ class ConnectionService:
         self.sent = OrderedDict()
         self.seen_messages = OrderedDict()
         self.send_lock = asyncio.Lock()
+        #: request_id → 진행 중인 Discord 운영 요청(배포·롤백·상태).
+        self.ops = {}
 
     def config(self):
         base = os.getenv('DISCORD_PUBLIC_URL', 'http://127.0.0.1:8765').rstrip('/')
@@ -315,8 +344,17 @@ class ConnectionService:
                 if not store.session(token):
                     await ws.close(code=4001)
                     break
-                if message.type == aiohttp.WSMsgType.TEXT and message.data == '{"type":"ping"}':
+                if message.type != aiohttp.WSMsgType.TEXT:
+                    continue
+                if message.data == '{"type":"ping"}':
                     await ws.send_json({'type': 'pong'})
+                    continue
+                try:
+                    body = json.loads(message.data)
+                except ValueError:
+                    continue
+                if isinstance(body, dict) and body.get('type') == 'ops.result':
+                    await self.ops_result(key, body)
         finally:
             if self.sockets.get(key, (None,))[0] is ws:
                 self.sockets.pop(key, None)
@@ -378,6 +416,20 @@ class ConnectionService:
         async def reply(text):
             return await message.reply(text, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
 
+        action = ops_intent(content)
+        if action:
+            try:
+                await self.channel(p, p['guild_id'], p['channel_id'])
+                if action == 'status':
+                    await reply(embed_text(await self.request_status(p, message.author)))
+                else:
+                    await reply(await self.request_ops(p, action, message.author))
+            except OpsError as exc:
+                await reply(str(exc))
+            except web.HTTPException:
+                await reply('이 채널에서 요청할 권한을 확인하지 못했어요. Discord 채널 권한과 프로젝트 연결을 확인해 주세요.')
+            return True
+
         key = (p['user_id'], p['project_id'])
         if key in self.jobs:
             await reply('이 프로젝트의 작업이 진행 중입니다. 완료 후 다시 요청하세요.')
@@ -433,6 +485,116 @@ class ConnectionService:
         from make_handler import handle_make_message
         await handle_make_message(self.get_bot(), message, route=Route())
 
+
+    # ── Discord → VS Code 운영 요청(배포·롤백·상태) ────────────────────────────
+    def prune_ops(self):
+        now = time.time()
+        for rid in [rid for rid, item in self.ops.items() if item['expires'] <= now]:
+            item = self.ops.pop(rid)
+            if item.get('future') and not item['future'].done():
+                item['future'].set_exception(OpsError('VS Code가 응답하지 않았어요. VS Code가 켜져 있는지 확인해 주세요.'))
+
+    async def send_project(self, p, event):
+        key = (p['user_id'], p['project_id'])
+        current = self.sockets.get(key)
+        if not current or current[0].closed or not store.session(current[1]):
+            raise OpsError('연결된 프로젝트의 VS Code가 꺼져 있어요. VS Code를 열고 다시 요청해 주세요.')
+        await current[0].send_json({**event, 'project_id': p['project_id']})
+
+    def _new_request(self, p, action, author, **extra):
+        self.prune_ops()
+        key = (p['user_id'], p['project_id'])
+        socket = self.sockets.get(key, (None,))[0]
+        #: VS Code 가 다시 연결됐다면(재시작 등) 이전 소켓으로 보낸 요청은 VS Code 쪽에서 사라졌다 — 새 요청을 막지 않는다.
+        if action != 'status' and any(item['key'] == key and item['action'] != 'status' and item.get('socket') is socket
+                                      for item in self.ops.values()):
+            raise OpsError('이 프로젝트에 VS Code의 확인을 기다리는 요청이 이미 있어요. 그 요청이 끝난 뒤 다시 보내 주세요.')
+        if len(self.ops) >= 500:
+            raise OpsError('지금은 요청이 너무 많아요. 잠시 뒤 다시 보내 주세요.')
+        rid = secrets.token_urlsafe(12)
+        requester = (getattr(author, 'display_name', '') or getattr(author, 'name', '') or 'Discord 사용자')[:80]
+        self.ops[rid] = dict(key=key, action=action, requester=requester, project_name=p['project_name'],
+                             guild_id=p['guild_id'], channel_id=p['channel_id'],
+                             socket=socket,
+                             expires=time.time() + (OPS_STATUS_SECONDS if action == 'status' else OPS_APPROVAL_SECONDS), **extra)
+        return rid, requester
+
+    async def request_ops(self, p, action, author):
+        """배포·롤백 요청을 VS Code 로 보낸다. 승인·진행은 VS Code 에서 하고 결과는 이 채널에 온다."""
+        if action not in ('deploy', 'rollback'):
+            raise OpsError('지원하지 않는 요청입니다.')
+        rid, requester = self._new_request(p, action, author)
+        try:
+            await self.send_project(p, {'type': 'ops.request', 'request_id': rid, 'action': action, 'requester': requester})
+        except Exception:
+            self.ops.pop(rid, None)
+            raise
+        label = OPS_LABEL[action]
+        where = '배포할 곳을 고르고 승인하면' if action == 'deploy' else '되돌릴 버전을 고르고 승인하면'
+        return f'**{p["project_name"]}** {label} 요청을 VS Code로 보냈어요. VS Code에서 {where} 진행하고, 결과를 이 채널에 알려 드릴게요.'
+
+    async def request_status(self, p, author):
+        """VS Code 에 현재 배포 상태를 물어 바로 답한다(읽기 전용, 승인 필요 없음)."""
+        future = asyncio.get_running_loop().create_future()
+        rid, _ = self._new_request(p, 'status', author, future=future)
+        try:
+            await self.send_project(p, {'type': 'ops.request', 'request_id': rid, 'action': 'status', 'requester': self.ops[rid]['requester']})
+            return await asyncio.wait_for(future, OPS_STATUS_SECONDS)
+        except asyncio.TimeoutError:
+            raise OpsError('VS Code가 응답하지 않았어요. VS Code가 켜져 있는지 확인해 주세요.')
+        finally:
+            self.ops.pop(rid, None)
+
+    async def ops_result(self, key, body):
+        rid = str(body.get('request_id', ''))
+        item = self.ops.get(rid)
+        if not item or item['key'] != key:
+            return
+        state = str(body.get('state', ''))
+        result = dict(ok=body.get('ok') is True, state=state,
+                      title=str(body.get('title', ''))[:160] or OPS_LABEL[item['action']],
+                      detail=str(body.get('detail', ''))[:1000], url=_safe_url(body.get('url')))
+        if item.get('future'):
+            if not item['future'].done():
+                item['future'].set_result(result)
+            return
+        if state != 'accepted':
+            self.ops.pop(rid, None)
+        else:
+            item['expires'] = time.time() + OPS_APPROVAL_SECONDS
+        p = store.project(*key)
+        if not p or str(p['channel_id']) != str(item['channel_id']):
+            return
+        try:
+            channel = await self.channel(p, p['guild_id'], p['channel_id'])
+            await channel.send(embed=ops_embed(item, result), allowed_mentions=discord.AllowedMentions.none())
+        except (web.HTTPException, discord.HTTPException):
+            pass
+
+    async def ops_command(self, interaction, action):
+        """/recoder deploy · rollback · status — 이 채널에 연결한 내 프로젝트로 보낸다."""
+        if not interaction.guild or not interaction.channel:
+            await interaction.response.send_message('서버의 연결된 채널에서 사용하세요.', ephemeral=True)
+            return
+        p = store.channel_project(interaction.user.id, interaction.guild.id, interaction.channel.id)
+        if not p:
+            await interaction.response.send_message('VS Code ReCoder의 배포 화면 → Discord에서 이 채널을 내 프로젝트에 연결하세요.', ephemeral=True)
+            return
+        try:
+            await self.channel(p, p['guild_id'], p['channel_id'])
+            if action == 'status':
+                await interaction.response.defer(thinking=True)
+                result = await self.request_status(p, interaction.user)
+                await interaction.followup.send(embed=ops_embed(dict(action='status', requester='', project_name=p['project_name']), result),
+                                                allowed_mentions=discord.AllowedMentions.none())
+                return
+            text = await self.request_ops(p, action, interaction.user)
+            await interaction.response.send_message(text, allowed_mentions=discord.AllowedMentions.none())
+        except OpsError as exc:
+            await _respond(interaction, str(exc))
+        except web.HTTPException:
+            await _respond(interaction, '이 채널에서 요청할 권한을 확인하지 못했어요. Discord 채널 권한과 프로젝트 연결을 확인해 주세요.')
+
     async def cleanup(self, app):
         for key in list(self.sockets):
             await self.close_project(key, restarting=True)
@@ -452,6 +614,37 @@ class ConnectionService:
             ('POST', '/events', self.event), ('GET', '/ws', self.websocket),
         ]:
             app.router.add_route(method, PREFIX + route, handler)
+
+
+def _safe_url(value):
+    url = str(value or '')
+    return url if re.match(r'^https?://[^\s<>]{1,300}$', url) else ''
+
+
+async def _respond(interaction, text):
+    if interaction.response.is_done():
+        await interaction.followup.send(text, ephemeral=True)
+    else:
+        await interaction.response.send_message(text, ephemeral=True)
+
+
+def ops_embed(item, result):
+    colour = 0x3FB37F if result['ok'] else 0x8A94A6 if result['state'] in ('accepted', 'declined', 'expired') else 0xD9534F
+    embed = discord.Embed(title=result['title'], description=result['detail'] or None, colour=colour)
+    if result.get('url'):
+        embed.add_field(name='주소', value=result['url'], inline=False)
+    footer = item['project_name'] + (f' · 요청: {item["requester"]}' if item.get('requester') else '')
+    embed.set_footer(text=footer[:200])
+    return embed
+
+
+def embed_text(result):
+    lines = [f"**{result['title']}**"]
+    if result['detail']:
+        lines.append(result['detail'])
+    if result.get('url'):
+        lines.append(result['url'])
+    return '\n'.join(lines)[:1900]
 
 
 @web.middleware

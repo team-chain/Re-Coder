@@ -41,7 +41,13 @@ interface BridgeMessage {
     error?: string;
     message?: string;
     msg?: string;
+    request_id?: string;
+    action?: string;
+    requester?: string;
 }
+
+/** Discord 에서 온 배포·롤백·상태 요청(봇 → VS Code). 실제 진행은 VS Code 에서 승인한 뒤에만 한다. */
+export interface OpsRequestMessage { request_id: string; action: 'deploy' | 'rollback' | 'status'; requester: string }
 
 interface Session {
     filename: string;
@@ -70,7 +76,7 @@ export class BridgeClient implements vscode.Disposable {
     private messageQueue: Promise<void> = Promise.resolve();
     private readonly output: vscode.OutputChannel;
 
-    constructor(private readonly context: vscode.ExtensionContext, private readonly connection?: { root: vscode.Uri; url: string; token: string; projectId: string }) {
+    constructor(private readonly context: vscode.ExtensionContext, private readonly connection?: { root: vscode.Uri; url: string; token: string; projectId: string; onOps?: (request: OpsRequestMessage) => void }) {
         this.output = vscode.window.createOutputChannel('ReCoder Bridge');
         context.subscriptions.push(this.output);
     }
@@ -265,6 +271,14 @@ export class BridgeClient implements vscode.Disposable {
             case 'delete':
                 await this._handleDelete(msg);
                 break;
+            case 'ops.request': {
+                //: 로그인 연결(프로젝트 단위)에서만 받는다 — 예전 공용 브리지는 누가 보냈는지 알 수 없다.
+                const action = msg.action;
+                if (!this.connection?.onOps || typeof msg.request_id !== 'string' || !/^[\w-]{8,64}$/.test(msg.request_id)
+                    || (action !== 'deploy' && action !== 'rollback' && action !== 'status')) return;
+                this.connection.onOps({ request_id: msg.request_id, action, requester: String(msg.requester || '').slice(0, 80) });
+                return;
+            }
             default:
                 this.output.appendLine(`[bridge] unknown message type: ${msg.type}`);
         }
@@ -659,6 +673,13 @@ export class BridgeClient implements vscode.Disposable {
             void this._flushBuffer(session).catch(() => {});
         }
         try { session.statusBar.dispose(); } catch { /* ignore */ }
+    }
+
+    /** 봇에 결과를 보낸다(연결이 끊겼으면 false). */
+    send(obj: object): boolean {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
+        this._send(obj);
+        return true;
     }
 
     private _send(obj: object): void {

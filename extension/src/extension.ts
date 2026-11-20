@@ -128,6 +128,22 @@ export function activate(context: vscode.ExtensionContext): void {
         )
     );
 
+    // ── Discord 에서 온 배포·롤백·상태 요청 — 승인은 언제나 VS Code 의 배포 화면에서 ──────────
+    discordConnections.statusProvider = workspace => sidebarProvider.discordStatus(workspace);
+    context.subscriptions.push(discordConnections.onOpsChanged(request => {
+        sidebarProvider.postMessage('canvas.discord.ops', { requestId: '', requests: discordConnections.pendingOps() });
+        if (!request) return;
+        const label = request.action === 'deploy' ? '배포를' : '롤백을';
+        const open = () => ReCoderPanel.showView(context.extensionUri, sidebarProvider, 'hub:deploy', request.action === 'rollback' ? { canvasPane: 'history' } : undefined);
+        void ui.showInformationMessage(
+            `Discord에서 ${request.requester}님이 ${request.projectName} ${label} 요청했어요. 배포 화면에서 확인하고 승인하면 진행돼요.`,
+            '배포 화면 열기', '거절',
+        ).then(choice => {
+            if (choice === '배포 화면 열기') open();
+            else if (choice === '거절') discordConnections.reply(request.requestId, { ok: false, state: 'declined', title: `${request.action === 'deploy' ? '배포' : '롤백'} 요청을 거절했어요`, detail: 'VS Code에서 요청을 거절했어요.' });
+        }, () => undefined);
+    }));
+
     // ── 2.0.25 공격·장애 감지 알림 — 코어가 판정한 새 알림을 VS Code·디스코드로 ──
     const alertDiscord = new DiscordWebhook(context.secrets);
     const alertWatcher = new AlertWatcher(apiClient, context.globalState, {

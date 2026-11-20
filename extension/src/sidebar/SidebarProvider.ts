@@ -1,5 +1,5 @@
 import { LocalPentagiHost } from '../security/localPentagiHost';
-import { humanizeNetworkErrors } from '../core/networkErrors';
+import { humanizeNetworkError, humanizeNetworkErrors } from '../core/networkErrors';
 import { runAiConnectCommand, saveRoutingSettings, switchAiProvider } from '../ai/aiKeys';
 import { SEEN_KEY, pendingCount } from '../ops/monitorDigest';
 import { AI_KEY_SECRET, AI_PROVIDERS, AI_PROVIDER_STATE, AiKeyProvider, currentAiProvider, isAiKeyProvider, isEconomyProvider, pricesEnv, storedAiKeys } from '../ai/aiKeyEnv';
@@ -13,6 +13,8 @@ import { withTimeout } from '../core/timeouts';
 import { buildFrontend, detectFrontendProject } from '../deploy/frontendBuild';
 import * as vscode from 'vscode';
 import * as path from 'path';
+import type { DiscordOpsResult } from '../discord/DiscordController';
+import { statusSummary } from '../discord/opsStatus';
 import * as fs from 'fs';
 import { samePath } from '../core/coreReuse';
 import { createHash } from 'crypto';
@@ -304,6 +306,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             this._mapWatcher = undefined;
             if (this._mapRefreshTimer) { clearTimeout(this._mapRefreshTimer); }
         });
+    }
+
+    /** Discord 의 "상태 알려줘" — 배포 화면과 같은 Core 기록을 짧게 요약한다. */
+    async discordStatus(workspace: string): Promise<DiscordOpsResult> {
+        const name = path.basename(workspace);
+        const response = await this._apiClient.getCanvasSnapshot(workspace, s3ProjectIdentifier(s3RepositoryIdentity(workspace), name));
+        if (!response.success || !response.data) {
+            return { ok: false, state: 'status', title: `${name} · 상태를 읽지 못했어요`, detail: humanizeNetworkError(response.error || 'ReCoder Core 연결을 확인해 주세요.') };
+        }
+        return statusSummary(name, response.data as Parameters<typeof statusSummary>[1]);
     }
 
     postMessage(type: string, payload: unknown): void {

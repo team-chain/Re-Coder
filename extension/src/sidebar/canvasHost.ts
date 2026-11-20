@@ -509,6 +509,12 @@ export class CanvasHost {
     private async discord(type:string,p:Record<string,unknown>,send:Send) {
         const requestId=String(p.requestId||'');
         const workspace = activeProjectPath();
+        //: Discord 에서 온 배포·롤백 요청 — 연결 방식(웹후크·봇 토큰)과 상관없이 로그인 연결이 들고 있다.
+        if (type === 'canvas.discord.opsPending' || type === 'canvas.discord.opsReply') {
+            const result = await vscode.commands.executeCommand<{requests?:unknown[]}>('recoder.discord.action', type.slice('canvas.discord.'.length), p);
+            send('canvas.discord.ops', { requestId, requests: result?.requests ?? [] });
+            return;
+        }
         if (type === 'canvas.discord.notifications') {
             if (!workspace || p.workspace !== workspace) throw new Error('프로젝트가 바뀌었습니다. 배포 화면을 다시 여세요.');
             const key = 'recoder.discord.notifications.' + createHash('sha256').update(workspace).digest('hex');

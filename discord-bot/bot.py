@@ -11,7 +11,7 @@ discord-bot/bot.py — ReCoder Discord Bot 메인 진입점 (설계서 §37)
   - 서버 설정은 guild_config.db (SQLite) 에 저장
 
 지원 기능:
-  § 37.3  슬래시 커맨드: /recoder preflight, /status, /deploy, /rollback, /code
+  § 37.3  슬래시 커맨드: /recoder develop, deploy, rollback, status (연결한 내 VS Code 로 요청, 승인은 VS Code)
   § 37.3  관리 커맨드: /recoder setup api | channel | role | status
   § 37.4  시나리오 1: 출근길 자동 브리핑
   § 37.5  시나리오 2: 새벽 인시던트 알림 + RCA 자동 생성
@@ -214,35 +214,30 @@ class RecoderBot(discord.Client):
         embed = discord.Embed(
             title="👋 ReCoder Bot이 서버에 참가했습니다!",
             description=(
-                "안녕하세요! ReCoder Bot은 Discord에서 바로 **ECS 배포, 롤백, 코드 분석**을 "
-                "할 수 있는 ChatOps 봇입니다.\n\n"
-                "시작하려면 **서버 관리자**가 아래 단계를 따라 설정해주세요."
+                "안녕하세요! ReCoder Bot은 Discord에서 내 VS Code 프로젝트에 **개발·배포·롤백**을 "
+                "요청하고 결과를 받아 보는 봇입니다. 배포와 롤백은 VS Code에서 승인해야 진행됩니다."
             ),
             color=discord.Color.blurple(),
         )
         embed.add_field(
-            name="⚙️ 초기 설정 (관리자 전용)",
+            name="⚙️ 연결 방법",
             value=(
-                "```\n"
-                "/recoder setup api <ReCoder_URL> <연동 토큰: ~/.recoder/integration_token>\n"
-                "/recoder setup channel deploy #배포-알림\n"
-                "/recoder setup role add @개발팀\n"
-                "```"
+                "각자 VS Code ReCoder → 배포 화면 → **Discord**에서 로그인하고 "
+                "이 서버의 채널을 내 프로젝트에 연결하세요."
             ),
             inline=False,
         )
         embed.add_field(
             name="📋 지원 커맨드",
             value=(
-                "`/recoder preflight` — 배포 사전 점검\n"
-                "`/recoder deploy` — ECS 배포 실행\n"
-                "`/recoder rollback` — 이전 버전으로 롤백\n"
-                "`/recoder status` — 현재 상태 조회\n"
-                "`/recoder code` — 코드 분석/생성"
+                "`/recoder develop` — 내 VS Code 프로젝트에 개발 요청\n"
+                "`/recoder deploy` — 배포 요청 (VS Code에서 승인)\n"
+                "`/recoder rollback` — 롤백 요청 (VS Code에서 승인)\n"
+                "`/recoder status` — 현재 배포 상태"
             ),
             inline=False,
         )
-        embed.set_footer(text="/recoder setup status 로 설정 현황을 확인할 수 있습니다.")
+        embed.set_footer(text="연결한 채널에서는 '배포해줘'처럼 채팅으로도 요청할 수 있어요.")
 
         try:
             await channel.send(embed=embed)
@@ -260,7 +255,7 @@ class RecoderBot(discord.Client):
 
 
 def _register_commands(group: app_commands.Group) -> None:
-    """§37.3 슬래시 커맨드 5종을 recoder 그룹에 등록한다."""
+    """recoder 그룹 명령 — 개발·배포·롤백·상태는 Discord 로그인으로 연결한 내 VS Code 프로젝트로 간다."""
 
     @group.command(name="develop", description="연결된 내 VS Code 프로젝트에 개발을 요청합니다")
     @app_commands.describe(prompt="만들거나 수정할 내용")
@@ -274,58 +269,11 @@ def _register_commands(group: app_commands.Group) -> None:
         import control_panel
         await control_panel.send_panel(interaction)
 
-    @group.command(name="preflight", description="ECS 배포 전 AWS 리소스 사전 점검")
-    @app_commands.describe(
-        cluster="ECS 클러스터 이름",
-        service="ECS 서비스 이름",
-        region="AWS 리전 (기본: ap-northeast-2)",
-    )
-    async def preflight_cmd(
-        interaction: discord.Interaction,
-        cluster: str,
-        service: str,
-        region: str = "ap-northeast-2",
-    ) -> None:
-        from commands.preflight import _build_preflight_embed
-        from middleware.auth import is_allowed
-
-        if not is_allowed(interaction):
-            from middleware.auth import _get_deny_message
-            await interaction.response.send_message(_get_deny_message(interaction), ephemeral=True)
-            return
-        await interaction.response.defer(thinking=True)
-        try:
-            client = get_client_for_guild(interaction.guild_id)
-            result = await client.preflight(cluster=cluster, service=service, region=region)
-            embed = _build_preflight_embed(result, cluster, service, region)
-            await interaction.followup.send(embed=embed)
-        except GuildNotConfiguredError as exc:
-            await interaction.followup.send(str(exc), ephemeral=True)
-        except Exception as exc:
-            await interaction.followup.send(f"❌ Preflight 실패: `{exc}`", ephemeral=True)
-
-    @group.command(name="status", description="ReCoder 현재 상태 및 최근 배포 현황 조회")
-    async def status_cmd(
-        interaction: discord.Interaction,
-        session_id: str = "",
-    ) -> None:
-        from commands.status import _build_status_embed
-        from middleware.auth import is_allowed
-
-        if not is_allowed(interaction):
-            from middleware.auth import _get_deny_message
-            await interaction.response.send_message(_get_deny_message(interaction), ephemeral=True)
-            return
-        await interaction.response.defer(thinking=True)
-        try:
-            client = get_client_for_guild(interaction.guild_id)
-            data = await client.status(session_id=session_id or None)
-            embed = _build_status_embed(data, session_id or None)
-            await interaction.followup.send(embed=embed)
-        except GuildNotConfiguredError as exc:
-            await interaction.followup.send(str(exc), ephemeral=True)
-        except Exception as exc:
-            await interaction.followup.send(f"❌ 상태 조회 실패: `{exc}`", ephemeral=True)
+    @group.command(name="status", description="연결된 내 프로젝트의 배포 상태를 VS Code에서 받아 봅니다")
+    @app_commands.guild_only()
+    async def status_cmd(interaction: discord.Interaction) -> None:
+        from api_server import connections
+        await connections.ops_command(interaction, "status")
 
     @group.command(name="link", description="본인 VSCode를 연결합니다 (자가발급 student_id 입력)")
     @app_commands.describe(student_id="enroll로 받은 토큰(rcdr_...) 또는 student_id")
@@ -372,64 +320,17 @@ def _register_commands(group: app_commands.Group) -> None:
             ephemeral=True,
         )
 
-    @group.command(name="deploy", description="ECS 서비스 배포 실행")
-    @app_commands.describe(
-        cluster="ECS 클러스터",
-        service="ECS 서비스",
-        image_tag="Docker 이미지 태그",
-    )
-    async def deploy_cmd(
-        interaction: discord.Interaction,
-        cluster: str,
-        service: str,
-        image_tag: str = "latest",
-    ) -> None:
-        from commands.deploy import DeployConfirmModal
-        from middleware.auth import is_allowed
+    @group.command(name="deploy", description="연결된 내 VS Code 프로젝트에 배포를 요청합니다 (VS Code에서 승인)")
+    @app_commands.guild_only()
+    async def deploy_cmd(interaction: discord.Interaction) -> None:
+        from api_server import connections
+        await connections.ops_command(interaction, "deploy")
 
-        if not is_allowed(interaction):
-            from middleware.auth import _get_deny_message
-            await interaction.response.send_message(_get_deny_message(interaction), ephemeral=True)
-            return
-        modal = DeployConfirmModal(
-            cluster=cluster,
-            service=service,
-            image_tag=image_tag,
-            region="ap-northeast-2",
-            guild_id=interaction.guild_id,
-        )
-        await interaction.response.send_modal(modal)
-
-    @group.command(name="rollback", description="ECS 서비스를 이전 리비전으로 롤백")
-    @app_commands.describe(
-        cluster="ECS 클러스터",
-        service="ECS 서비스",
-    )
-    async def rollback_cmd(
-        interaction: discord.Interaction,
-        cluster: str,
-        service: str,
-    ) -> None:
-        from commands.rollback import RollbackConfirmView
-        from middleware.auth import is_allowed
-
-        if not is_allowed(interaction):
-            from middleware.auth import _get_deny_message
-            await interaction.response.send_message(_get_deny_message(interaction), ephemeral=True)
-            return
-        embed = discord.Embed(
-            title="⚠️ 롤백 확인",
-            description=f"`{service}`를 이전 버전으로 롤백하시겠습니까?",
-            color=discord.Color.yellow(),
-        )
-        view = RollbackConfirmView(
-            cluster=cluster,
-            service=service,
-            target_revision=None,
-            requester_id=interaction.user.id,
-            guild_id=interaction.guild_id,
-        )
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    @group.command(name="rollback", description="연결된 내 VS Code 프로젝트에 롤백을 요청합니다 (VS Code에서 승인)")
+    @app_commands.guild_only()
+    async def rollback_cmd(interaction: discord.Interaction) -> None:
+        from api_server import connections
+        await connections.ops_command(interaction, "rollback")
 
     @group.command(
         name="code",
@@ -465,43 +366,6 @@ def _register_commands(group: app_commands.Group) -> None:
     async def workbench_cmd(interaction: discord.Interaction) -> None:
         from commands.workbench import workbench_command
         await workbench_command(interaction)
-
-    # ── §41 Deploy Forecast ───────────────────────────────────────────────
-    @group.command(
-        name="forecast",
-        description="배포 일기예보 — 지금 배포해도 안전한지 한눈에 확인합니다",
-    )
-    @app_commands.describe(
-        service="대상 서비스명 (선택 — 생략 시 전체)",
-        window_days="분석 기간 (기본 30일)",
-    )
-    async def forecast_cmd(
-        interaction: discord.Interaction,
-        service: str = "",
-        window_days: int = 30,
-    ) -> None:
-        from commands.forecast import build_forecast_embed
-        from middleware.auth import is_allowed
-
-        if not is_allowed(interaction):
-            from middleware.auth import _get_deny_message
-            await interaction.response.send_message(_get_deny_message(interaction), ephemeral=True)
-            return
-        await interaction.response.defer(thinking=True)
-        try:
-            client = get_client_for_guild(interaction.guild_id)
-            data = await client.get_deploy_forecast(
-                service=service,
-                window_days=window_days,
-            )
-            embed = build_forecast_embed(data)
-            await interaction.followup.send(embed=embed)
-        except GuildNotConfiguredError as exc:
-            await interaction.followup.send(str(exc), ephemeral=True)
-        except Exception as exc:
-            await interaction.followup.send(
-                f"❌ 배포 일기예보 조회 실패: `{exc}`", ephemeral=True
-            )
 
 
 def _setup_standup_scheduler(bot: RecoderBot) -> None:

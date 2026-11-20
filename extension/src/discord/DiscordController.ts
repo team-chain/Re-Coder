@@ -2,13 +2,34 @@ import * as vscode from 'vscode';
 import { randomUUID } from 'crypto';
 import * as path from 'path';
 import { samePath } from '../core/coreReuse';
-import { BridgeClient } from '../bridge/BridgeClient';
+import { BridgeClient, OpsRequestMessage } from '../bridge/BridgeClient';
 import { DiscordConnectionClient, loginProof, projectId } from './connectionClient';
 import { projectRoots } from '../activeProject';
+
+/** Discord 에서 받은, VS Code 승인을 기다리는 배포·롤백 요청. */
+export interface DiscordOpsRequest {
+    requestId: string;
+    action: 'deploy' | 'rollback';
+    requester: string;
+    projectName: string;
+    workspace: string;
+    receivedAt: number;
+    /** VS Code 에서 승인해 진행 중이다(결과만 남았다). */
+    accepted: boolean;
+}
+export interface DiscordOpsResult { ok: boolean; state: 'accepted' | 'done' | 'failed' | 'declined' | 'expired' | 'status'; title: string; detail?: string; url?: string }
+/** 승인을 기다리는 시간 · 승인한 뒤 결과를 기다리는 시간. 넘으면 Discord 에 닫았다고 알린다(시험에서 줄인다). */
+export const OPS_TIMING = { approvalMs: 30 * 60_000, runningMs: 2 * 60 * 60_000, retryMs: 5000 };
 
 /** Owns project-scoped secrets and sockets independently of the webview lifecycle. */
 export class DiscordController implements vscode.Disposable {
     private bridges = new Map<string, BridgeClient>();
+    private ops = new Map<string, DiscordOpsRequest & { bridgeKey: string; timer?: NodeJS.Timeout }>();
+    private readonly opsChanged = new vscode.EventEmitter<DiscordOpsRequest | undefined>();
+    /** 새 요청이 오면 그 요청, 목록만 바뀌면 undefined. */
+    readonly onOpsChanged = this.opsChanged.event;
+    /** Discord 의 상태 질문에 답할 요약(배포 화면과 같은 Core 기록). extension.ts 가 넣는다. */
+    statusProvider?: (workspace: string) => Promise<DiscordOpsResult>;
     private logins = new Map<string, AbortController>();
     private disposed = false;
     constructor(private context: vscode.ExtensionContext) {}
@@ -45,7 +66,8 @@ export class DiscordController implements vscode.Disposable {
         const key = this.key(client, folder);
         this.bridges.get(key)?.dispose();
         if (this.disposed || !vscode.workspace.isTrusted) return;
-        const bridge = new BridgeClient(this.context, { root: folder.uri, url: client.websocketUrl(), token, projectId: this.id(folder) });
+        const bridge = new BridgeClient(this.context, { root: folder.uri, url: client.websocketUrl(), token, projectId: this.id(folder),
+            onOps: request => void this.receiveOps(key, folder, request).catch(console.error) });
         this.bridges.set(key, bridge);
         bridge.connect();
     }
@@ -59,7 +81,78 @@ export class DiscordController implements vscode.Disposable {
             if (token) await this.bridge(client, folder, token);
         }
     }
+    /** VS Code 승인을 기다리거나 진행 중인 Discord 요청(배포 화면이 띄운다). */
+    pendingOps(): DiscordOpsRequest[] {
+        return [...this.ops.values()].map(({ bridgeKey: _k, timer: _t, ...request }) => request);
+    }
+    private async receiveOps(bridgeKey: string, folder: vscode.WorkspaceFolder, request: OpsRequestMessage) {
+        const bridge = this.bridges.get(bridgeKey);
+        if (!bridge || this.ops.has(request.request_id)) return;
+        if (request.action === 'status') {
+            let result: DiscordOpsResult;
+            try {
+                result = this.statusProvider ? await this.statusProvider(folder.uri.fsPath)
+                    : { ok: false, state: 'status', title: `${folder.name} · 상태를 아직 읽을 수 없어요`, detail: 'VS Code에서 ReCoder를 연 뒤 다시 물어봐 주세요.' };
+            } catch (error) {
+                result = { ok: false, state: 'status', title: `${folder.name} · 상태를 읽지 못했어요`, detail: error instanceof Error ? error.message : String(error) };
+            }
+            bridge.send({ type: 'ops.result', request_id: request.request_id, ...trimResult(result) });
+            return;
+        }
+        if ([...this.ops.values()].some(item => item.bridgeKey === bridgeKey)) {
+            bridge.send({ type: 'ops.result', request_id: request.request_id, ok: false, state: 'declined',
+                title: '이미 처리 중인 요청이 있어요', detail: 'VS Code에서 앞의 요청을 끝낸 뒤 다시 보내 주세요.' });
+            return;
+        }
+        const item = { requestId: request.request_id, action: request.action, requester: request.requester || 'Discord 사용자',
+            projectName: folder.name, workspace: folder.uri.fsPath, receivedAt: Date.now(), accepted: false, bridgeKey };
+        this.ops.set(item.requestId, item);
+        this.arm(item.requestId, OPS_TIMING.approvalMs);
+        this.opsChanged.fire(this.pendingOps().find(r => r.requestId === item.requestId));
+    }
+    private arm(requestId: string, ms: number) {
+        const item = this.ops.get(requestId);
+        if (!item) return;
+        if (item.timer) clearTimeout(item.timer);
+        item.timer = setTimeout(() => {
+            const label = item.action === 'deploy' ? '배포' : '롤백';
+            this.reply(requestId, item.accepted
+                ? { ok: false, state: 'expired', title: `${label} 결과를 확인하지 못했어요`, detail: 'VS Code ReCoder의 배포 화면에서 결과를 확인해 주세요.' }
+                : { ok: false, state: 'expired', title: `${label} 요청을 닫았어요`, detail: '30분 안에 VS Code에서 승인하지 않았어요. 필요하면 다시 요청해 주세요.' });
+        }, ms);
+        item.timer.unref?.();
+    }
+    /** 요청에 답한다. accepted 는 중간 알림(요청은 결과가 나올 때까지 남는다). */
+    reply(requestId: string, result: DiscordOpsResult): boolean {
+        const item = this.ops.get(requestId);
+        if (!item) return false;
+        if (result.state === 'accepted') {
+            if (item.accepted) return true;
+            item.accepted = true;
+            this.arm(requestId, OPS_TIMING.runningMs);
+        } else {
+            if (item.timer) clearTimeout(item.timer);
+            this.ops.delete(requestId);
+        }
+        this.deliver(item.bridgeKey, { type: 'ops.result', request_id: requestId, ...trimResult(result) });
+        this.opsChanged.fire(undefined);
+        return true;
+    }
+    /** 소켓이 잠깐 끊겼어도 결과가 사라지지 않게 2분 동안 다시 보낸다. */
+    private deliver(bridgeKey: string, message: object, attempt = 0) {
+        if (this.disposed) return;
+        if (this.bridges.get(bridgeKey)?.send(message)) return;
+        if (attempt < 24) setTimeout(() => this.deliver(bridgeKey, message, attempt + 1), OPS_TIMING.retryMs).unref?.();
+    }
     async action(type: string, p: any = {}): Promise<any> {
+        if (type === 'opsPending') return { requests: this.pendingOps() };
+        if (type === 'opsReply') {
+            const state = String(p.state || '');
+            if (!['accepted', 'done', 'failed', 'declined'].includes(state)) throw new Error('알 수 없는 응답입니다.');
+            const ok = this.reply(String(p.opsId || ''), { ok: p.ok === true, state: state as DiscordOpsResult['state'],
+                title: String(p.title || ''), detail: String(p.detail || ''), url: String(p.url || '') });
+            return { requests: this.pendingOps(), replied: ok };
+        }
         if (type === 'settings') {
             await vscode.commands.executeCommand('workbench.action.openSettings', 'recoder.discord.serverUrl');
             return { cancelled: true };
@@ -137,9 +230,18 @@ export class DiscordController implements vscode.Disposable {
         catch (error: any) { return { ...common, authenticated: false, connection_error: error.message }; }
     }
     dispose() {
+        for (const item of this.ops.values()) if (item.timer) clearTimeout(item.timer);
+        this.ops.clear();
+        this.opsChanged.dispose();
         this.disposed = true;
         for (const abort of this.logins.values()) abort.abort();
         for (const bridge of this.bridges.values()) bridge.dispose();
         this.bridges.clear();
     }
+}
+
+function trimResult(result: DiscordOpsResult) {
+    const url = /^https?:\/\/[^\s<>]{1,300}$/.test(result.url || '') ? result.url : '';
+    //: 봇 소켓은 한 메시지 4KB 까지만 받는다 — 한글 600자(약 1.8KB)로 자른다.
+    return { ok: result.ok === true, state: result.state, title: String(result.title || '').slice(0, 160), detail: String(result.detail || '').slice(0, 600), ...(url ? { url } : {}) };
 }

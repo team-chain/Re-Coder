@@ -142,6 +142,18 @@ if(process.env.HARNESS_DEPLOY==='1') {
   vscode.window.showInputBox=async()=> 'https://discord.com/api/webhooks/123456789012345678/'+'a'.repeat(60);
 }
 const provider = new SidebarProvider(vscode.Uri.file(path.join(__dirname,'..')),api,core,polling,undefined,memento,secrets);
+//: HARNESS_DISCORD_OPS=deploy|rollback — Discord 에서 온 요청을 실제 DiscordController 로 하나 넣는다. 봇에 보낼 답은 콘솔에 남긴다(Discord 연결 없음).
+if(process.env.HARNESS_DISCORD_OPS){
+  const {DiscordController}=require('../out/discord/DiscordController');
+  const controller=new DiscordController({subscriptions:[],secrets:{get:async()=>undefined}});
+  const folder={uri:vscode.Uri.file(workspace),name:path.basename(workspace),index:0};
+  controller.bridges.set('harness',{send:m=>{console.log('discord-reply',JSON.stringify(m));return true;},dispose(){}});
+  controller.statusProvider=w=>provider.discordStatus(w);
+  controller.onOpsChanged(()=>provider.postMessage('canvas.discord.ops',{requestId:'',requests:controller.pendingOps()}));
+  const exec=vscode.commands.executeCommand;
+  vscode.commands.executeCommand=async(name,...args)=>name==='recoder.discord.action'&&String(args[0]).startsWith('ops')?controller.action(args[0],args[1]):exec(name,...args);
+  setTimeout(()=>controller.receiveOps('harness',folder,{request_id:'harness-ops-0001',action:process.env.HARNESS_DISCORD_OPS,requester:'alice'}),1500);
+}
 // Claude picker verification: production host/UI, synthetic keys, no paid API calls.
 if(process.env.HARNESS_AI_PICKER==='1') {
   saved['recoder.ai.provider']='anthropic';

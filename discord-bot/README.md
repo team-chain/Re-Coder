@@ -72,12 +72,11 @@ cp .env.example .env       # DISCORD_BOT_TOKEN 채우기
 ### 일반
 | 커맨드 | 설명 |
 |---|---|
-| `/recoder preflight cluster:<name> service:<name>` | ECS 배포 사전 점검 |
-| `/recoder status [session_id:<id>]` | 현재 상태 조회 |
-| `/recoder deploy cluster:<name> service:<name> image_tag:<tag>` | ECS 배포 (모달 확인 후) |
-| `/recoder rollback cluster:<name> service:<name>` | 이전 리비전으로 롤백 |
-| `/recoder code prompt:<text>` | 에러/코드 분석 |
-| `/recoder forecast [service:<name>] [window_days:<n>]` | 배포 일기예보 (§41) |
+| `/recoder develop prompt:<text>` | 연결한 내 VS Code 프로젝트에 개발 요청 |
+| `/recoder deploy` | 연결한 내 VS Code 프로젝트에 배포 요청 — VS Code에서 승인해야 진행, 결과는 채널로 |
+| `/recoder rollback` | 롤백 요청 — VS Code의 이력·롤백에서 고르고 승인, 결과는 채널로 |
+| `/recoder status` | VS Code가 보는 현재 배포 상태 |
+| `/recoder code prompt:<text>` | 에러/코드 분석 (예전 서버 설정 방식) |
 | `/recoder workbench` | 인터랙티브 대시보드 |
 | `/recoder invite` | 봇 초대 URL 표시 |
 
@@ -140,7 +139,7 @@ discord-bot/
 ├── guild_store.py            # 서버별 설정 SQLite 영속화
 ├── bridge_settings.py        # 브리지 채널 설정 JSON 영속화
 ├── make_handler.py           # /make 채널 메시지 → Bedrock 스트리밍
-├── commands/                 # 슬래시 커맨드 빌더 (preflight/status/deploy/...)
+├── commands/                 # 슬래시 커맨드 빌더 (setup/workbench/code ...)
 ├── middleware/auth.py        # Hybrid 인증
 ├── scenarios/                # §37.4~6 시나리오 (출근 브리핑 / 새벽 인시던트 / 팀 협업)
 ├── tests/                    # pytest 단위 테스트

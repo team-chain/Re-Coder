@@ -14,7 +14,8 @@ import type { Spec } from "../SpecView";
 export const BOARD_CSS = `
 .fb{position:relative;min-height:520px;border:1px solid var(--fb-line);border-radius:12px;overflow:hidden;
   --fb-line:#262626;--fb-line2:#333;--fb-card:#111;--fb-fg:#ededed;--fb-fg2:#a1a1a1;--fb-fg3:#707070;--fb-ok:#0cce6b;--fb-bad:#ee4444;--fb-warn:#f5a623;
-  background-color:#0b0b0b;background-image:radial-gradient(#232323 1px,transparent 1px);background-size:16px 16px;color:var(--fb-fg);font-size:13.5px}
+  --fb-bg:#0b0b0b;--fb-dot:#232323;--fb-hover:#444;--fb-idle:rgba(10,10,10,.6);
+  background-color:var(--fb-bg);background-image:radial-gradient(var(--fb-dot) 1px,transparent 1px);background-size:16px 16px;color:var(--fb-fg);font-size:13.5px}
 .fb *{box-sizing:border-box}
 .fb button{font:inherit;color:inherit}
 .fb-lines{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
@@ -34,19 +35,19 @@ export const BOARD_CSS = `
 .fb-d{width:7px;height:7px;border-radius:50%;flex:none;background:#555;display:inline-block}
 .fb-d.ok{background:var(--fb-ok)}.fb-d.bad{background:var(--fb-bad)}.fb-d.warn{background:var(--fb-warn)}
 .fb-mid{display:flex;justify-content:center;flex-direction:column;align-items:center;gap:10px}
-.fb-gate{all:unset;cursor:pointer;display:inline-flex;align-items:center;gap:7px;padding:5px 12px;border-radius:999px;background:#111;border:1px solid var(--fb-line2);font-size:12.5px;color:var(--fb-fg2);position:relative;z-index:1}
-.fb-gate:hover{color:var(--fb-fg);border-color:#444}
-.fb-chip{all:unset;cursor:pointer;display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--fb-fg3);position:relative;z-index:1}
-.fb-chip:hover{color:var(--fb-fg2)}
+.fb .fb-gate{all:unset;cursor:pointer;display:inline-flex;align-items:center;gap:7px;padding:5px 12px;border-radius:999px;background:var(--fb-card);border:1px solid var(--fb-line2);font-size:12.5px;color:var(--fb-fg2);position:relative;z-index:1}
+.fb .fb-gate:hover{color:var(--fb-fg);border-color:var(--fb-hover)}
+.fb .fb-chip{all:unset;cursor:pointer;display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--fb-fg3);position:relative;z-index:1}
+.fb .fb-chip:hover{color:var(--fb-fg2)}
 .fb-chip svg{width:14px;height:14px}
 .fb-tgts{display:grid;gap:12px}
-.fb-tgt{all:unset;box-sizing:border-box;cursor:pointer;display:flex;align-items:center;gap:14px;padding:14px 16px;border:1px solid var(--fb-line2);border-radius:10px;background:var(--fb-card);transition:border-color .12s,background .12s;position:relative}
-.fb-tgt:hover{border-color:#444}
+.fb .fb-tgt{all:unset;box-sizing:border-box;cursor:pointer;display:flex;align-items:center;gap:14px;padding:14px 16px;border:1px solid var(--fb-line2);border-radius:10px;background:var(--fb-card);transition:border-color .12s,background .12s;position:relative}
+.fb .fb-tgt:hover{border-color:var(--fb-hover)}
 .fb-tgt:focus-visible{outline:2px solid #3291ff;outline-offset:2px}
 .fb-tgt.locked .fb-logo,.fb-tgt.locked .fb-t{opacity:.5}
-.fb-tgt.drop{border:1.5px dashed var(--c);background:color-mix(in srgb,var(--c) 8%,#111)}
-.fb-tgt.over{border-style:solid;background:color-mix(in srgb,var(--c) 14%,#111)}
-.fb-logo{width:40px;height:40px;border-radius:8px;border:1px solid var(--fb-line);background:#0b0b0b;display:grid;place-items:center;padding:8px;flex:none}
+.fb .fb-tgt.drop{border:1.5px dashed var(--c);background:color-mix(in srgb,var(--c) 8%,var(--fb-card))}
+.fb .fb-tgt.over{border-style:solid;background:color-mix(in srgb,var(--c) 14%,var(--fb-card))}
+.fb-logo{width:40px;height:40px;border-radius:8px;border:1px solid var(--fb-line);background:var(--fb-logo,#0b0b0b);display:grid;place-items:center;padding:8px;flex:none}
 .fb-logo svg{width:100%;height:100%}
 .fb-t{flex:1;min-width:0}
 .fb-t b{display:block;font-weight:600;font-size:14px}
@@ -54,13 +55,15 @@ export const BOARD_CSS = `
 .fb-act{font-size:12.5px;padding:4px 10px;border:1px solid var(--fb-line2);border-radius:6px;color:var(--fb-fg)}
 .fb-hint{position:absolute;right:16px;top:50%;transform:translateY(-50%);font-size:12px;font-weight:600;color:var(--c)}
 .fb-foot{position:absolute;left:20px;right:20px;bottom:14px;display:flex;align-items:center;gap:16px;font-size:12.5px;color:var(--fb-fg3)}
-.fb-idle{position:absolute;inset:0;display:grid;place-items:center;color:var(--fb-fg2);background:rgba(10,10,10,.6);z-index:3}
+.fb-idle{position:absolute;inset:0;display:grid;place-items:center;color:var(--fb-fg2);background:var(--fb-idle);z-index:3}
 @media(max-width:860px){.fb-grid{grid-template-columns:1fr;gap:28px;padding:24px 20px 56px}.fb-lines{display:none}.fb-mid{flex-direction:row}}
+body.vscode-light .fb{--fb-line:#e1e6ec;--fb-line2:#cfd7e0;--fb-card:#fff;--fb-fg:#0e1a26;--fb-fg2:#4e5d6e;--fb-fg3:#66768a;--fb-ok:#14945c;--fb-bad:#cf4343;--fb-warn:#b97f0c;
+  --fb-bg:#f7f9fb;--fb-dot:#dde3ea;--fb-hover:#9fb0c2;--fb-logo:#f3f6f9;--fb-idle:rgba(247,249,251,.7)}
 `;
 
 const TARGETS: Array<{ id: Target; kind: string; label: string; color: string }> = [
   { id: "docker", kind: "docker", label: "로컬 Docker", color: "#0db7ed" },
-  { id: "github", kind: "github", label: "GitHub", color: "#ededed" },
+  { id: "github", kind: "github", label: "GitHub", color: "var(--fb-fg)" },
   { id: "ecs", kind: "ecs", label: "AWS ECS", color: "#ff9900" },
   { id: "s3", kind: "s3", label: "AWS S3", color: "#7aa116" },
 ];
@@ -136,7 +139,7 @@ export const FlatBoard: React.FC<{
   return <div className="fb" ref={root} role="group" aria-label="프로젝트 배포 구조" data-testid="deploy-board">
     <style>{BOARD_CSS}</style>
     <svg className="fb-lines" aria-hidden>
-      {paths.map((p, i) => <path key={i} d={p.d} fill="none" strokeWidth="1.5" stroke={p.on ? p.color : "#333"} strokeDasharray={i === 0 || p.on ? undefined : "5 5"} />)}
+      {paths.map((p, i) => <path key={i} d={p.d} fill="none" strokeWidth="1.5" style={{ stroke: p.on ? p.color : "var(--fb-line2)" }} strokeDasharray={i === 0 || p.on ? undefined : "5 5"} />)}
     </svg>
     <div className="fb-grid">
       <div>
