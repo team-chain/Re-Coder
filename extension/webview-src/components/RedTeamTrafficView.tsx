@@ -17,6 +17,20 @@ const OUT_LABEL:Record<Outcome,string>={refused:'거부',answered:'응답',error
 const W=640,H=250,CX=320,CY=128,RX=176,RY=104;
 /** 요청 id 로 정해지는 방향 — 같은 요청은 다시 그려도 같은 자리. */
 const angle=(id:number)=>((id*137.508)%360)*Math.PI/180;
+const CR=26;
+/** 중심에서 각도 a 로 나간 선이 둥근 사각형 방패(반너비 RX, 반높이 RY, 모서리 CR)와 만나는 점. */
+export function shieldPoint(a:number):[number,number]{
+ const c=Math.cos(a),s=Math.sin(a);
+ const t=Math.min(Math.abs(c)>1e-9?RX/Math.abs(c):Infinity,Math.abs(s)>1e-9?RY/Math.abs(s):Infinity);
+ let x=c*t,y=s*t;
+ //: 모서리 둥근 부분이면 모서리 원과의 교점으로 당긴다.
+ if(Math.abs(x)>RX-CR&&Math.abs(y)>RY-CR){
+  const ox=Math.sign(x)*(RX-CR),oy=Math.sign(y)*(RY-CR);
+  const b=-2*(c*ox+s*oy),cc=ox*ox+oy*oy-CR*CR,d=Math.max(0,b*b-4*cc);
+  const k=(-b+Math.sqrt(d))/2;x=c*k;y=s*k;
+ }
+ return [CX+x,CY+y];
+}
 
 export function RedTeamTrafficView({events=[],active,target,isolated,caption,traffic=true}:{events?:RedTeamHttpEvent[];active:boolean;target?:string;isolated?:boolean;caption?:string;traffic?:boolean}) {
  const last=events[events.length-1];
@@ -44,7 +58,7 @@ export function RedTeamTrafficView({events=[],active,target,isolated,caption,tra
      {[0,1,2,3].map(i=><rect key={'b'+i} x={CX-116+i*60} y={CY+22} width="52" height="36" rx="5" className="sk"/>)}
      {active&&<g clipPath="url(#rt-site)"><rect className="rt-scanline" x={CX-130} y={CY-78} width="260" height="46" fill="url(#rt-scan)"/></g>}
     </g>
-    {flying.map((e,i)=>{const a=angle(e.id),o=outcomeOf(e);const sx=CX+Math.cos(a)*360,sy=CY+Math.sin(a)*230,hx=CX+Math.cos(a)*RX*1.02,hy=CY+Math.sin(a)*RY*1.02;
+    {flying.map((e,i)=>{const a=angle(e.id),o=outcomeOf(e);const sx=CX+Math.cos(a)*360,sy=CY+Math.sin(a)*230;const [hx,hy]=shieldPoint(a);
      return <g key={e.id} className={`rt-probe ${e.id===last?.id?'rt-packet':''}`} data-o={o} style={{['--sx' as string]:`${sx}px`,['--sy' as string]:`${sy}px`,['--hx' as string]:`${hx}px`,['--hy' as string]:`${hy}px`,animationDelay:`${i*.35}s`} as React.CSSProperties}>
       <g className="fly" style={{animationDelay:`${i*.35}s`}}><circle r="4.5"/></g>
       <circle className="hit" cx={hx} cy={hy} r="6" style={{animationDelay:`${i*.35+.7}s`}}/>

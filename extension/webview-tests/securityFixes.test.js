@@ -57,7 +57,7 @@ test('diff 색 구분', () => {
 
 test('검사 패널이 수정 목록을 붙이고, 호스트는 검사한 프로젝트에만 적용한다', () => {
   const hubs = read('../webview-src/components/Hubs.tsx');
-  assert.match(hubs, /<SecurityFixList results=\{results\} running=\{running !== null\} onRescan=\{run\} \/>/);
+  assert.match(hubs, /<SecurityFixList results=\{results\} running=\{running !== null\} onRescan=\{run\} onPlan=\{onPlan\} focusId=\{focusFix\} \/>/);
   const host = read('../src/sidebar/SidebarProvider.ts');
   assert.match(host, /postMessage\('scanResult', \{ \.\.\.scanResult, requestId, workspace: scanRoot \}\)/);
   const block = host.slice(host.indexOf("case 'security.fixPlan'"), host.indexOf("case 'createDeployPlan'"));

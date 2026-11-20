@@ -1,0 +1,240 @@
+{
+ "trivy": {
+  "status": "ok",
+  "scan_type": "trivy",
+  "target": "shop-web:latest",
+  "critical_count": 1,
+  "high_count": 4,
+  "medium_count": 0,
+  "findings": [
+   {
+    "severity": "CRITICAL",
+    "id": "CVE-2025-46394",
+    "package": "busybox",
+    "installed": "1.37.0-r18",
+    "fixed": "",
+    "title": "busybox: tar: TAR archive can have filenames hidden from a listing through the use of escape sequences",
+    "target": "shop-web:latest (alpine 3.22.1)",
+    "class": "os-pkgs",
+    "type": "alpine",
+    "pkg_path": "",
+    "cwe": [
+     "CWE-150"
+    ]
+   },
+   {
+    "severity": "HIGH",
+    "id": "CVE-2025-9230",
+    "package": "libssl3",
+    "installed": "3.5.1-r0",
+    "fixed": "3.5.4-r0",
+    "title": "openssl: Out-of-bounds read & write in RFC 3211 KEK Unwrap",
+    "target": "shop-web:latest (alpine 3.22.1)",
+    "class": "os-pkgs",
+    "type": "alpine",
+    "pkg_path": "",
+    "cwe": [
+     "CWE-125",
+     "CWE-787"
+    ]
+   },
+   {
+    "severity": "HIGH",
+    "id": "CVE-2025-27152",
+    "package": "axios",
+    "installed": "0.21.4",
+    "fixed": "1.8.2, 0.30.0",
+    "title": "axios: Possible SSRF and Credential Leakage via Absolute URL in axios Requests",
+    "target": "Node.js",
+    "class": "lang-pkgs",
+    "type": "node-pkg",
+    "pkg_path": "app/node_modules/axios/package.json",
+    "cwe": [
+     "CWE-918"
+    ]
+   },
+   {
+    "severity": "HIGH",
+    "id": "CVE-2024-45590",
+    "package": "body-parser",
+    "installed": "1.20.2",
+    "fixed": "1.20.3",
+    "title": "body-parser: Denial of Service Vulnerability in body-parser",
+    "target": "Node.js",
+    "class": "lang-pkgs",
+    "type": "node-pkg",
+    "pkg_path": "app/node_modules/body-parser/package.json",
+    "cwe": [
+     "CWE-405"
+    ]
+   },
+   {
+    "severity": "HIGH",
+    "id": "CVE-2024-21538",
+    "package": "cross-spawn",
+    "installed": "7.0.3",
+    "fixed": "7.0.5, 6.0.6",
+    "title": "cross-spawn: regular expression denial of service",
+    "target": "Node.js",
+    "class": "lang-pkgs",
+    "type": "node-pkg",
+    "pkg_path": "usr/local/lib/node_modules/npm/node_modules/cross-spawn/package.json",
+    "cwe": [
+     "CWE-1333"
+    ]
+   }
+  ],
+  "summary": ""
+ },
+ "hadolint": {
+  "status": "ok",
+  "scan_type": "hadolint",
+  "target": "Dockerfile",
+  "critical_count": 0,
+  "high_count": 1,
+  "medium_count": 1,
+  "findings": [
+   {
+    "severity": "MEDIUM",
+    "code": "DL3018",
+    "column": 1,
+    "file": "-",
+    "level": "warning",
+    "line": 2,
+    "message": "Pin versions in apk add. Instead of `apk add <package>` use `apk add <package>=<version>`"
+   },
+   {
+    "severity": "HIGH",
+    "code": "DL3025",
+    "column": 1,
+    "file": "-",
+    "level": "warning",
+    "line": 8,
+    "message": "Use arguments JSON notation for CMD and ENTRYPOINT arguments"
+   }
+  ],
+  "summary": ""
+ },
+ "gitleaks": {
+  "status": "ok",
+  "scan_type": "gitleaks",
+  "target": ".",
+  "critical_count": 1,
+  "high_count": 0,
+  "medium_count": 0,
+  "findings": [
+   {
+    "severity": "CRITICAL",
+    "rule_id": "generic-api-key",
+    "secret_type": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "file": "src/config.js",
+    "line": 3,
+    "commit": ""
+   }
+  ],
+  "summary": ""
+ },
+ "_proposals": [
+  {
+   "id": "eed951863373",
+   "tool": "trivy",
+   "title": "베이스 이미지 OS 패키지 2개 패치",
+   "detail": "busybox, libssl3 — 실행 단계에서 OS 패키지를 최신 보안 패치로 올립니다.",
+   "files": [
+    "Dockerfile"
+   ],
+   "auto": true,
+   "rebuild": true
+  },
+  {
+   "id": "6d06a2ef5d8c",
+   "tool": "trivy",
+   "title": "베이스 이미지 새로 받기",
+   "detail": "node:20-alpine 를 다시 받습니다(docker pull). PC 에 남은 옛 베이스 이미지와 캐시된 패키지 설치 결과 때문에 이미 고쳐진 취약점이 계속 남는 경우가 많습니다.",
+   "files": [],
+   "auto": true,
+   "rebuild": true
+  },
+  {
+   "id": "86832dd719f9",
+   "tool": "trivy",
+   "title": "지원이 끝난 런타임 버전 올리기",
+   "detail": "Node 20 이하·Python 3.9 이하 베이스 이미지는 보안 패치가 끝났습니다. Node 22 / Python 3.12 로 바꿉니다.",
+   "files": [
+    "Dockerfile"
+   ],
+   "auto": true,
+   "rebuild": true
+  },
+  {
+   "id": "05310dd4bb25",
+   "tool": "trivy",
+   "title": "이미지에 들어 있는 npm 의 취약점",
+   "detail": "cross-spawn 는 npm 에 함께 들어 있는 패키지입니다. 실행 명령(CMD)이 npm 으로 앱을 띄워서 npm 을 지울 수 없습니다 — CMD 를 node 로 바로 실행하게 바꾸면 지울 수 있습니다.",
+   "files": [
+    "Dockerfile"
+   ],
+   "auto": false,
+   "rebuild": false
+  },
+  {
+   "id": "1045fa42310a",
+   "tool": "trivy",
+   "title": "axios 0.21.4 → 0.30.0 (취약점 1건)",
+   "detail": "package.json 의 axios 를 ^0.30.0 로 올립니다.",
+   "files": [
+    "package.json"
+   ],
+   "auto": true,
+   "rebuild": true
+  },
+  {
+   "id": "b6b364b5a4f1",
+   "tool": "trivy",
+   "title": "body-parser 1.20.2 → 1.20.3 (취약점 1건)",
+   "detail": "body-parser 는 다른 패키지가 함께 설치하는 하위 패키지라 package.json 의 overrides 로 ^1.20.3 를 지정합니다.",
+   "files": [
+    "package.json"
+   ],
+   "auto": true,
+   "rebuild": true
+  },
+  {
+   "id": "e7df6254e5a5",
+   "tool": "hadolint",
+   "title": "OS 패키지 버전은 기본 이미지 태그로 고정(이 줄만 예외) (DL3018)",
+   "detail": "Dockerfile 2번째 줄",
+   "files": [
+    "Dockerfile"
+   ],
+   "auto": true,
+   "rebuild": false
+  },
+  {
+   "id": "ee36415bb86f",
+   "tool": "hadolint",
+   "title": "실행 명령을 JSON 형식으로(종료 신호가 앱에 바로 전달) (DL3025)",
+   "detail": "Dockerfile 8번째 줄",
+   "files": [
+    "Dockerfile"
+   ],
+   "auto": true,
+   "rebuild": false
+  },
+  {
+   "id": "3212baac232c",
+   "tool": "gitleaks",
+   "title": "src/config.js 의 키 1개를 .env 로 옮기기",
+   "detail": "코드에 적힌 값을 환경변수(API_KEY)로 읽게 바꾸고, 값은 커밋·이미지에서 빠지는 .env 에 둡니다.",
+   "files": [
+    ".dockerignore",
+    ".env",
+    ".env.example",
+    ".gitignore",
+    "src/config.js"
+   ],
+   "auto": true,
+   "rebuild": false
+  }
+ ]
+}

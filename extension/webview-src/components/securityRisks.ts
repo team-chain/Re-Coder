@@ -14,7 +14,7 @@ import type { PentagiAssessment, CheckKind } from '../../src/security/pentagiAss
 export type RiskLevel = 'danger' | 'caution' | 'low';
 export type RiskSource = 'image' | 'dockerfile' | 'secret' | 'code' | 'attack';
 export type RiskFix = 'auto' | 'code' | 'wait' | 'manual';
-export interface RiskDetail { id?: string; title?: string; installed?: string; fixed?: string; file?: string; line?: number; where?: string }
+export interface RiskDetail { id?: string; title?: string; installed?: string; fixed?: string; file?: string; line?: number; where?: string; os?: boolean; path?: string }
 export interface Risk { key: string; level: RiskLevel; title: string; where: string; source: RiskSource; fix: RiskFix; count: number; details: RiskDetail[] }
 export type Verdict = 'idle' | 'running' | 'safe' | 'caution' | 'danger';
 export type StepState = 'idle' | 'running' | 'ok' | 'warn' | 'bad' | 'na';
@@ -65,7 +65,7 @@ function imageRisks(r?: GateScanResult): Risk[] {
     const level = levelOf(s);
     const title = str(f.title || f.Title);
     const cwe = Array.isArray(f.cwe) ? (f.cwe as unknown[]).map(str) : [];
-    const detail: RiskDetail = { id: str(f.id || f.VulnerabilityID) || undefined, title: title || undefined, installed: str(f.installed || f.InstalledVersion) || undefined, fixed: str(f.fixed || f.FixedVersion) || undefined, where: str(f.target) || undefined };
+    const detail: RiskDetail = { id: str(f.id || f.VulnerabilityID) || undefined, title: title || undefined, installed: str(f.installed || f.InstalledVersion) || undefined, fixed: str(f.fixed || f.FixedVersion) || undefined, where: str(f.target) || undefined, path: str(f.pkg_path || f.PkgPath) || undefined, os: str(f.class) === 'os-pkgs' || /\((?:alpine|debian|ubuntu|wolfi|rhel|centos|amazon|redhat|rocky|alma)/i.test(str(f.target)) || undefined };
     const cur = byPkg.get(pkg);
     const impact = impactOf(title, cwe);
     if (!cur) {
@@ -79,23 +79,26 @@ function imageRisks(r?: GateScanResult): Risk[] {
   }
   //: 어느 이미지(서비스)에 들어 있는지 — Trivy target "shop-web (alpine 3.22)" → "shop-web".
   for (const r of byPkg.values()) {
-    const imgs = [...new Set(r.details.map(d => (d.where ?? '').split(' (')[0].trim()).filter(Boolean))];
+    //: 이미지 OS 패키지는 이미지 이름, 언어 패키지는 앱 의존성인지 이미지에 딸린 npm 인지로 말한다("Node.js" 같은 Trivy 분류명은 쓰지 않는다).
+    const imgs = [...new Set(r.details.map(d => d.os || /\(/.test(d.where ?? '') ? (d.where ?? '').split(' (')[0].trim() : /node_modules\/npm\//.test(d.path ?? '') ? '이미지의 npm' : d.path ? '앱 의존성' : '').filter(Boolean))];
     if (imgs.length) r.where = `${r.where} · ${imgs.slice(0, 3).join(', ')}${imgs.length > 3 ? ` 외 ${imgs.length - 3}` : ''}`;
   }
   return [...byPkg.values()];
 }
 
+//: hadolint 를 표준 입력으로 돌리면 파일 이름이 "-" 로 온다.
+const dfName = (v: unknown) => { const n = str(v); return !n || n === '-' ? 'Dockerfile' : n; };
 function dockerfileRisks(r?: GateScanResult): Risk[] {
   return list(r).map((f, i) => {
     const s = sev(f.severity);
-    return { key: `dockerfile:${str(f.code)}:${str(f.line)}:${i}`, level: levelOf(s), title: '컨테이너 설정', where: `${str(f.file) || 'Dockerfile'}${f.line ? `:${f.line}` : ''}`, source: 'dockerfile' as const, fix: 'auto' as const, count: 1,
-      details: [{ id: str(f.code) || undefined, title: str(f.message) || undefined, file: str(f.file) || undefined, line: Number(f.line) || undefined }] };
+    return { key: `dockerfile:${str(f.code)}:${str(f.line)}:${i}`, level: levelOf(s), title: '컨테이너 설정', where: `${dfName(f.file)}${f.line ? `:${f.line}` : ''}`, source: 'dockerfile' as const, fix: 'auto' as const, count: 1,
+      details: [{ id: str(f.code) || undefined, title: str(f.message) || undefined, file: dfName(f.file), line: Number(f.line) || undefined }] };
   });
 }
 
 function secretRisks(r?: GateScanResult): Risk[] {
   return list(r).map((f, i) => ({ key: `secret:${str(f.file)}:${str(f.line)}:${i}`, level: 'danger' as const, title: '키 노출', where: `${str(f.file) || '파일'}${f.line ? `:${f.line}` : ''}`, source: 'secret' as const, fix: 'manual' as const, count: 1,
-    details: [{ id: str(f.rule_id) || undefined, title: str(f.description) || '코드에 비밀값이 들어 있습니다. 값을 바꾸고(재발급) 코드에서 빼야 합니다.', file: str(f.file) || undefined, line: Number(f.line) || undefined }] }));
+    details: [{ id: str(f.rule_id) || undefined, title: str(f.secret_type || f.description) || '코드에 비밀값이 들어 있습니다. 값을 바꾸고(재발급) 코드에서 빼야 합니다.', file: str(f.file) || undefined, line: Number(f.line) || undefined }] }));
 }
 
 function codeRisks(code?: CodeReport): Risk[] {
@@ -152,7 +155,8 @@ export function securityModel(input: SecurityInput) {
   const pol = input.policy;
   const policyState: StepState = pol?.running ? 'running' : pol?.error ? 'warn' : !pol?.result ? 'idle' : pol.result.opa_available ? 'ok' : 'warn';
   const w = input.watch;
-  const watchState: StepState = w?.running ? 'running' : w?.error ? 'warn' : !w?.result ? 'idle' : 'ok';
+  //: 배포 후 감시 — 기록이 없으면 아직(초록 아님). 기록된 취약점 중 아직 안 고친 게 있으면 노랑.
+  const watchState: StepState = w?.running ? 'running' : w?.error ? 'warn' : watchOf(w?.result);
   const rows = attackRows(input.attack);
   const attackState: StepState = input.attackRunning ? 'running' : !input.attack ? 'idle' : rows.some(r => r.state === 'found') ? 'bad' : rows.some(r => r.state !== 'blocked') ? 'warn' : 'ok';
   const steps: Step[] = [
@@ -175,9 +179,48 @@ export function securityModel(input: SecurityInput) {
   const reason = verdict === 'danger' ? '바로 확인할 위험이 있어요'
     : verdict === 'caution' ? (tally.caution ? '확인할 항목이 있어요' : '아직 확인하지 못한 검사가 있어요')
     : verdict === 'safe' ? '검사한 범위에서 문제를 찾지 못했어요' : verdict === 'running' ? '' : '';
-  return { verdict, title, reason, tally, risks, steps, gate, attack: rows };
+  //: 검사 대상이 없어 건너뛴 검사 — 안전 판정에 숨기지 않고 한 줄로 알린다.
+  const skipped = [scans.trivy && isNotApplicable(scans.trivy, 'trivy') ? '빌드된 이미지가 없어 이미지 검사는 건너뛰었어요' : '',
+    scans.hadolint && isNotApplicable(scans.hadolint, 'hadolint') ? 'Dockerfile이 없어 Dockerfile 검사는 건너뛰었어요' : '',
+    code && code.score === null ? '코드 규칙을 적용할 파일이 없었어요' : ''].filter(Boolean);
+  return { verdict, title, reason, tally, risks, steps, gate, attack: rows, skipped };
 }
 
 function sourceOf(k: Step['key']): RiskSource | '' {
   return k === 'gitleaks' ? 'secret' : k === 'hadolint' ? 'dockerfile' : k === 'trivy' ? 'image' : k === 'code' ? 'code' : '';
+}
+
+function watchOf(result?: Record<string, unknown>): StepState {
+  if (!result) return 'idle';
+  //: recheck 응답(status·message) — 재검사할 SBOM 이 없으면 아직.
+  if (typeof result.status === 'string') return result.status === 'ok' ? 'ok' : result.status === 'not_run' ? 'idle' : 'warn';
+  const services = Object.values(result).filter(v => v && typeof v === 'object') as Array<{ known?: Record<string, { fixed_at?: string }> }>;
+  if (!services.length) return 'idle';
+  return services.some(s => Object.values(s.known ?? {}).some(v => !v.fixed_at)) ? 'warn' : 'ok';
+}
+
+/** 화면에 보내는 수정안(securityFixes.FixProposal 과 같은 모양). */
+export interface FixLite { id: string; tool: string; title: string; detail: string; files: string[]; auto: boolean; rebuild?: boolean }
+export type FixMatch = { kind: 'auto' | 'manual'; proposal: FixLite } | null;
+const mentions = (text: string, word: string) => !!word && new RegExp(`(^|[^\\w@/.-])${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^\\w-])`, 'i').test(text);
+/**
+ * 위험 한 줄에 실제로 맞는 수정안. 자동 수정안이 있을 때만 "고치기" 를 띄운다(없으면 직접 수정 안내).
+ * - 이미지: 패키지 이름이 수정안에 나오거나, OS 패키지면 베이스 이미지 패치 수정안
+ * - Dockerfile: 수정안 제목의 (DLxxxx) 코드
+ * - 시크릿: 수정안의 파일
+ */
+export function fixFor(r: Risk, proposals: FixLite[]): FixMatch {
+  const pick = (list: FixLite[]): FixMatch => { const a = list.find(p => p.auto); if (a) return { kind: 'auto', proposal: a }; const m = list[0]; return m ? { kind: 'manual', proposal: m } : null; };
+  if (r.source === 'image') {
+    //: 고친 버전이 아직 없는 취약점은 어떤 수정안으로도 사라지지 않는다 — "고치기" 를 띄우지 않는다.
+    if (r.fix === 'wait') return null;
+    const pkg = r.where.split(' · ')[0];
+    const named = proposals.filter(p => p.tool === 'trivy' && mentions(`${p.title}\n${p.detail}`, pkg));
+    if (named.length) return pick(named);
+    if (r.details.some(d => d.os && d.fixed)) return pick(proposals.filter(p => p.tool === 'trivy' && p.rebuild && /베이스 이미지|OS 패키지/.test(p.title)));
+    return null;
+  }
+  if (r.source === 'dockerfile') { const code = r.details[0]?.id; return code ? pick(proposals.filter(p => p.tool === 'hadolint' && p.title.includes(`(${code})`))) : null; }
+  if (r.source === 'secret') { const file = (r.details[0]?.file ?? '').replace(/\\/g, '/'); return pick(proposals.filter(p => p.tool === 'gitleaks' && p.files.some(f => file.endsWith(f.replace(/\\/g, '/'))))); }
+  return null;
 }

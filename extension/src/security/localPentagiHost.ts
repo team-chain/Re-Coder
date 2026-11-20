@@ -7,6 +7,7 @@ import {AI_KEY_SECRET} from '../ai/aiKeyEnv';
 import {LocalPentagiRuntime, LocalProvider, LocalReport, localTarget, readReport, saveReport, sessionPaths, localAssessment, docker, engineCacheWarm, clearEngineCache, cacheMarker} from './localPentagi';
 import {prewarmPaths, readPrewarm, removePrewarmEngine} from './redTeamPrewarm';
 import {assessmentMarkdown} from './pentagiAssessment';
+import type {PentagiAssessment} from './pentagiAssessmentTypes';
 import {AccessPolicy,accessKey,validateAccessPolicy} from './redTeamAccess';
 import {configureAccess} from './redTeamAccessHost';
 import { ui } from '../dialogs/inAppDialogs';
@@ -31,6 +32,17 @@ export class LocalPentagiHost {
             if(workspace===undefined || report.workspace===workspace) reports.push(report);
         }
         return reports.sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
+    }
+    /**
+     * 보안 화면 카드용 — 이 프로젝트의 마지막 공격 테스트 결과만 저장 파일에서 읽는다.
+     * Docker·PentAGI·네트워크를 건드리지 않고 상태를 바꾸지 않는다(검사 잠금과 겹치지 않게 handle 밖에 둔다).
+     */
+    async summary(workspace:string):Promise<{local:null|{phase:string;outcome?:string;updatedAt:string;assessment?:PentagiAssessment}}> {
+        let current:LocalReport|undefined;
+        try {current=(await this.reports(workspace))[0];} catch {return {local:null};}
+        if(!current) return {local:null};
+        const done=['removed','cleanup_failed'].includes(current.phase);
+        return {local:{phase:current.phase,outcome:current.outcome,updatedAt:current.updatedAt,assessment:current.assessment??(done?localAssessment(current):undefined)}};
     }
     /** 분리된 작업 프로세스 — VS Code 를 닫아도 이어진다. 입력은 stdin 으로만 넘긴다. */
     private async spawnWorker(payload:Record<string,unknown>):Promise<number|undefined> {

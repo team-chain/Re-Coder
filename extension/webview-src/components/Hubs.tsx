@@ -17,6 +17,7 @@ import { ScanKind, ScanQueue, ScanRequest } from './scanQueue';
 import { scanCounts } from './ShipMode';
 import { adrStatus } from './adrStatus';
 import { isNotApplicable } from './securityGate';
+import type { FixProposal } from "./securityFixes";
 import { SecurityFixList } from './SecurityFixList';
 import { Ring } from './shell/parts';
 import { FeatureHero, hasHero } from './shell/FeatureHero';
@@ -320,7 +321,7 @@ export function securityResultDetail(r?: ScanResultLite): string {
   return `${cause}${r.next_action ? `\n다음 행동: ${r.next_action}` : ''}`;
 }
 
-export const SecurityScanPanel: React.FC<{ kinds: ScanKind[]; title: string; note: string; runSignal?: number; compact?: boolean; onChange?: (results: Partial<Record<ScanKind, ScanResultLite>>, running: boolean) => void }> = ({ kinds, title, note, onChange, runSignal = 0, compact = false }) => {
+export const SecurityScanPanel: React.FC<{ kinds: ScanKind[]; title: string; note: string; runSignal?: number; compact?: boolean; onChange?: (results: Partial<Record<ScanKind, ScanResultLite>>, running: boolean) => void; onPlan?: (plan: { loading: boolean; proposals: FixProposal[] }) => void; focusFix?: string }> = ({ kinds, title, note, onChange, runSignal = 0, compact = false, onPlan, focusFix }) => {
   const { postMessage, useMessage } = useVSCodeApi();
   const [running, setRunning] = useState<ScanKind | null>(null);
   const [results, setResults] = useState<Partial<Record<ScanKind, ScanResultLite>>>({});
@@ -419,7 +420,7 @@ export const SecurityScanPanel: React.FC<{ kinds: ScanKind[]; title: string; not
       })}
       </div>
       <div role="status" style={{ marginTop: 12, color: C.muted, fontSize: 11 }}>{running ? `${label[running]} 검사 중` : '항목을 누르면 결과와 개별 검사 메뉴가 열립니다.'}</div>
-      <SecurityFixList results={results} running={running !== null} onRescan={run} />
+      <SecurityFixList results={results} running={running !== null} onRescan={run} onPlan={onPlan} focusId={focusFix} />
     </div>
   );
 };

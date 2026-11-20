@@ -34,7 +34,11 @@ export const SecurityFixList: React.FC<{
   results: Partial<Record<ScanKind, ResultLike>>;
   running: boolean;
   onRescan: (kinds: ScanKind[]) => void;
-}> = ({ results, running, onRescan }) => {
+  /** 보안 화면이 위험 줄마다 "고치기" 를 띄울지 정할 때 쓴다(수정안 준비 중·목록). */
+  onPlan?: (plan: { loading: boolean; proposals: FixProposal[] }) => void;
+  /** 위험 줄의 "고치기" 로 들어오면 그 수정안만 골라 둔다. */
+  focusId?: string;
+}> = ({ results, running, onRescan, onPlan, focusId }) => {
   const { postMessage, useMessage } = useVSCodeApi();
   const [phase, setPhase] = useState<Phase>("idle");
   const [proposals, setProposals] = useState<FixProposal[]>([]);
@@ -97,6 +101,9 @@ export const SecurityFixList: React.FC<{
     }
   }, [results, postMessage, rescan, proposals.length]));
 
+  useEffect(() => { onPlan?.({ loading: phase === "planning", proposals }); }, [phase, proposals, onPlan]);
+  useEffect(() => { if (focusId && proposals.some(p => p.id === focusId && p.auto)) setSelected(new Set([focusId])); }, [focusId, proposals]);
+
   const apply = () => {
     const ids = proposals.filter(p => p.auto && selected.has(p.id)).map(p => p.id);
     if (!ids.length || !planned.current) return;
@@ -121,7 +128,7 @@ export const SecurityFixList: React.FC<{
         .rc-fixes{border-top:1px solid ${C.line};margin-top:4px;padding-top:20px}
         .rc-fixes h3{font-size:13px;font-weight:600;margin:0 0 6px}.rc-fixes>p{font-size:11.5px;color:${C.muted};margin:0 0 14px;line-height:1.6}
         .rc-fix{display:grid;grid-template-columns:18px 1fr;align-items:start;gap:10px;padding:12px 0;border-top:1px solid ${C.line}}
-        .rc-fix:first-of-type{border-top:none}.rc-fix input{margin:2px 0 0}
+        .rc-fix:first-of-type{border-top:none}.rc-fix[data-focus]{background:color-mix(in srgb,var(--rc-teal,#35A9D1) 8%,transparent);border-radius:8px;padding-left:8px;padding-right:8px}.rc-fix input{margin:2px 0 0}
         .rc-fix b{font-size:12.5px;font-weight:600}.rc-fix small{color:${C.muted};font-size:10.5px;margin-left:8px}
         .rc-fix p{margin:4px 0 0;font-size:11.5px;color:${C.muted};line-height:1.6;overflow-wrap:anywhere}
         .rc-fix .risk{color:${C.warn}}
@@ -138,7 +145,7 @@ export const SecurityFixList: React.FC<{
       <p>검사 결과로 만든 수정안입니다. 고른 것만 바꾸고 원본은 .recoder/backups 에 남깁니다. 적용한 뒤 바뀐 부분을 다시 검사합니다.</p>
       {phase === "ready" && !autos.length && !manual.length && <p style={{ fontSize: 11.5, color: C.muted }}>자동으로 고칠 수 있는 항목이 없습니다.</p>}
       {autos.map(p => (
-        <div key={p.id} className="rc-fix">
+        <div key={p.id} className="rc-fix" data-fix-id={p.id} data-focus={p.id === focusId || undefined}>
           <Checkbox checked={selected.has(p.id)} disabled={busy} onChange={() => toggle(p.id)} ariaLabel={p.title} compact />
           <div>
             <b>{p.title}</b><small>{TOOL[p.tool] ?? p.tool}</small>

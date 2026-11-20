@@ -20,6 +20,8 @@ if (!process.env.HARNESS_WORKSPACE) {
 vscode.workspace.workspaceFolders = [{uri:vscode.Uri.file(workspace)}];
 const core = {getPort:()=>Number(process.env.HARNESS_PORT || 18795), getSessionToken:()=>'harness-token-123', ensureRunning:async()=>true, refreshToken:async()=>true,coreInstanceKey:()=> 'fixture-core', getStoredAwsConnection:async()=>null, getAwsRoleArn:async()=>'', isBrowserAwsLogin:()=>false, getManagedAwsConnection:async()=>undefined};
 const api = new ApiClient(core);
+//: HARNESS_HISTORY_FILE — 화면 확인용 배포 기록(JSON {entries,total,warnings}). 실제 기록을 대신하지 않는다.
+if(process.env.HARNESS_HISTORY_FILE){const h=JSON.parse(fs.readFileSync(process.env.HARNESS_HISTORY_FILE,'utf8'));const now=Date.now();h.entries.forEach((e,i)=>{if(e.ago!==undefined){e.started_at=new Date(now-e.ago*60000).toISOString();e.events=(e.events||[]).map((ev,j)=>({...ev,at:new Date(now-e.ago*60000+j*40000).toISOString()}));}});api.getDeploymentHistory=async()=>h;}
 // Explicit, offline security UI fixture. Never contacts PentAGI, AWS or a scanner.
 if (process.env.HARNESS_SECURITY === '1') {
   vscode.workspace.isTrusted = true;

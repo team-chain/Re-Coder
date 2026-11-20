@@ -1,3 +1,4 @@
+import { LocalPentagiHost } from '../security/localPentagiHost';
 import { runAiConnectCommand, saveRoutingSettings, switchAiProvider } from '../ai/aiKeys';
 import { SEEN_KEY, pendingCount } from '../ops/monitorDigest';
 import { AI_KEY_SECRET, AI_PROVIDERS, AI_PROVIDER_STATE, AiKeyProvider, currentAiProvider, isAiKeyProvider, isEconomyProvider, pricesEnv, storedAiKeys } from '../ai/aiKeyEnv';
@@ -1176,6 +1177,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
                 } catch (err) {
                     this.postMessageToWebview(requestWebview, 'security.redteamResult', { requestId: p.requestId, workspace, error: err instanceof Error ? err.message : String(err) });
                 }
+                break;
+            }
+            case 'security.redteamSummary': {
+                //: 보안 화면 카드 — 저장된 마지막 결과만 읽는다. 클라우드·Docker 를 부르지 않는다.
+                const p = payload as { requestId?: string };
+                const workspace = activeProjectPath();
+                let result: Record<string, unknown> = { local: null };
+                try {
+                    if (workspace && vscode.workspace.isTrusted && this._storageUri && this._secrets) {
+                        result = await new LocalPentagiHost(vscode.Uri.joinPath(this._storageUri, 'redteam').fsPath, this._secrets).summary(workspace);
+                    }
+                } catch { result = { local: null }; }
+                this.postMessageToWebview(requestWebview, 'security.redteamSummaryResult', { requestId: p?.requestId, workspace, ...result });
                 break;
             }
             case 'security.check': {

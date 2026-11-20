@@ -19,13 +19,13 @@ const mon={key:'k',service:'app',region:'r',cluster:'c',metrics:true,service_sta
 const changes={files:[{path:'src/a.ts',added:3,removed:1,binary:false}],added:3,removed:1,untracked:0,snippet:{file:'src/a.ts',lines:[{kind:'del',text:'old'},{kind:'add',text:'new'}]}};
 const EMOJI=/[\u{1F300}-\u{1FAFF}☀-➿]/u;
 
-test('3.0.2 홈: 실제 데이터로 여섯 칸(미리보기 · 요청 · 보안 · 승인 · 배포 경로 · 바뀐 코드)',()=>{
+test('홈: 한 장의 개요(미리보기 · 상태 · 보안 · 요청 · 승인 · 바뀐 코드) + 최근 배포 · 배포 경로',()=>{
  const html=renderToStaticMarkup(React.createElement(HomeView,{data:{snapshot:snap,history:hist,monitor:mon,changes,now:NOW},go(){},open(){}}));
  for(const id of ['home-app','home-traffic','home-security','home-approvals','home-path','home-changes']) assert.match(html,new RegExp(`data-testid="${id}"`));
  assert.match(html,/<iframe[^>]*sandbox="allow-scripts"[^>]*src="https:\/\/app\.example\.com"|<iframe[^>]*src="https:\/\/app\.example\.com"[^>]*sandbox="allow-scripts"/);
  assert.match(html,/app:3 으로 되돌리기/);assert.match(html,/승인 대기 · 1/);
  assert.match(html,/aria-label="Amazon ECS"/);assert.match(html,/aria-label="GitHub"/);
- assert.match(html,/\+ new/);assert.match(html,/2시간 전/);
+ assert.match(html,/>\+3</);assert.match(html,/2시간 전/);assert.match(html,/github.com\/me\/app|저장소/);
  assert.doesNotMatch(html,EMOJI);assert.doesNotMatch(html,/[✓✕✗]/);
 });
 

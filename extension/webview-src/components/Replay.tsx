@@ -3,6 +3,8 @@ import React, { useCallback, useEffect, useReducer, useRef, useState } from "rea
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import { serviceLink } from "./EcsDeploymentProgress";
 import { friendlyError } from "./ui/friendlyError";
+import { Logo } from "./canvas/Logo";
+import { timeAgo } from "./shell/parts";
 
 export interface HistoryEntry {
   key: string; source: "local" | "ecs" | "stack"; deployment_id: string; project_id: string;
@@ -42,10 +44,6 @@ export function historyReducer(state: HistoryState, action: Action): HistoryStat
       return { ...state, busyKey: "", rollbackRequestId: "", result: { key: state.busyKey, message: action.message, ok: action.ok } };
   }
 }
-const muted = "var(--vscode-descriptionForeground, #aaa)";
-const border = "1px solid var(--vscode-panel-border, #444)";
-const card: React.CSSProperties = { border, borderRadius: 7, padding: 14, marginTop: 12, overflowWrap: "anywhere" };
-const button: React.CSSProperties = { border, borderRadius: 5, padding: "7px 12px", cursor: "pointer", color: "var(--vscode-button-foreground, white)", background: "var(--vscode-button-background, #0078d4)" };
 function date(value: string): string {
   const parsed = new Date(value);
   return value && !Number.isNaN(parsed.valueOf()) ? parsed.toLocaleString("ko-KR") : "시각 미기록";
@@ -54,6 +52,55 @@ export function filterHistory(entries: HistoryEntry[], source: string, search: s
   const term = search.trim().toLocaleLowerCase();
   return entries.filter(e => (source === "all" || e.source === source) && `${e.target} ${e.image} ${e.project_id} ${e.deployment_id}`.toLocaleLowerCase().includes(term));
 }
+/** 상태 → 점 색. 모르는 상태는 회색(성공으로 칠하지 않는다). */
+export function historyTone(status: string): "ok" | "bad" | "warn" | "off" {
+  const s = status.toLowerCase();
+  if (/(success|succeeded|completed|running|healthy|deployed|ok)$/.test(s)) return "ok";
+  if (/(fail|error|blocked|timed_out|unhealthy|rejected|circuit_breaker)/.test(s)) return "bad";
+  if (/(rollback|rolled_back|degraded|pending|progress|warning|partial|cancel)/.test(s)) return "warn";
+  return "off";
+}
+const SOURCE_LABEL: Record<HistoryEntry["source"], string> = { local: "로컬 Docker", stack: "로컬 다중 서비스", ecs: "AWS ECS" };
+const SOURCE_LOGO: Record<HistoryEntry["source"], string> = { local: "docker", stack: "docker", ecs: "ecs" };
+const CSS = `
+.rc-hist{font-size:13px;line-height:1.6;color:var(--rc-fg,var(--vscode-foreground))}
+.rc-hist-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.rc-hist-head h2{margin:0 auto 0 0;font-size:22px;font-weight:700;letter-spacing:-.02em}
+.rc-hist-head input{height:32px;min-width:180px;flex:0 1 240px;padding:0 12px;box-sizing:border-box;border-radius:8px;border:1px solid var(--rc-line2,rgba(160,190,220,.16));background:var(--rc-tile,transparent);color:inherit;font:inherit}
+.rc-hist-note{color:var(--rc-fg3,#67768A);font-size:12px;margin:8px 2px 0}
+.rc-hist-list{margin-top:16px;border:1px solid var(--rc-line,rgba(160,190,220,.09));border-radius:12px;overflow:hidden;background:var(--rc-tile,transparent)}
+.rc-hist-row{all:unset;box-sizing:border-box;cursor:pointer;width:100%;display:grid;grid-template-columns:150px 30px minmax(0,1fr) minmax(0,1.2fr) 90px;align-items:center;gap:14px;padding:13px 18px;border-top:1px solid var(--rc-line,rgba(160,190,220,.09));animation:rc-hist-up .35s cubic-bezier(.2,.8,.2,1) both}
+.rc-hist-row:first-child{border-top:0}
+.rc-hist-row:hover{background:var(--rc-tile2,rgba(148,178,210,.065))}
+.rc-hist-row:focus-visible{outline:2px solid var(--rc-teal,#35A9D1);outline-offset:-2px}
+.rc-hist-row[aria-expanded=true]{background:var(--rc-tile2,rgba(148,178,210,.065))}
+.rc-hist-st{display:flex;align-items:center;gap:8px;font-weight:550;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rc-hist-st i{width:8px;height:8px;border-radius:50%;flex:none;background:var(--rc-fg3,#67768A)}
+.rc-hist-st[data-t=ok] i{background:var(--rc-ok,#3DD68C)}.rc-hist-st[data-t=bad] i{background:var(--rc-bad,#F27272)}.rc-hist-st[data-t=warn] i{background:var(--rc-warn,#F2B544)}
+.rc-hist-logo{width:28px;height:28px;border-radius:7px;border:1px solid var(--rc-line,rgba(160,190,220,.09));display:grid;place-items:center;background:var(--rc-solid,#0D131A)}
+.rc-hist-logo svg{width:18px;height:18px}
+.rc-hist-t{min-width:0}.rc-hist-t b{display:block;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.rc-hist-t small{color:var(--rc-fg3,#67768A);font-size:12px}
+.rc-hist-img{font:12px var(--rc-mono,monospace);color:var(--rc-fg2,#9AA8B8);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rc-hist-when{text-align:right;color:var(--rc-fg3,#67768A);font-size:12.5px;white-space:nowrap}
+.rc-hist-detail{padding:4px 18px 20px 62px;border-top:1px solid var(--rc-line,rgba(160,190,220,.09));background:var(--rc-tile2,rgba(148,178,210,.065));overflow-wrap:anywhere}
+.rc-hist-detail h4{margin:14px 0 4px;font-size:14px}.rc-hist-detail .id{color:var(--rc-fg3,#67768A);font:11.5px var(--rc-mono,monospace)}
+.rc-hist-detail .err{color:var(--rc-bad,#F27272);white-space:pre-wrap;margin:10px 0 4px}
+.rc-hist-detail .warn{color:var(--rc-warn,#F2B544)}
+.rc-hist-tl{list-style:none;margin:14px 0;padding:0 0 0 18px;border-left:2px solid var(--rc-line2,rgba(160,190,220,.16))}
+.rc-hist-tl li{position:relative;margin:0 0 12px}.rc-hist-tl li:before{content:"";position:absolute;left:-24px;top:7px;width:10px;height:10px;border-radius:50%;background:var(--rc-solid,#0D131A);border:2px solid var(--rc-fg3,#67768A);box-sizing:border-box}
+.rc-hist-tl li:last-child:before{border-color:var(--rc-teal,#35A9D1)}
+.rc-hist-tl small{display:block;color:var(--rc-fg3,#67768A);font-size:11.5px}.rc-hist-tl div{white-space:pre-wrap;color:var(--rc-fg2,#9AA8B8)}
+.rc-hist-rb{border-top:1px solid var(--rc-line,rgba(160,190,220,.09));padding-top:12px;margin-top:4px}
+.rc-hist-rb code{display:block;margin:6px 0;font:12px var(--rc-mono,monospace);color:var(--rc-fg2,#9AA8B8)}
+.rc-hist-confirm{margin-top:10px;padding:14px;border-radius:10px;border:1px solid color-mix(in srgb,var(--rc-warn,#F2B544) 35%,transparent);background:color-mix(in srgb,var(--rc-warn,#F2B544) 7%,transparent)}
+.rc-hist-confirm p{margin:6px 0}.rc-hist-acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.rc-hist-empty{padding:40px 20px;text-align:center;color:var(--rc-fg3,#67768A)}
+.rc-hist-skel{height:54px;border-top:1px solid var(--rc-line,rgba(160,190,220,.09));background:linear-gradient(90deg,transparent,var(--rc-tile2,rgba(148,178,210,.065)),transparent);background-size:200% 100%;animation:rc-hist-sh 1.3s linear infinite}
+@keyframes rc-hist-up{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@keyframes rc-hist-sh{to{background-position:-200% 0}}
+@media(prefers-reduced-motion:reduce){.rc-hist *{animation:none!important}}
+@media(max-width:720px){.rc-hist-row{grid-template-columns:24px minmax(0,1fr) auto;gap:10px;padding:12px 14px}.rc-hist-row .rc-hist-st{grid-column:1/-1;order:-1}.rc-hist-img{display:none}.rc-hist-detail{padding-left:14px}}
+`;
 export function ReplayView({ state, source, search, onSource, onSearch, onRefresh, onSelect, onReview, onConfirm }: {
   state: HistoryState; source: string; search: string;
   onSource: (source: string) => void; onSearch: (search: string) => void; onRefresh: () => void;
@@ -61,44 +108,58 @@ export function ReplayView({ state, source, search, onSource, onSearch, onRefres
 }) {
   const rows = filterHistory(state.data?.entries ?? [], source, search);
   const selected = rows.find(e => e.key === state.selected);
-  const link = serviceLink(selected?.service_url);
   const busy = Boolean(state.busyKey);
-  const result = selected && state.result?.key === selected.key ? state.result : null;
-  return <section style={{ fontSize: 13, lineHeight: 1.6 }} aria-label="배포 이력 및 롤백">
-    <div className="rc-replay-bar" style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+  return <section className="rc-hist" aria-label="배포 이력 및 롤백">
+    <style>{CSS}</style>
+    <div className="rc-hist-head rc-replay-bar">
+      <h2>배포 기록</h2>
       <div className="rc-seg" role="group" aria-label="배포 유형">
-        {([["all", "전체"], ["ecs", "ECS"], ["local", "로컬"], ["stack", "다중 서비스"]] as const).map(([value, label]) => <button key={value} type="button" aria-pressed={source === value} onClick={() => onSource(value)}>{label}</button>)}
+        {([["all", "전체"], ["local", "로컬"], ["stack", "다중 서비스"], ["ecs", "ECS"]] as const).map(([value, label]) => <button key={value} type="button" aria-pressed={source === value} onClick={() => onSource(value)}>{label}</button>)}
       </div>
-      <input aria-label="배포 이력 검색" value={search} placeholder="서비스·컨테이너·이미지 검색" onChange={e => onSearch(e.target.value)} style={{ flex: 1, minWidth: 150, height: 34, padding: "0 12px", boxSizing: "border-box" }} />
+      <input aria-label="배포 이력 검색" value={search} placeholder="서비스 · 이미지 검색" onChange={e => onSearch(e.target.value)} />
       <button type="button" className="rc-btn sm" onClick={onRefresh} disabled={state.loading || busy} aria-disabled={state.loading || busy}>{state.loading ? "불러오는 중…" : "새로고침"}</button>
     </div>
-    <p style={{ color: muted, fontSize: 12, margin: "8px 0 0" }}>이 컴퓨터에 저장된 배포 기록입니다. 현재 실행 상태와 과금 여부는 별도로 확인하세요.</p>
-    {state.error && <p role="alert" style={{ color: "var(--vscode-errorForeground, #f48771)", whiteSpace: "pre-wrap" }}>이력 조회 실패: {friendlyError(state.error)}{state.data && " · 마지막 조회 결과를 유지합니다."}</p>}
-    {!!state.data?.warnings.length && <div role="alert" style={{ color: "var(--vscode-editorWarning-foreground, #cca700)" }}>{state.data.warnings.map((warning, i) => <p key={i}>{warning}</p>)}</div>}
-    {!state.data && !state.error && <p role="status">배포 이력을 불러오는 중…</p>}
-    {state.data && <p style={{ color: muted }}>{rows.length}건 표시 · 저장된 기록 {state.data.total}건{state.data.total > state.data.entries.length && ` 중 최근 ${state.data.entries.length}건을 조회했습니다.`}</p>}
-    {state.data && rows.length === 0 && <p>{state.data.total === 0 ? "저장된 배포 기록이 없습니다. 배포 후 이곳에 이력이 표시됩니다." : "조건에 맞는 배포 기록이 없습니다."}</p>}
-    <div style={{ display: "grid", gap: 6, maxHeight: 330, overflowY: "auto", marginTop: 8 }}>
-      {rows.map(row => <button key={row.key} aria-pressed={row.key === state.selected} onClick={() => onSelect(row.key)} style={{ textAlign: "left", padding: "10px 12px", border: row.key === state.selected ? "1px solid var(--vscode-focusBorder, #007fd4)" : border, borderRadius: 6, background: row.key === state.selected ? "var(--vscode-list-activeSelectionBackground, #23435b)" : "var(--vscode-editorWidget-background, #252526)", color: "var(--vscode-editor-foreground, #ddd)", cursor: "pointer", overflowWrap: "anywhere" }}>
-        <b>{row.source === "ecs" ? "ECS" : row.source === "stack" ? "로컬 다중 서비스" : "로컬"} · {row.target}</b> <span style={{ marginLeft: 8 }}>{row.status_text}</span><div style={{ fontSize: 11 }}>{date(row.started_at)}{row.region && ` · ${row.region}`}</div><div style={{ fontSize: 11, color: muted }}>{row.image}</div>
-      </button>)}
+    {state.error && <p role="alert" className="rc-hist-note" style={{ color: "var(--rc-bad,#F27272)", whiteSpace: "pre-wrap" }}>이력 조회 실패: {friendlyError(state.error)}{state.data && " · 마지막 조회 결과를 유지합니다."}</p>}
+    {!!state.data?.warnings.length && <div role="alert" className="rc-hist-note" style={{ color: "var(--rc-warn,#F2B544)" }}>{state.data.warnings.map((warning, i) => <p key={i} style={{ margin: 0 }}>{warning}</p>)}</div>}
+    {state.data && state.data.total > state.data.entries.length && <p className="rc-hist-note">저장된 기록 {state.data.total}건 중 최근 {state.data.entries.length}건</p>}
+    <div className="rc-hist-list" role="list">
+      {!state.data && !state.error && <><p role="status" className="rc-hist-note" style={{ margin: "12px 18px" }}>배포 이력을 불러오는 중…</p>{[0, 1, 2].map(i => <div key={i} className="rc-hist-skel" />)}</>}
+      {!state.data && state.error && <div className="rc-hist-empty"><button type="button" className="rc-btn" onClick={onRefresh} disabled={state.loading}>{state.loading ? "불러오는 중…" : "다시 시도"}</button></div>}
+      {state.data && rows.length === 0 && <div className="rc-hist-empty">{state.data.total === 0 ? "저장된 배포 기록이 없습니다. 배포하면 여기에 쌓여요." : "조건에 맞는 배포 기록이 없습니다."}</div>}
+      {rows.map((row, i) => {
+        const open = row.key === state.selected;
+        return <div key={row.key} role="listitem">
+          <button type="button" className="rc-hist-row" aria-expanded={open} aria-pressed={open} onClick={() => onSelect(open ? "" : row.key)} style={{ animationDelay: `${Math.min(i, 10) * 0.03}s` }}>
+            <span className="rc-hist-st" data-t={historyTone(row.status)}><i />{row.status_text}</span>
+            <span className="rc-hist-logo" aria-hidden><Logo kind={SOURCE_LOGO[row.source]} /></span>
+            <span className="rc-hist-t"><b>{row.target}</b><small>{SOURCE_LABEL[row.source]}{row.region && ` · ${row.region}`}</small></span>
+            <span className="rc-hist-img" title={row.image}>{row.image}</span>
+            <span className="rc-hist-when" title={date(row.started_at)}>{timeAgo(row.started_at) || date(row.started_at)}</span>
+          </button>
+          {open && selected && <HistoryDetail entry={selected} state={state} busy={busy} onReview={onReview} onConfirm={onConfirm} />}
+        </div>;
+      })}
     </div>
-    {rows.length > 0 && !selected && <p>기록을 선택하면 상세 내용이 표시됩니다.</p>}
-    {selected && <article style={card}>
-      <h4 style={{ margin: "0 0 6px" }}>{selected.target} · {selected.status_text}</h4><div style={{ color: muted, fontSize: 11 }}>배포 ID: {selected.deployment_id}</div>
-      {selected.error && <p style={{ whiteSpace: "pre-wrap" }}>{selected.error}</p>}{selected.remedy && <p>조치: {selected.remedy}</p>}
-      {link && <a href={link} target="_blank" rel="noreferrer">기록된 서비스 URL 열기 ↗</a>}
-      {!!selected.warnings.length && <div style={{ marginTop: 12, color: "var(--vscode-editorWarning-foreground, #cca700)" }}><b>기록 당시의 안내</b><ul style={{ paddingLeft: 20 }}>{selected.warnings.map((warning, i) => <li key={i}>{warning}</li>)}</ul></div>}
-      <ol style={{ paddingLeft: 22 }}>{selected.events.map((event, i) => <li key={i} style={{ marginBottom: 10 }}><b>{event.title}</b><div style={{ color: muted, fontSize: 11 }}>{date(event.at)}</div>{event.detail && <div style={{ whiteSpace: "pre-wrap" }}>{event.detail}</div>}</li>)}</ol>
-      <div style={{ borderTop: border, paddingTop: 10 }}><b>이전 버전으로 복귀</b>
-        {selected.rollback.target && <div style={{ margin: "6px 0", fontFamily: "var(--vscode-editor-font-family, monospace)" }}>{selected.rollback.target}</div>}
-        {!selected.rollback.available && <p style={{ color: muted }}>{selected.rollback.reason}</p>}
-        {selected.rollback.available && state.review !== selected.key && <button onClick={() => onReview(selected.key)} disabled={busy || state.loading} style={button}>{state.busyKey === selected.key ? "롤백 처리 중…" : "롤백 대상 확인"}</button>}
-        {state.review === selected.key && <div role="group" aria-label="롤백 실행 확인" style={card}><b>{selected.source === "ecs" ? "ECS 롤백 승인 · Level 3" : selected.source === "stack" ? "다중 서비스 롤백 승인" : "로컬 롤백 승인"}</b><p><b>{selected.target}</b>를 위의 이전 버전으로 되돌립니다. 실행 중인 서비스에 영향을 줍니다.</p>{selected.source === "ecs" && <p>요청 후 ECS 서비스 안정화 상태를 확인해야 합니다.</p>}{selected.source === "stack" && <p>모든 서비스를 직전 성공 버전 이미지로 되돌립니다. DB 데이터(볼륨)는 그대로입니다.</p>}<div style={{ display: "flex", gap: 8 }}><button style={button} disabled={busy || state.loading} onClick={() => onConfirm(selected)}>승인하고 롤백</button><button type="button" className="rc-btn" disabled={busy} onClick={() => onReview("")}>취소</button></div></div>}
-        {result && <p role="status" style={{ whiteSpace: "pre-wrap", color: result.ok ? "var(--vscode-charts-green, #4ec9b0)" : "var(--vscode-errorForeground, #f48771)" }}>{result.message}</p>}
-      </div>
-    </article>}
+    <p className="rc-hist-note">이 컴퓨터에 저장된 배포 기록입니다. 현재 실행 상태와 과금 여부는 별도로 확인하세요.</p>
   </section>;
+}
+function HistoryDetail({ entry: selected, state, busy, onReview, onConfirm }: { entry: HistoryEntry; state: HistoryState; busy: boolean; onReview: (key: string) => void; onConfirm: (entry: HistoryEntry) => void }) {
+  const link = serviceLink(selected.service_url);
+  const result = state.result?.key === selected.key ? state.result : null;
+  return <article className="rc-hist-detail">
+    <h4>{selected.target} · {selected.status_text}</h4><div className="id">배포 ID {selected.deployment_id} · {date(selected.started_at)}</div>
+    {selected.error && <p className="err">{selected.error}</p>}{selected.remedy && <p>조치: {selected.remedy}</p>}
+    {link && <a href={link} target="_blank" rel="noreferrer">기록된 서비스 URL 열기 ↗</a>}
+    {!!selected.warnings.length && <div className="warn" style={{ marginTop: 12 }}><b>기록 당시의 안내</b><ul style={{ paddingLeft: 20, margin: "4px 0" }}>{selected.warnings.map((warning, i) => <li key={i}>{warning}</li>)}</ul></div>}
+    {!!selected.events.length && <ol className="rc-hist-tl">{selected.events.map((event, i) => <li key={i}><b>{event.title}</b><small>{date(event.at)}</small>{event.detail && <div>{event.detail}</div>}</li>)}</ol>}
+    <div className="rc-hist-rb"><b>이전 버전으로 복귀</b>
+      {selected.rollback.target && <code>{selected.rollback.target}</code>}
+      {!selected.rollback.available && <p style={{ color: "var(--rc-fg3,#67768A)", margin: "4px 0 0" }}>{selected.rollback.reason}</p>}
+      {selected.rollback.available && state.review !== selected.key && <div className="rc-hist-acts"><button type="button" className="rc-btn" onClick={() => onReview(selected.key)} disabled={busy || state.loading}>{state.busyKey === selected.key ? "롤백 처리 중…" : "롤백 대상 확인"}</button></div>}
+      {state.review === selected.key && <div role="group" aria-label="롤백 실행 확인" className="rc-hist-confirm"><b>{selected.source === "ecs" ? "ECS 롤백 승인 · Level 3" : selected.source === "stack" ? "다중 서비스 롤백 승인" : "로컬 롤백 승인"}</b><p><b>{selected.target}</b>를 위의 이전 버전으로 되돌립니다. 실행 중인 서비스에 영향을 줍니다.</p>{selected.source === "ecs" && <p>요청 후 ECS 서비스 안정화 상태를 확인해야 합니다.</p>}{selected.source === "stack" && <p>모든 서비스를 직전 성공 버전 이미지로 되돌립니다. DB 데이터(볼륨)는 그대로입니다.</p>}<div className="rc-hist-acts"><button type="button" className="rc-btn p" disabled={busy || state.loading} onClick={() => onConfirm(selected)}>승인하고 롤백</button><button type="button" className="rc-btn" disabled={busy} onClick={() => onReview("")}>취소</button></div></div>}
+      {result && <p role="status" style={{ whiteSpace: "pre-wrap", color: result.ok ? "var(--rc-ok,#3DD68C)" : "var(--rc-bad,#F27272)" }}>{result.message}</p>}
+    </div>
+  </article>;
 }
 export const Replay: React.FC = () => {
   const { postMessage, useMessage } = useVSCodeApi();

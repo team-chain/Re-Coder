@@ -32,3 +32,14 @@ test('other projects never expose or clean this project report',async t=>{
  assert.equal(result.local,null);assert.equal(cleaned,0);
  await assert.rejects(()=>new LocalPentagiHost(root,{get:async()=>undefined}).handle('localStart','different-project'),/다른 프로젝트/);
 });
+test('security card summary reads only the saved report of this project and never touches Docker',async t=>{
+ const root=await setup(t);const host=new LocalPentagiHost(root,{get:async()=>undefined});
+ assert.deepEqual(await host.summary('project'),{local:null});
+ const report='```recoder-report\n'+JSON.stringify({schema:1,checks:[{kind:'discovery',status:'tested',reason:'r',requests:['GET /']}],findings:[],limitations:[]})+'\n```';
+ await saveReport(root,{session:id,workspace:'project',target:'http://localhost:3000/',createdAt:new Date().toISOString(),updatedAt:'',phase:'removed',step:'done',outcome:'finished',tasks:[{id:'1',title:'t',status:'finished',result:report}]});
+ const s=await host.summary('project');
+ assert.equal(s.local.phase,'removed');assert.equal(s.local.assessment.checks.find(c=>c.kind==='discovery').status,'tested');
+ assert.deepEqual(await host.summary('other-project'),{local:null},'다른 프로젝트 결과를 보여 주지 않는다');
+ await fs.writeFile(path.join(root,id,'report.json'),'{broken');
+ assert.deepEqual(await host.summary('project'),{local:null},'깨진 기록은 결과 없음으로');
+});

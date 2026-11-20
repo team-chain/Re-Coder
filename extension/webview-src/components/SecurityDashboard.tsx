@@ -3,7 +3,7 @@ import {useVSCodeApi} from '../hooks/useVSCodeApi';
 import {SecurityScanPanel, PolicyPanel, ScanResultLite} from './Hubs';
 import {ScanKind} from './scanQueue';
 import {CodeReport, SECURITY_KINDS} from './securityOverview';
-import {securityModel, type Risk, type Step, type AttackRow} from './securityRisks';
+import {securityModel, fixFor, type Risk, type Step, type AttackRow, type FixLite, type FixMatch} from './securityRisks';
 import {RedTeamPanel} from './RedTeamPanel';
 import {ManagedRedTeamPanel} from './ManagedRedTeamPanel';
 import type {ManagedReport} from '../../src/security/managedReportTypes';
@@ -56,7 +56,7 @@ const CSS=`
 .rc-sec-banner[data-tone=danger] .ic,.rc-sec-banner[data-tone=caution] .ic{animation:rc-sec-breathe 2.4s ease-in-out infinite}
 .rc-sec-banner[data-tone=running] .ic{animation:rc-sec-spin 1.6s linear infinite}
 .rc-sec-banner .t{flex:1;min-width:0}.rc-sec-banner h1{margin:0;font-size:28px;font-weight:750;letter-spacing:-.03em;line-height:1.15}
-.rc-sec-banner p{margin:4px 0 0;font-size:13.5px;color:var(--rc-fg2,#9AA8B8)}
+.rc-sec-banner p{margin:4px 0 0;font-size:13.5px;color:var(--rc-fg2,#9AA8B8)}.rc-sec-banner p.skip{font-size:12.5px;color:var(--rc-fg3,#67768A);margin-top:2px}
 .rc-sec-tally{display:flex;gap:22px;margin-right:6px}.rc-sec-tally div{text-align:center;min-width:34px}
 .rc-sec-tally b{display:block;font-size:28px;font-weight:750;line-height:1;font-variant-numeric:tabular-nums}.rc-sec-tally span{display:block;font-size:12px;color:var(--rc-fg2,#9AA8B8);margin-top:6px}
 .rc-sec-tally .d b{color:var(--rc-bad,#F27272)}.rc-sec-tally .c b{color:var(--rc-warn,#F2B544)}.rc-sec-tally .l b{color:var(--rc-fg3,#67768A)}
@@ -152,7 +152,13 @@ export const SecurityDashboard: React.FC<{onGo?:(view:string)=>void}> = ({onGo})
  const [focused]=useState(()=>takeFocus('redteam'));const [redteam,setRedteam]=useState(focused);const [redteamLocal,setRedteamLocal]=useState(focused);
  const [audit,setAudit]=useState(false),[managedScans,setManagedScans]=useState(false),[allRisks,setAllRisks]=useState(false);
  const [managedReport,setManagedReport]=useState<ManagedReport>();
- const [attack,setAttack]=useState<{assessment?:PentagiAssessment;running?:boolean;at?:string}>({});
+ const [attack,setAttack]=useState<{assessment?:PentagiAssessment;running?:boolean;at?:string;live?:boolean}>({});
+ const [plan,setPlan]=useState<{loading:boolean;proposals:FixLite[]}>({loading:false,proposals:[]});const [focusFix,setFocusFix]=useState<string>();
+ const onPlan=useCallback((p:{loading:boolean;proposals:FixLite[]})=>setPlan(p),[]);
+ const summaryId=useRef('');
+ //: 화면을 열 때 지난 공격 테스트 결과를 저장 파일에서만 읽어 온다(Docker·클라우드 호출 없음).
+ const askSummary=useCallback(()=>{summaryId.current=`rt-summary-${Date.now()}-${Math.random()}`;postMessage('security.redteamSummary',{requestId:summaryId.current});},[postMessage]);
+ useEffect(()=>{askSummary();},[askSummary]);
  const [open,setOpen]=useState<Partial<Record<Section,boolean>>>({});
  const refs={detail:useRef<HTMLDetailsElement>(null),watch:useRef<HTMLDetailsElement>(null),audit:useRef<HTMLDetailsElement>(null),attack:useRef<HTMLDetailsElement>(null),more:useRef<HTMLDetailsElement>(null)};
  const reveal=useCallback((s:Section)=>{setOpen(o=>({...o,[s]:true}));later(()=>refs[s].current?.scrollIntoView?.({block:'start',behavior:'smooth'}));
@@ -168,16 +174,20 @@ export const SecurityDashboard: React.FC<{onGo?:(view:string)=>void}> = ({onGo})
   pending.current.set(requestId,{kind,timer});setChecks(c=>({...c,[kind]:{running:true}}));postMessage('security.check',{kind,requestId});
  },[postMessage]);
  useMessage(useCallback(msg=>{
-  if(msg.type==='canvas.projectChanged'){pending.current.forEach(p=>clearTimeout(p.timer));pending.current.clear();setChecks({});setScans({});setManagedReport(undefined);setScanning(false);setSignal(0);setManagedScans(false);setAudit(false);setRedteam(false);setAttack({});return;}
+  if(msg.type==='canvas.projectChanged'){pending.current.forEach(p=>clearTimeout(p.timer));pending.current.clear();setChecks({});setScans({});setManagedReport(undefined);setScanning(false);setSignal(0);setManagedScans(false);setAudit(false);setRedteam(false);setAttack({});setPlan({loading:false,proposals:[]});setFocusFix(undefined);askSummary();return;}
+  if(msg.type==='security.redteamSummaryResult'){const p=msg.payload as {requestId?:string;local?:{phase?:string;assessment?:PentagiAssessment;updatedAt?:string}|null};
+   if(p.requestId!==summaryId.current)return;
+   //: 패널에서 이미 실시간 결과를 받았으면 저장본으로 덮지 않는다.
+   setAttack(cur=>cur.live?cur:p.local?{assessment:p.local.assessment,running:!['removed','cleanup_failed'].includes(String(p.local.phase)),at:p.local.updatedAt}:{});return;}
   //: 공격 테스트 카드는 패널이 받은 결과를 함께 읽기만 한다 — 따로 묻지 않는다(로컬 엔진 잠금과 겹치지 않게).
   if(msg.type==='security.redteamResult'){const p=msg.payload as {local?:{phase?:string;assessment?:PentagiAssessment;updatedAt?:string}|null;report?:ManagedReport;activeRun?:unknown};
-   if(p.local!==undefined){const l=p.local;setAttack(l?{assessment:l.assessment,running:!['removed','cleanup_failed'].includes(String(l.phase)),at:l.updatedAt}:{});}
-   else if(p.report&&(p.report.mode??'redteam')==='redteam')setAttack({assessment:p.report.assessment,running:!!p.activeRun&&!p.report.cleaned});
+   if(p.local!==undefined){const l=p.local;setAttack(l?{assessment:l.assessment,running:!['removed','cleanup_failed'].includes(String(l.phase)),at:l.updatedAt,live:true}:{live:true});}
+   else if(p.report&&(p.report.mode??'redteam')==='redteam')setAttack({assessment:p.report.assessment,running:!!p.activeRun&&!p.report.cleaned,live:true});
    return;}
   if(msg.type!=='security.checkResult')return;const p=msg.payload as {requestId:string;result?:Record<string,unknown>;error?:string};const entry=pending.current.get(p.requestId);if(!entry)return;
   clearTimeout(entry.timer);pending.current.delete(p.requestId);setChecks(c=>({...c,[entry.kind]:{result:p.result,error:p.error,at:new Date().toLocaleTimeString()}}));
   if(entry.kind==='recheck'&&!p.error)request('history');
- },[request]));
+ },[request,askSummary]));
  useEffect(()=>()=>{pending.current.forEach(p=>clearTimeout(p.timer));pending.current.clear();},[]);
  const changed=useCallback((results:Partial<Record<ScanKind,ScanResultLite>>,running:boolean)=>{setScans(results);setScanning(running);},[]);
  const code=checks.code?.result as unknown as CodeReport|undefined;
@@ -185,10 +195,12 @@ export const SecurityDashboard: React.FC<{onGo?:(view:string)=>void}> = ({onGo})
  const busy=model.verdict==='running';
  const run=()=>{setManagedReport(undefined);setSignal(n=>n+1);request('code');request('policy');};
  const danger=useCount(model.tally.danger),caution=useCount(model.tally.caution),low=useCount(model.tally.low);
- const shown=allRisks?model.risks:model.risks.filter(r=>r.level!=='low').slice(0,5);
+ const serious=model.risks.filter(r=>r.level!=='low');
+ //: 위험·주의가 없으면 낮음이라도 보여 준다(빈 목록 + "더 보기" 만 남지 않게).
+ const shown=allRisks?model.risks:serious.length?serious.slice(0,5):model.risks.slice(0,3);
  const hidden=model.risks.length-shown.length;
 
- const fixImage=()=>{reveal('detail');later(()=>document.querySelector('.rc-sec .rc-fixes')?.scrollIntoView?.({block:'center',behavior:'smooth'}));};
+ const toFix=(m:FixMatch)=>{if(m)setFocusFix(m.proposal.id);reveal('detail');later(()=>{const el=(m&&document.querySelector(`.rc-sec [data-fix-id="${m.proposal.id}"]`))||document.querySelector('.rc-sec .rc-fixes');el?.scrollIntoView?.({block:'center',behavior:'smooth'});});};
  const fixCode=(r:Risk)=>{const d=r.details[0];if(!onGo)return;setPendingPrompt(`${r.where}의 보안 문제를 검토하고 최소 범위의 수정안을 제안해 주세요.\n문제: ${d?.id??''} ${d?.title??r.title}\n현재 파일을 다시 확인하고 기존 기능을 유지하세요. 승인 전에는 적용하지 마세요.`);onGo('code');};
  const stepTo=(s:Step)=>{if(s.key==='attack'){openRedteam(false);return;}if(s.key==='watch'){reveal('watch');return;}reveal('detail');};
 
@@ -200,7 +212,7 @@ export const SecurityDashboard: React.FC<{onGo?:(view:string)=>void}> = ({onGo})
  <style>{CSS}</style>
  <div className="rc-sec-banner" data-tone={model.verdict} aria-live="polite">
   <span className="ic">{BANNER_ICON[model.verdict]}</span>
-  <div className="t"><h1>{model.title}</h1>{model.reason&&<p>{model.reason}</p>}{model.verdict==='idle'&&<p>시크릿 · Dockerfile · 이미지 · 코드를 한 번에 검사해요</p>}{busy&&<p>시크릿 · Dockerfile · 이미지 · 코드를 검사하고 있어요</p>}</div>
+  <div className="t"><h1>{model.title}</h1>{model.reason&&<p>{model.reason}</p>}{!busy&&model.skipped.map(t=><p key={t} className="skip">{t}</p>)}{model.verdict==='idle'&&<p>시크릿 · Dockerfile · 이미지 · 코드를 한 번에 검사해요</p>}{busy&&<p>시크릿 · Dockerfile · 이미지 · 코드를 검사하고 있어요</p>}</div>
   {(model.verdict!=='idle')&&<div className="rc-sec-tally" aria-label={`위험 ${model.tally.danger}, 주의 ${model.tally.caution}, 낮음 ${model.tally.low}`}>
    <div className="d"><b>{danger}</b><span>위험</span></div><div className="c"><b>{caution}</b><span>주의</span></div><div className="l"><b>{low}</b><span>낮음</span></div></div>}
   <button className={`rc-btn${signal?'':' p'}`} disabled={busy} onClick={run}>{busy?'검사 중…':signal?'다시 검사':'보안 검사 시작'}</button>
@@ -211,8 +223,8 @@ export const SecurityDashboard: React.FC<{onGo?:(view:string)=>void}> = ({onGo})
    {busy&&!model.risks.length&&[0,1,2].map(i=><div key={i} className="rc-sec-skel" style={{animationDelay:`${i*.15}s`}}/>)}
    {!busy&&!model.risks.length&&<div className="rc-sec-empty">{model.verdict==='safe'?<span style={{color:'var(--rc-ok,#3DD68C)'}}>{Icon.ok}</span>:<span style={{color:'var(--rc-fg3,#67768A)'}}>{Icon.idle}</span>}
     <span>{model.verdict==='safe'?'찾은 문제가 없어요':model.verdict==='idle'?'검사하면 위험한 것부터 여기에 보여요':'찾은 문제는 없지만 끝나지 않은 검사가 있어요 — 아래 단계를 눌러 확인하세요'}</span></div>}
-   {shown.map((r,i)=><RiskRow key={r.key} risk={r} delay={i*.07} onFixImage={fixImage} onFixCode={onGo?()=>fixCode(r):undefined} onOpen={(file,line)=>postMessage('map.openFile',{id:file,line})}/>)}
-   {hidden>0&&<button className="rc-sec-more" onClick={()=>setAllRisks(true)}>+ {allRisks?'':model.risks.filter(r=>r.level==='low').length===hidden?'낮음 ':''}{hidden}개 더 보기</button>}
+   {shown.map((r,i)=><RiskRow key={r.key} risk={r} delay={i*.07} match={fixFor(r,plan.proposals)} planning={plan.loading} onFix={toFix} onFixCode={onGo?()=>fixCode(r):undefined} onOpen={(file,line)=>postMessage('map.openFile',{id:file,line})}/>)}
+   {hidden>0&&<button className="rc-sec-more" onClick={()=>setAllRisks(true)}>+ {hidden}개 더 보기</button>}
    {allRisks&&model.risks.length>5&&<button className="rc-sec-more" onClick={()=>setAllRisks(false)}>접기</button>}
   </div>
   <AttackCard tone={attackTone} rows={model.attack} running={!!attack.running} has={!!attack.assessment} blocked={blocked} tested={tested} onOpen={()=>{if(redteam){setRedteam(false);}else openRedteam(false);}} openNow={redteam}/>
@@ -228,7 +240,7 @@ export const SecurityDashboard: React.FC<{onGo?:(view:string)=>void}> = ({onGo})
    <summary>{Icon.chev}검사 결과 상세<small>시크릿 · Dockerfile · 이미지 · 코드 · OPA 정책{busy?' · 검사 중':''}</small></summary>
    <div className="rc-security-detail">
     <details><summary><strong>코드 보안 규칙 · {checks.code?.running?'검사 중':checks.code?.error?'확인 실패':code?code.score===null?'적용 가능한 규칙 없음':`${code.findings.length}개 확인 필요`:'미실행'}</strong><small>JavaScript · TypeScript 대상 / AI 감사와 별개</small></summary><p>{checks.code?.error||code?.scope||'프로젝트에서 SQL 구성, 인증, 시크릿 등 지원 규칙을 검사합니다.'}</p>{code&&<p>검사 파일 {code.files_checked??'—'}개</p>}<button className="rc-btn" disabled={!!checks.code?.running} onClick={()=>request('code')}>코드만 다시 검사</button></details>
-    <details open><summary><strong>이미지 · Dockerfile · 시크릿</strong><small>{scanning?'검사 중':model.gate.label} · 결과와 수정안</small></summary><SecurityScanPanel kinds={SECURITY_KINDS} title="기본 검사" note="" compact runSignal={signal} onChange={changed}/></details>
+    <details open><summary><strong>이미지 · Dockerfile · 시크릿</strong><small>{scanning?'검사 중':model.gate.label} · 결과와 수정안</small></summary><SecurityScanPanel kinds={SECURITY_KINDS} title="기본 검사" note="" compact runSignal={signal} onChange={changed} onPlan={onPlan} focusFix={focusFix}/></details>
     <details><summary><strong>배포 정책 · {checks.policy?.result?.opa_available?'OPA 연결됨':checks.policy?'연결 확인 필요':'상태 미확인'}</strong><small>연결 상태와 실제 배포 정책 평가는 별개입니다.</small></summary><p>{checks.policy?.error||`정책 번들: ${String(checks.policy?.result?.bundle_version||'미확인')}`}</p><button className="rc-btn" disabled={!!checks.policy?.running} onClick={()=>request('policy')}>OPA 상태 확인</button><PolicyPanel/></details>
    </div>
   </details>
@@ -262,11 +274,14 @@ export const SecurityDashboard: React.FC<{onGo?:(view:string)=>void}> = ({onGo})
 
 const STEP_TEXT:Record<Step['state'],string>={idle:'아직',running:'검사 중',ok:'통과',warn:'확인 필요',bad:'위험',na:'해당 없음'};
 
-const RiskRow:React.FC<{risk:Risk;delay:number;onFixImage:()=>void;onFixCode?:()=>void;onOpen:(file:string,line?:number)=>void}>=({risk:r,delay,onFixImage,onFixCode,onOpen})=>{
- const fixBtn=r.fix==='auto'?<button className="rc-btn sm p" onClick={e=>{e.preventDefault();onFixImage();}}>고치기</button>
-  :r.fix==='code'&&onFixCode?<button className="rc-btn sm p" onClick={e=>{e.preventDefault();onFixCode();}}>고치기</button>
+const RiskRow:React.FC<{risk:Risk;delay:number;match:FixMatch;planning:boolean;onFix:(m:FixMatch)=>void;onFixCode?:()=>void;onOpen:(file:string,line?:number)=>void}>=({risk:r,delay,match,planning,onFix,onFixCode,onOpen})=>{
+ const stop=(e:React.MouseEvent)=>{e.preventDefault();e.stopPropagation();};
+ //: "고치기" 는 실제로 적용할 수 있는 수정안이 있을 때만. 코드 문제는 AI 수정 요청으로 넘긴다.
+ const fixBtn=r.source==='code'||r.source==='attack'?(onFixCode?<button className="rc-btn sm p" onClick={e=>{stop(e);onFixCode();}}>고치기</button>:<span className="wait">직접 수정</span>)
+  :match?.kind==='auto'?<button className="rc-btn sm p" onClick={e=>{stop(e);onFix(match);}}>고치기</button>
+  :planning&&r.fix!=='wait'?<span className="wait" aria-busy="true">수정안 준비 중</span>
   :r.fix==='wait'?<span className="wait" title="아직 고친 버전이 나오지 않았어요">{Icon.clock}대기</span>
-  :<span className="wait">직접 확인</span>;
+  :<span className="wait">직접 수정</span>;
  const file=r.details.find(d=>d.file);
  return <details className="rc-sec-risk" data-level={r.level} style={{animationDelay:`${delay}s`}}>
   <summary aria-label={`${r.level==='danger'?'위험':r.level==='caution'?'주의':'낮음'} · ${r.title} · ${r.where}`}>
@@ -278,9 +293,12 @@ const RiskRow:React.FC<{risk:Risk;delay:number;onFixImage:()=>void;onFixCode?:()
   <div className="body">
    <ul>{r.details.slice(0,8).map((d,i)=><li key={i}>{d.id&&<code>{d.id}</code>} {d.title}{(d.installed||d.fixed)&&<> · <code>{d.installed??'?'}</code> → <code>{d.fixed||'고친 버전 없음'}</code></>}{d.where&&<> · {d.where}</>}{d.file&&<> · <code>{d.file}{d.line?`:${d.line}`:''}</code></>}</li>)}
     {r.details.length>8&&<li>외 {r.details.length-8}건</li>}</ul>
+   {match&&<p><b>{match.kind==='auto'?'자동 수정':'직접 수정'}</b> · {match.proposal.title} — {match.proposal.detail}</p>}
+   {!match&&r.fix==='auto'&&r.source==='image'&&!planning&&<p>자동 수정안이 없어요. 위 버전으로 직접 올린 뒤 다시 검사하세요.</p>}
    <div className="rc-sec-act">{file?.file&&<button className="rc-btn sm" onClick={()=>onOpen(file.file!,file.line)}>코드 위치 열기</button>}
+    {match&&<button className="rc-btn sm" onClick={()=>onFix(match)}>수정안 보기</button>}
     {r.fix==='wait'&&<span>고친 버전이 나오면 배포 후 감시가 알려줘요. 배포를 막지는 않아요.</span>}
-    {r.fix==='manual'&&r.source==='secret'&&<span>노출된 키는 새로 발급하고, 코드 대신 환경변수로 옮기세요.</span>}</div>
+    {r.source==='secret'&&<span>노출된 키는 새로 발급하고, 코드 대신 환경변수로 옮기세요.</span>}</div>
   </div>
  </details>;
 };

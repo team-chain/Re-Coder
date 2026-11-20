@@ -105,6 +105,19 @@ test('3.1 multi-service stacks appear with their own filter and approval wording
     rollback: { available: true, target: '2026-11-10T00:00:00Z', reason: '', approval_level: 2 } });
   const state = reduce(reduce(loaded([entry(), stack]), { type: 'select', key: 'stack:s1' }), { type: 'review', key: 'stack:s1' });
   const html = render(state);
-  for (const text of ['로컬 다중 서비스 · recoder-shop-abc123', '다중 서비스 롤백 승인', 'DB 데이터(볼륨)는 그대로', '>다중 서비스<']) assert.ok(html.includes(text), text);
+  for (const text of ['로컬 다중 서비스', 'recoder-shop-abc123 · 서비스 3개', '다중 서비스 롤백 승인', 'DB 데이터(볼륨)는 그대로', '>다중 서비스<']) assert.ok(html.includes(text), text);
   assert.deepEqual(filterHistory([entry(), stack], 'stack', '').map(e => e.key), ['stack:s1']);
+});
+
+test('history rows: status colour never paints unknown states green, row toggles open/closed',()=>{
+  const { historyTone } = require('../out/webview-test/components/Replay.js');
+  assert.equal(historyTone('success'),'ok');assert.equal(historyTone('succeeded'),'ok');
+  assert.equal(historyTone('failed'),'bad');assert.equal(historyTone('circuit_breaker_triggered'),'bad');assert.equal(historyTone('cancelled'),'warn');
+  assert.equal(historyTone('rolled_back'),'warn');assert.equal(historyTone('something_new'),'off');
+  const second = entry({ key: 'ecs:two', deployment_id: 'two', status: 'success', status_text: '배포 완료' });
+  const html = render(loaded([entry(), second]));
+  assert.equal((html.match(/aria-expanded="true"/g)||[]).length,1,'one detail open at a time');
+  assert.match(html,/data-t="bad"/);assert.match(html,/data-t="ok"/);
+  const closed = reduce(loaded([entry()]), { type: 'select', key: '' });
+  assert.doesNotMatch(render(closed),/롤백 대상 확인/);
 });

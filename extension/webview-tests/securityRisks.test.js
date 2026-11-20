@@ -85,3 +85,62 @@ test('attack stage: one probe per real request, none when inactive, no request n
  assert.doesNotMatch(managed,/요청 <b>/,'no request counter without real traffic data');
  assert.equal(outcomeOf({status:403,blocked:false}),'refused');assert.equal(outcomeOf({status:502,blocked:false}),'error');assert.equal(outcomeOf({status:200,blocked:true}),'limited');
 });
+
+const {fixFor}=require('../out/webview-test/components/securityRisks');
+const {shieldPoint}=require('../out/webview-test/components/RedTeamTrafficView');
+test('fix button only when a real automatic fix matches that row',()=>{
+ const m=securityModel({scanning:false,code,scans:{...clean,
+  trivy:ok([{severity:'HIGH',package:'axios',installed:'0.19.2',fixed:'0.28.0',title:'SSRF',class:'lang-pkgs',target:'app/package-lock.json'},
+            {severity:'CRITICAL',package:'busybox',installed:'1.37.0-r12',fixed:'1.37.0-r13',title:'dos',class:'os-pkgs',target:'shop (alpine 3.22)'},
+            {severity:'HIGH',package:'left-pad',installed:'1.0.0',fixed:'1.0.1',title:'x',class:'lang-pkgs'}]),
+  hadolint:ok([{severity:'MEDIUM',file:'Dockerfile',line:3,code:'DL3018',message:'Pin versions'}]),
+  gitleaks:ok([{severity:'CRITICAL',rule_id:'generic',file:'src/config.js',line:2}])}});
+ const proposals=[{id:'a',tool:'trivy',title:'axios 0.19.2 → 0.28.0',detail:'package.json',files:['package.json'],auto:true},
+  {id:'b',tool:'trivy',title:'베이스 이미지 OS 패키지 1개 패치',detail:'apk upgrade',files:['Dockerfile'],auto:true,rebuild:true},
+  {id:'c',tool:'hadolint',title:'OS 패키지 버전은 기본 이미지 태그로 고정(이 줄만 예외) (DL3018)',detail:'',files:['Dockerfile'],auto:true},
+  {id:'d',tool:'gitleaks',title:'키를 .env 로 옮기기',detail:'',files:['src/config.js'],auto:true}];
+ const by=w=>m.risks.find(r=>r.where.startsWith(w));
+ assert.equal(fixFor(by('axios'),proposals).proposal.id,'a');
+ assert.equal(fixFor(by('busybox'),proposals).proposal.id,'b','OS 패키지는 베이스 이미지 패치로');
+ assert.equal(fixFor(by('left-pad'),proposals),null,'수정안이 없으면 고치기를 띄우지 않는다');
+ assert.equal(fixFor(m.risks.find(r=>r.source==='dockerfile'),proposals).proposal.id,'c');
+ assert.equal(fixFor(m.risks.find(r=>r.source==='secret'),proposals).proposal.id,'d');
+ assert.equal(fixFor(by('axios'),[{...proposals[0],auto:false}]).kind,'manual');
+ assert.equal(fixFor(by('axios'),[{...proposals[0],title:'axios-retry 1 → 2'}]),null,'이름이 겹치는 다른 패키지와 섞지 않는다');
+});
+test('watch step is green only with real records, and skipped checks are said out loud',()=>{
+ const st=w=>securityModel({scans:clean,scanning:false,code,watch:w}).steps.find(s=>s.key==='watch').state;
+ assert.equal(st(undefined),'idle');assert.equal(st({result:{}}),'idle');
+ assert.equal(st({result:{status:'not_run',message:'x'}}),'idle');assert.equal(st({result:{status:'ok',checked:2}}),'ok');
+ assert.equal(st({result:{web:{checked_at:'t',known:{a:{id:'CVE',name:'x',version:'1'}}}}}),'warn');
+ assert.equal(st({result:{web:{checked_at:'t',known:{a:{id:'CVE',name:'x',version:'1',fixed_at:'t'}}}}}),'ok');
+ assert.equal(st({error:'x'}),'warn');
+ const m=securityModel({scans:{...clean,trivy:{status:'not_run',reason_code:'image_not_found'}},scanning:false,code});
+ assert.equal(m.verdict,'safe');assert.ok(m.skipped.some(t=>/이미지 검사는 건너뛰었어요/.test(t)));
+});
+test('attack impacts land exactly on the drawn rounded shield',()=>{
+ const CX=320,CY=128,RX=176,RY=104,CR=26;
+ for(let deg=0;deg<360;deg+=7){
+  const [x,y]=shieldPoint(deg*Math.PI/180),dx=Math.abs(x-CX),dy=Math.abs(y-CY);
+  let dist;
+  if(dx>RX-CR&&dy>RY-CR)dist=Math.hypot(dx-(RX-CR),dy-(RY-CR))-CR;else dist=Math.max(dx-RX,dy-RY);
+  assert.ok(Math.abs(dist)<0.01,`${deg}° off by ${dist}`);
+ }
+});
+
+//: Core 실제 경로로 만든 결과 — hadolint 2.15.1 실제 출력(--format json, 표준 입력) + Trivy JSON v2 형식 보고서를
+//: InfraAgent._filter_trivy_results → deploy._normalise_scan_result → security_fix.plan 에 그대로 통과시킨 것.
+test('Core pipeline output: plain titles, honest locations, and fix buttons only where a fix really applies',()=>{
+ const n=JSON.parse(JSON.stringify(require('./fixtures/core-scan-pipeline.json')));const proposals=n._proposals;delete n._proposals;
+ const m=securityModel({scans:n,scanning:false,code:{score:100,findings:[]}});
+ assert.equal(m.verdict,'danger');assert.deepEqual(m.tally,{danger:2,caution:5,low:1});
+ const row=w=>m.risks.find(r=>r.where.startsWith(w));
+ assert.equal(row('busybox').fix,'wait');assert.equal(fixFor(row('busybox'),proposals),null,'고친 버전 없는 CVE 에 고치기 없음');
+ assert.equal(fixFor(row('libssl3'),proposals).proposal.title.startsWith('베이스 이미지 OS 패키지'),true);
+ assert.equal(row('axios').where,'axios · 앱 의존성');assert.equal(row('axios').title,'내부망 접근');
+ assert.equal(row('cross-spawn').where,'cross-spawn · 이미지의 npm');assert.equal(fixFor(row('cross-spawn'),proposals).kind,'manual');
+ assert.ok(m.risks.every(r=>!r.where.includes('Node.js')),'Trivy 분류명을 위치로 쓰지 않는다');
+ assert.ok(m.risks.filter(r=>r.source==='dockerfile').every(r=>r.where.startsWith('Dockerfile:')),'표준 입력의 "-" 를 Dockerfile 로');
+ assert.equal(fixFor(m.risks.find(r=>r.source==='secret'),proposals).kind,'auto');
+ assert.equal(m.risks.find(r=>r.source==='secret').details[0].title,n.gitleaks.findings[0].secret_type);
+});

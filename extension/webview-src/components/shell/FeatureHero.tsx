@@ -5,12 +5,11 @@
 import React from "react";
 import { TechLogo } from "./parts";
 
-type Kind = "build" | "ship" | "replay" | "operate" | "models" | "adr" | "policy";
+type Kind = "build" | "ship" | "operate" | "models" | "adr" | "policy";
 
 const COPY: Record<Kind, { title: string; desc: string }> = {
   build: { title: "에러 분석", desc: "오류 로그를 붙이면 원인과 수정안을 보여 줍니다. 적용은 확인한 뒤에만 합니다." },
   ship: { title: "로컬 Docker", desc: "Dockerfile 생성 → 검사 → 빌드 → 실행 → 헬스 확인. 실패하면 이전 이미지로 되돌립니다." },
-  replay: { title: "배포 기록 · 롤백", desc: "지금까지의 배포와 롤백을 시간순으로. 이전 버전으로는 승인한 뒤에만 되돌립니다." },
   operate: { title: "운영 대응", desc: "장애 · 공격 신호를 모아 원인을 분석하고 조치를 제안합니다. 실행은 승인 후에만." },
   models: { title: "AI 모델 · 비용", desc: "작업마다 쓸 모델을 고르고, 같은 요청의 결과와 비용을 비교합니다." },
   adr: { title: "설계 기록", desc: "코드 생성에서 확정한 설계 결정과 이유가 docs/adr 에 쌓입니다." },
@@ -41,13 +40,6 @@ function Art({ kind }: { kind: Kind }) {
         <foreignObject x="20" y="34" width="34" height="34"><div style={{ color: "#2496ED" }}><TechLogo kind="docker" size={30} /></div></foreignObject>
         <rect x="196" y="38" width="50" height="20" rx="10" fill="rgba(61,214,140,.1)" stroke="rgba(61,214,140,.45)" />
         <circle cx="206" cy="48" r="3" fill="#3DD68C" /><rect x="214" y="45" width="24" height="6" rx="3" fill="rgba(61,214,140,.55)" />
-      </svg>);
-    case "replay": return (
-      <svg width="250" height="96" viewBox="0 0 250 96" aria-hidden="true">{G("fh-r")}
-        <path d="M18 56h214" stroke="var(--rc-line2)" strokeWidth="2" />
-        {[0, 1, 2, 3].map(i => <g key={i}><circle cx={40 + i * 56} cy="56" r={i === 3 ? 9 : 7} fill={i === 3 ? "url(#fh-r)" : "var(--rc-solid)"} stroke={i === 2 ? "#F2B544" : "var(--rc-line2)"} strokeWidth="2" />
-          <rect x={30 + i * 56} y="74" width="20" height="5" rx="2.5" fill="var(--rc-line2)" /></g>)}
-        <path d="M208 40c-14-22-46-22-60 0" fill="none" stroke="url(#fh-r)" strokeWidth="2" strokeDasharray="4 4" /><path d="m146 34 2 7 7-2" fill="none" stroke="#7B8FB6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
       </svg>);
     case "operate": return (
       <svg width="250" height="96" viewBox="0 0 250 96" aria-hidden="true">{G("fh-o")}
