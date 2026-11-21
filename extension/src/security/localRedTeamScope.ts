@@ -10,7 +10,7 @@ export interface RedTeamHttpEvent {id:number;method:string;path:string;status:nu
  * the relay cannot forward IP packets and only accepts the approved path.
  */
 export const SCOPE_RELAY = String.raw`
-import http.server,http.client,json,sys,time,urllib.parse,threading
+import http.server,http.client,json,socketserver,sys,time,urllib.parse,threading
 cfg=json.loads(sys.argv[1])
 lock=threading.Lock()
 count=0
@@ -98,6 +98,12 @@ class Relay(http.server.BaseHTTPRequestHandler):
 class Server(http.server.ThreadingHTTPServer):
     daemon_threads=True
     request_queue_size=8
+    def server_bind(self):
+        # http.server 의 기본 server_bind 는 socket.getfqdn() 으로 역방향 DNS 를 조회해 macOS 등에서
+        # 수십 초 멈춘다(CI macOS 에서 시간 초과). 이름은 쓰지 않으니 조회하지 않는다.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name=str(self.server_address[0])
+        self.server_port=self.server_address[1]
 Server((cfg.get('bind','0.0.0.0'),cfg.get('listenPort',cfg['port'])),Relay).serve_forever()
 `;
 
