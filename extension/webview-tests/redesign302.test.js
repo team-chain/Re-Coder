@@ -107,3 +107,12 @@ test('3.0.2 운영 상태 조회: Ops 승인자 자격증명을 헤더로 보내
   fail=true;await assert.rejects(()=>api.fetchIncidents('1.2.3.4','~/.ssh/k','actor-1'),/승인자 설정 없음|운영 상태/);
  } finally { server.close(); }
 });
+test('home never says "no deployment" while the history could not be read yet (Core starting)',()=>{
+ const base={snapshot:{...snap,aws:{ready:false,region:'',account:''},topology:null,scan:null},monitor:null,changes:{files:[],added:0,removed:0,untracked:0,snippet:null},now:NOW};
+ const loading=renderToStaticMarkup(React.createElement(HomeView,{data:{...base,history:null},go(){},open(){}}));
+ assert.ok(!loading.includes('아직 배포한 버전이 없습니다'));assert.match(loading,/배포 기록을 불러오는 중/);assert.ok(!loading.includes('실행 전'));
+ const failed=renderToStaticMarkup(React.createElement(HomeView,{data:{...base,history:null,historyError:true},go(){},open(){}}));
+ assert.ok(!failed.includes('아직 배포한 버전이 없습니다'));assert.match(failed,/배포 기록을 불러오지 못했어요/);assert.ok(!failed.includes('배포하면 여기에 쌓여요'));
+ const none=renderToStaticMarkup(React.createElement(HomeView,{data:{...base,history:[]},go(){},open(){}}));
+ assert.match(none,/아직 배포한 버전이 없습니다/);
+});

@@ -87,7 +87,7 @@ test('attack stage: one probe per real request, none when inactive, no request n
 });
 
 const {fixFor}=require('../out/webview-test/components/securityRisks');
-const {shieldPoint}=require('../out/webview-test/components/RedTeamTrafficView');
+const {routeOf,routesOf}=require('../out/webview-test/components/RedTeamTrafficView');
 test('fix button only when a real automatic fix matches that row',()=>{
  const m=securityModel({scanning:false,code,scans:{...clean,
   trivy:ok([{severity:'HIGH',package:'axios',installed:'0.19.2',fixed:'0.28.0',title:'SSRF',class:'lang-pkgs',target:'app/package-lock.json'},
@@ -118,14 +118,14 @@ test('watch step is green only with real records, and skipped checks are said ou
  const m=securityModel({scans:{...clean,trivy:{status:'not_run',reason_code:'image_not_found'}},scanning:false,code});
  assert.equal(m.verdict,'safe');assert.ok(m.skipped.some(t=>/이미지 검사는 건너뛰었어요/.test(t)));
 });
-test('attack impacts land exactly on the drawn rounded shield',()=>{
- const CX=320,CY=128,RX=176,RY=104,CR=26;
- for(let deg=0;deg<360;deg+=7){
-  const [x,y]=shieldPoint(deg*Math.PI/180),dx=Math.abs(x-CX),dy=Math.abs(y-CY);
-  let dist;
-  if(dx>RX-CR&&dy>RY-CR)dist=Math.hypot(dx-(RX-CR),dy-(RY-CR))-CR;else dist=Math.max(dx-RX,dy-RY);
-  assert.ok(Math.abs(dist)<0.01,`${deg}° off by ${dist}`);
- }
+test('attack stage lists the real routes that were hit, never a fake app picture',()=>{
+ assert.equal(routeOf('/api/users/42?x=1'),'/api/users/:id');assert.equal(routeOf('/o/5f3a9c2e1b7d'),'/o/:id');assert.equal(routeOf(''),'/');
+ const ev=(id,method,path,status,blocked=false)=>({id,method,path,status,blocked,durationMs:5,at:''});
+ const evs=[ev(1,'GET','/api/users/1',200),ev(2,'GET','/api/users/2',403),ev(3,'POST','/login',401),ev(4,'GET','/admin',429,true)];
+ const r=routesOf(evs);assert.equal(r[0].path,'/api/users/:id');assert.equal(r[0].n,2);assert.equal(r[0].by.refused,1);assert.equal(r[0].by.answered,1);
+ const html=renderToStaticMarkup(React.createElement(RedTeamTrafficView,{events:evs,active:true,target:'http://host.docker.internal:8080/'}));
+ assert.match(html,/\/api\/users\/:id/);assert.match(html,/\/login/);assert.match(html,/중계 차단 <b>1<\/b>/);assert.doesNotMatch(html,/범위 제한|rt-site/);
+ assert.match(html,/data-hot="true" data-o="limited"/,'latest route is highlighted');
 });
 
 //: Core 실제 경로로 만든 결과 — hadolint 2.15.1 실제 출력(--format json, 표준 입력) + Trivy JSON v2 형식 보고서를
@@ -152,4 +152,19 @@ test('Core-unreachable errors are translated once at the host→webview boundary
  const keep={error:'AWS 권한이 부족합니다: ecs:UpdateService'};assert.equal(humanizeNetworkErrors(keep),keep);
  assert.equal(humanizeNetworkErrors({message:'설명에 fetch failed 가 들어간 긴 문장'}).message,'설명에 fetch failed 가 들어간 긴 문장');
  assert.equal(humanizeNetworkErrors('fetch failed'),'fetch failed','문자열 payload 는 그대로');assert.deepEqual(humanizeNetworkErrors([1]),[1]);
+});
+test('multi-service projects: a service that could not be scanned is never "안전"',()=>{
+ const partial={...clean,hadolint:ok([],{services:['web','gateway','orders'],unverified_targets:['orders']})};
+ const m=securityModel({scans:partial,scanning:false,code});
+ assert.equal(m.verdict,'caution');assert.notEqual(m.title,'안전');
+ assert.ok(m.skipped.some(s=>s.includes('검사하지 못한 서비스가 있어요: orders')));
+ const all={...clean,hadolint:ok([],{services:['web','gateway']}),trivy:ok([],{services:['web','gateway']})};
+ const done=securityModel({scans:all,scanning:false,code});
+ assert.equal(done.verdict,'safe');assert.ok(done.skipped.some(s=>s.includes('서비스 2개의 Dockerfile을 각각 검사했어요')));
+});
+test('red team caption is Korean and never shows internal addresses',()=>{
+ const {stageCaption}=require('../out/webview-test/components/RedTeamRunView');
+ assert.equal(stageCaption('Probe login at http://172.30.0.10:8080/login','공격 단계 2/5'),'공격 단계 2/5');
+ assert.equal(stageCaption('로그인 우회 172.30.0.10:8080',undefined),'로그인 우회 진행 중');
+ assert.equal(stageCaption('Recon of 172.30.0.10',undefined),'공격 작업 진행 중');
 });

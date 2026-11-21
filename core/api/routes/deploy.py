@@ -2550,6 +2550,13 @@ async def _execute_scan(scan_type: str, workspace_path: str, target_path: Option
             detail=f"Unknown scan type: '{scan_type}'. Use trivy, hadolint, or gitleaks.",
         )
 
+    #: 여러 서비스 프로젝트(services/*/Dockerfile, ReCoder 계약·compose) — 루트 Dockerfile·`<폴더명>:latest` 이미지가 없다.
+    #: 예전에는 "Dockerfile 없음 · 이미지 없음" 으로 건너뛰고 화면은 「안전」 이었다(실기기 2026-11-21, 서비스 7개).
+    if scan_type in ("hadolint", "trivy") and not target_path and workspace_path:
+        targets = await asyncio.to_thread(_service_scan_targets, Path(workspace_path), scan_type)
+        if targets:
+            return await _scan_each_service(scan_type, workspace_path, targets)
+
     agent = _get_infra_agent()
     if agent is None:
         return {
@@ -3730,6 +3737,90 @@ async def run_scan(request: ScanRequest) -> dict:
     return await _execute_scan(
         request.scan_type, request.workspace_path, request.target_path
     )
+
+
+_SKIP_DIRS = {"node_modules", ".git", "_old", "dist", "build", ".venv", "venv", "__pycache__"}
+
+
+def _service_scan_targets(ws: Path, scan_type: str) -> list[tuple[str, str]]:
+    """루트에 Dockerfile·기본 이미지가 없는 여러 서비스 프로젝트의 서비스별 검사 대상 — [(서비스, Dockerfile 경로 또는 이미지)].
+
+    한 서비스짜리 프로젝트(루트 Dockerfile / `<폴더명>:latest` 가 있음)는 빈 목록 — 예전 경로를 그대로 쓴다.
+    """
+    if not ws.is_dir():
+        return []
+    try:
+        from grounded_repair.workspace import compose_services
+        import compose_deploy
+    except ImportError:  # pragma: no cover
+        from core.grounded_repair.workspace import compose_services  # type: ignore
+        from core import compose_deploy  # type: ignore
+    services = compose_services(ws)  # 계약(architecture.json) 서비스 → 폴더
+    if not services:
+        for dockerfile in sorted([*ws.glob("*/Dockerfile"), *ws.glob("*/*/Dockerfile")])[:30]:
+            rel = dockerfile.parent.relative_to(ws)
+            if not any(part in _SKIP_DIRS or part.startswith(".") for part in rel.parts):
+                services.setdefault(dockerfile.parent.name, rel.as_posix())
+    if scan_type == "hadolint":
+        if (ws / "Dockerfile").is_file():
+            return []
+        return [(name, str(ws / path / "Dockerfile")) for name, path in services.items()]
+    if _local_image_exists(_default_image_name(str(ws))):
+        return []
+    names = list(services) or compose_deploy.built_services(ws)
+    prefixes = [compose_deploy.project_name(ws), re.sub(r"[^a-z0-9_-]+", "", ws.name.lower())]
+    found: list[tuple[str, str]] = []
+    for name in names:
+        for prefix in filter(None, prefixes):
+            image = f"{prefix}-{name}:latest"
+            if _local_image_exists(image):
+                found.append((name, image))
+                break
+    return found
+
+
+async def _scan_each_service(scan_type: str, workspace_path: str, targets: list[tuple[str, str]]) -> dict:
+    """서비스마다 따로 검사하고 한 결과로 합친다. 하나라도 못 하면 그 서비스를 unverified_targets 에 남긴다(통과로 세지 않는다)."""
+    root = Path(workspace_path)
+    findings: list[dict] = []
+    counts = {"critical_count": 0, "high_count": 0, "medium_count": 0}
+    failed: list[str] = []
+    parts: list[str] = []
+    for service, target in targets:
+        result = await _execute_scan(scan_type, workspace_path, target)
+        if result.get("status") != "ok":
+            failed.append(service)
+            continue
+        for key in counts:
+            counts[key] += int(result.get(key) or 0)
+        for f in result.get("findings") or []:
+            item = {**f, "service": service}
+            if scan_type == "hadolint":
+                try:
+                    item["file"] = Path(target).relative_to(root).as_posix()
+                except ValueError:
+                    item["file"] = target
+            findings.append(item)
+        n = len(result.get("findings") or [])
+        parts.append(f"{service} {n}건" if n else f"{service} 이상 없음")
+    kind = "Dockerfile" if scan_type == "hadolint" else "이미지"
+    checked = len(targets) - len(failed)
+    summary = f"서비스 {len(targets)}개 {kind} 검사 — " + (" · ".join(parts) if parts else "검사하지 못함")
+    if failed:
+        summary += f" · 검사하지 못한 서비스: {', '.join(failed)}"
+    merged = {
+        "status": "ok" if checked else "unverified",
+        "scan_type": scan_type,
+        "target": f"서비스 {len(targets)}개",
+        **counts,
+        "findings": findings,
+        "summary": summary,
+        "services": [name for name, _ in targets],
+        "unverified_targets": failed,
+    }
+    if not checked:
+        merged.update(_scan_failure.failure_fields(summary, scan_type=scan_type, target=merged["target"]))
+    return merged
 
 
 def _local_image_exists(image: str) -> bool:

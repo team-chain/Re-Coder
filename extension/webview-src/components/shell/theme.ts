@@ -113,9 +113,10 @@ html[data-recoder-layout=workspace] body:before{content:"";position:fixed;inset:
 .rc-top-right .rc-connection-dot[data-ready=true]{background:var(--rc-ok);box-shadow:0 0 8px var(--rc-ok)}
 
 /* ── 본문 · 아래 요청창 ── */
-.rc-main{position:relative;z-index:1;flex:1;min-height:0;overflow:auto;padding:6px 22px 108px}
+.rc-main{position:relative;z-index:1;flex:1;min-height:0;overflow:auto;padding:6px 22px 24px}
 .rc-main.rc-no-dock{padding-bottom:28px}
-.rc-dock{position:fixed;z-index:6;left:50%;bottom:18px;transform:translateX(-50%);width:min(660px,calc(100% - 32px));height:56px;border-radius:18px;
+/* 요청창은 본문 아래 자기 자리를 차지한다 — 떠 있으면 아래 내용을 가리고 대화상자 위로 올라왔다(실사용 2026-11-20). */
+.rc-dock{position:relative;z-index:0;flex:none;margin:6px auto 14px;width:min(660px,calc(100% - 32px));height:56px;border-radius:18px;
   background:color-mix(in srgb,var(--rc-solid) 88%,transparent);border:1px solid var(--rc-line2);box-shadow:0 30px 80px -12px rgba(0,0,0,.8);
   backdrop-filter:blur(22px);display:flex;align-items:center;gap:10px;padding:0 8px 0 14px}
 body.vscode-light .rc-dock{box-shadow:0 20px 50px -18px rgba(20,45,75,.35)}
@@ -161,7 +162,8 @@ body.vscode-light .rc-tile{box-shadow:0 1px 2px rgba(20,45,75,.05)}
 .rc-op :is(input:not([type=checkbox]):not([type=radio]),select){height:32px;padding:0 10px;box-sizing:border-box;font-size:12.5px}
 
 /* ── 허브 안 탭 ── */
-.rc-subtabs{display:flex;gap:2px;margin:2px 0 18px;border-bottom:1px solid var(--rc-line);overflow-x:auto}
+.rc-subtabs{display:flex;gap:2px;margin:2px 0 18px;border-bottom:1px solid var(--rc-line);overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
+.rc-subtabs::-webkit-scrollbar{display:none}
 .rc-subtabs button{all:unset;cursor:pointer;display:flex;align-items:center;gap:8px;padding:10px 12px 12px;color:var(--rc-fg2);font-size:13.5px;border-bottom:2px solid transparent;margin-bottom:-1px;white-space:nowrap}
 .rc-subtabs button:hover{color:var(--rc-fg)}
 .rc-subtabs button[aria-current=page]{color:var(--rc-fg);border-color:var(--rc-teal)}
@@ -187,5 +189,5 @@ ${LEGACY_CSS}
 @media (max-width:1100px){.rc-proj{display:none}}
 @media (max-width:1000px){.rc-top{gap:8px;padding:0 14px}.rc-top-right .rc-quick-button{display:none!important}}
 @media (max-width:700px){.rc-top{height:auto;flex-wrap:wrap;padding:10px 12px;row-gap:8px}.rc-pills{order:5;width:100%;justify-content:space-between}.rc-pills button{padding:6px 8px;font-size:12.5px}
-  .rc-top-right .rc-status-toggle{display:none!important}.rc-main{padding:4px 12px 100px}}
+  .rc-top-right .rc-status-toggle{display:none!important}.rc-main{padding:4px 12px 20px}}
 `;

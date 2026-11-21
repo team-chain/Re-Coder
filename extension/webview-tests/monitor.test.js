@@ -80,7 +80,7 @@ test('2.0.49 모니터 화면: 감시자 없음 · 앱 없음 · 서비스 없�
  const gone=renderToStaticMarkup(React.createElement(MonitorView,{data:{monitors:[],current:cur({service_state:{status:'INACTIVE',running:0,desired:0,revision:'',task_definition:''}})},now:NOW}));
  assert.match(gone,/서비스를 찾지 못했습니다/);
  const unknown=renderToStaticMarkup(React.createElement(MonitorView,{data:{monitors:[],current:cur({watcher:{installed:null,error:'AccessDenied'}})},now:NOW}));
- assert.match(unknown,/상시 감시 상태를 확인하지 못했습니다 — AccessDenied/);
+ assert.match(unknown,/상시 감시 상태를 확인하지 못했어요 · AccessDenied/);
 });
 
 test('2.0.49 위쪽 탭: Develop · Deploy · Security · Operate, 운영 대응은 Operate 아래',()=>{

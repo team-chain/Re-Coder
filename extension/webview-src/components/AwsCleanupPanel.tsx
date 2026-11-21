@@ -33,10 +33,10 @@ export function cleanupRegionChoices(defaultRegion: string, deployed: string[]):
 
 interface CleanupJobView { id: string; region: string; status: string; progress?: { done: number; total: number; current?: string }; error?: string }
 
-const box: React.CSSProperties = { border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 8, padding: 12, marginBottom: 10 };
-const muted: React.CSSProperties = { color: "var(--vscode-descriptionForeground, #999)", fontSize: 11, lineHeight: 1.5 };
+const box: React.CSSProperties = { border: "1px solid var(--rc-line2, #3f3f3f)", borderRadius: 8, padding: 12, marginBottom: 10 };
+const muted: React.CSSProperties = { color: "var(--rc-fg2, #999)", fontSize: 12, lineHeight: 1.5 };
 const btn: React.CSSProperties = { padding: "5px 10px", borderRadius: 5, border: "1px solid var(--vscode-button-border, transparent)",
-  background: "var(--vscode-button-secondaryBackground, #3a3d41)", color: "var(--vscode-button-secondaryForeground, #fff)", cursor: "pointer", fontSize: 12 };
+  background: "var(--rc-tile2, #3a3d41)", color: "var(--rc-fg, #fff)", cursor: "pointer", fontSize: 12 };
 const danger: React.CSSProperties = { ...btn, background: "var(--vscode-inputValidation-errorBackground, #5a1d1d)",
   border: "1px solid var(--vscode-inputValidation-errorBorder, #be1100)" };
 
@@ -167,7 +167,7 @@ export const AwsCleanupPanel: React.FC<{ defaultRegion?: string }> = ({ defaultR
           <div style={{ ...muted, marginBottom: 6 }} data-testid="cleanup-summary">
             실행 중 태스크 {plan.summary.running_tasks}개 · 로드밸런서 {plan.summary.load_balancers}개 · WAF {plan.summary.web_acls}개 · 이미지 {plan.summary.image_mb.toLocaleString()} MB
           </div>
-          {plan.gaps.map(g => <div key={g} style={{ ...muted, color: "var(--vscode-editorWarning-foreground, #cca700)" }}>{g}</div>)}
+          {plan.gaps.map(g => <div key={g} style={{ ...muted, color: "var(--rc-warn, #cca700)" }}>{g}</div>)}
           {plan.groups.length === 0 && <div style={muted}>이 리전에 ReCoder 가 만든 리소스가 없습니다.</div>}
           {plan.groups.map(g => (
             <CleanupGroup key={g.service} group={g} picked={picked} disabled={busy} stopping={stopping}

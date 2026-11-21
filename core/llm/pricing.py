@@ -20,6 +20,9 @@ from typing import Optional
 #: Sonnet 기준 어림 단가(달러/백만 토큰) — 기존 _estimate_cost 의 기본값과 같다.
 _ASSUMED_CLAUDE = (3.0, 15.0)
 _CLAUDE_FAMILY = ("bedrock", "gateway", "anthropic")
+#: Anthropic API 공식 목록 단가(달러/백만 토큰) — platform.claude.com/docs/en/about-claude/pricing, 2026-11-21 확인.
+#: 확인한 모델만 둔다. 확장 webview-src/components/modelRoutingModel.ts 의 LIST_PRICES 와 같아야 한다.
+_LIST_PRICES = {"claude-opus-5-5": (4.0, 20.0), "claude-sonnet-5-5": (2.0, 10.0)}
 
 
 def configured_prices() -> dict[str, tuple[float, float]]:
@@ -70,6 +73,10 @@ def price_for(provider: str, model: str) -> tuple[Optional[tuple[float, float]],
     if model in table:
         rate = table[model]
         return (rate["input"] * 1000, rate["output"] * 1000), "list_price"
+    import re
+    base = re.sub(r"-\d{8}$", "", model)
+    if provider in _CLAUDE_FAMILY and base in _LIST_PRICES:
+        return _LIST_PRICES[base], "list_price"
     if provider in _CLAUDE_FAMILY:
         return _ASSUMED_CLAUDE, "assumed"
     return None, "unconfigured"

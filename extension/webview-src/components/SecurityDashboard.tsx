@@ -212,7 +212,7 @@ export const SecurityDashboard: React.FC<{onGo?:(view:string)=>void}> = ({onGo})
  <style>{CSS}</style>
  <div className="rc-sec-banner" data-tone={model.verdict} aria-live="polite">
   <span className="ic">{BANNER_ICON[model.verdict]}</span>
-  <div className="t"><h1>{model.title}</h1>{model.reason&&<p>{model.reason}</p>}{!busy&&model.skipped.map(t=><p key={t} className="skip">{t}</p>)}{model.verdict==='idle'&&<p>시크릿 · Dockerfile · 이미지 · 코드를 한 번에 검사해요</p>}{busy&&<p>시크릿 · Dockerfile · 이미지 · 코드를 검사하고 있어요</p>}</div>
+  <div className="t"><h1>{model.title}</h1>{model.reason&&<p>{model.reason}</p>}{!busy&&model.skipped.map(t=><p key={t} className="skip">{t}</p>)}{model.verdict==='idle'&&<p>시크릿 · Dockerfile · 이미지 · 코드를 한 번에 검사해요</p>}{busy&&<p>{model.pending.length?`${model.pending.join(' · ')} 검사 중 · 끝난 검사 ${model.steps.slice(0,4).length-model.pending.length}/${model.steps.slice(0,4).length}`:'결과를 정리하고 있어요'}</p>}</div>
   {(model.verdict!=='idle')&&<div className="rc-sec-tally" aria-label={`위험 ${model.tally.danger}, 주의 ${model.tally.caution}, 낮음 ${model.tally.low}`}>
    <div className="d"><b>{danger}</b><span>위험</span></div><div className="c"><b>{caution}</b><span>주의</span></div><div className="l"><b>{low}</b><span>낮음</span></div></div>}
   <button className={`rc-btn${signal?'':' p'}`} disabled={busy} onClick={run}>{busy?'검사 중…':signal?'다시 검사':'보안 검사 시작'}</button>
@@ -307,8 +307,8 @@ const AttackCard:React.FC<{tone:string;rows:AttackRow[];running:boolean;has:bool
  const found=rows.filter(r=>r.state==='found').length;
  return <aside className="rc-sec-attack" data-tone={tone} aria-label="공격 테스트">
   <header>{tone==='bad'?Icon.bad:tone==='ok'?Icon.ok:Icon.idle}<div>
-   <b>{running?'진행 중':!has?'공격 테스트':found?`${found}곳 뚫림`:`${blocked}/${rows.length} 막음`}</b>
-   <small>{running?'해커처럼 내 앱을 공격하는 중':!has?'해커처럼 내 앱을 공격해 봐요':`시도한 공격 ${tested}종 기준 · 안전 보증 아님`}</small></div></header>
+   <b>{running?'진행 중':!has?'공격 테스트':found?`${found}곳 뚫림`:!tested&&!rows.some(r=>r.state==='review')?'확인 못 함':`${blocked}/${rows.length} 막음`}</b>
+   <small>{running?'해커처럼 내 앱을 공격하는 중':!has?'해커처럼 내 앱을 공격해 봐요':!tested&&!rows.some(r=>r.state==='review')?'지난 검사에서 끝까지 확인한 공격이 없어요 · 다시 해 보세요':`시도한 공격 ${tested}종 기준 · 안전 보증 아님`}</small></div></header>
   <ul>{rows.map((r,i)=><li key={r.kind} data-s={r.state} style={{animationDelay:`${.15+i*.06}s`}}>{ATTACK_ICON[r.state]}<span>{r.label}</span><small>{has?`${ATTACK_NOTE[r.state]}${r.requests?` · ${r.requests}`:''}`:''}</small></li>)}</ul>
   <button className={`rc-btn${has||running?'':' p'}`} aria-expanded={openNow} onClick={onOpen}>{openNow?'공격 테스트 닫기':'레드팀 테스트'}</button>
  </aside>;

@@ -148,8 +148,9 @@ export function securityModel(input: SecurityInput) {
     if (!r) return 'idle';
     if (isNotApplicable(r, k)) return 'na';
     if (r.status !== 'ok') return 'warn';
+    const partial = (r.unverified_targets ?? []).length > 0;
     const own = k === 'trivy' ? imageRisks(r) : k === 'hadolint' ? dockerfileRisks(r) : secretRisks(r);
-    return own.some(x => x.level === 'danger') ? 'bad' : own.some(x => x.level === 'caution') ? 'warn' : 'ok';
+    return own.some(x => x.level === 'danger') ? 'bad' : own.some(x => x.level === 'caution') || partial ? 'warn' : 'ok';
   };
   const codeState: StepState = input.codeRunning ? 'running' : input.codeError ? 'warn' : !code ? 'idle' : code.score === null ? 'na' : codeRisks(code).some(r => r.level !== 'low') ? 'warn' : 'ok';
   const pol = input.policy;
@@ -182,8 +183,12 @@ export function securityModel(input: SecurityInput) {
   //: 검사 대상이 없어 건너뛴 검사 — 안전 판정에 숨기지 않고 한 줄로 알린다.
   const skipped = [scans.trivy && isNotApplicable(scans.trivy, 'trivy') ? '빌드된 이미지가 없어 이미지 검사는 건너뛰었어요' : '',
     scans.hadolint && isNotApplicable(scans.hadolint, 'hadolint') ? 'Dockerfile이 없어 Dockerfile 검사는 건너뛰었어요' : '',
-    code && code.score === null ? '코드 규칙을 적용할 파일이 없었어요' : ''].filter(Boolean);
-  return { verdict, title, reason, tally, risks, steps, gate, attack: rows, skipped };
+    code && code.score === null ? '코드 규칙을 적용할 파일이 없었어요' : '',
+    ...(['hadolint', 'trivy'] as const).map(k => { const miss = scans[k]?.unverified_targets ?? []; return miss.length ? `${k === 'trivy' ? '이미지를' : 'Dockerfile을'} 검사하지 못한 서비스가 있어요: ${miss.slice(0, 4).join(', ')}${miss.length > 4 ? ` 외 ${miss.length - 4}` : ''}` : ''; }),
+    ...(['hadolint', 'trivy'] as const).map(k => { const n = scans[k]?.status === 'ok' ? (scans[k]?.services ?? []).length : 0; return n > 1 ? `서비스 ${n}개의 ${k === 'trivy' ? '이미지를' : 'Dockerfile을'} 각각 검사했어요` : ''; })].filter(Boolean);
+  //: 검사 중 — 아직 결과가 없는 검사(이미지 검사는 서비스마다 몇 분 걸릴 수 있다).
+  const pending = basic.filter(st => st.state === 'running').map(st => st.label === '키 노출' ? '시크릿' : st.label);
+  return { verdict, title, reason, tally, risks, steps, gate, attack: rows, skipped, pending };
 }
 
 function sourceOf(k: Step['key']): RiskSource | '' {

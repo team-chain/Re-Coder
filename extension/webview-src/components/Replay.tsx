@@ -143,6 +143,12 @@ export function ReplayView({ state, source, search, onSource, onSearch, onRefres
     <p className="rc-hist-note">이 컴퓨터에 저장된 배포 기록입니다. 현재 실행 상태와 과금 여부는 별도로 확인하세요.</p>
   </section>;
 }
+/** 모든 항목이 통과한 기록인지 — "배포 검사 45/45 통과". 실패·경고 단어가 섞이면 경고로 둔다. */
+export function isPassNote(text: string): boolean {
+  const m = /(\d+)\s*\/\s*(\d+)\s*통과/.exec(text);
+  return !!m && m[1] === m[2] && !/실패|경고|확인 필요|건너/.test(text);
+}
+export function isIsoTime(text: string): boolean { return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(text) && !Number.isNaN(Date.parse(text)); }
 function HistoryDetail({ entry: selected, state, busy, onReview, onConfirm }: { entry: HistoryEntry; state: HistoryState; busy: boolean; onReview: (key: string) => void; onConfirm: (entry: HistoryEntry) => void }) {
   const link = serviceLink(selected.service_url);
   const result = state.result?.key === selected.key ? state.result : null;
@@ -150,10 +156,17 @@ function HistoryDetail({ entry: selected, state, busy, onReview, onConfirm }: { 
     <h4>{selected.target} · {selected.status_text}</h4><div className="id">배포 ID {selected.deployment_id} · {date(selected.started_at)}</div>
     {selected.error && <p className="err">{selected.error}</p>}{selected.remedy && <p>조치: {selected.remedy}</p>}
     {link && <a href={link} target="_blank" rel="noreferrer">기록된 서비스 URL 열기 ↗</a>}
-    {!!selected.warnings.length && <div className="warn" style={{ marginTop: 12 }}><b>기록 당시의 안내</b><ul style={{ paddingLeft: 20, margin: "4px 0" }}>{selected.warnings.map((warning, i) => <li key={i}>{warning}</li>)}</ul></div>}
+    {(() => {
+      //: "배포 검사 45/45 통과" 같은 통과 기록은 경고색으로 칠하지 않는다(실사용 2026-11-20).
+      const passed = selected.warnings.filter(isPassNote), warns = selected.warnings.filter(w => !isPassNote(w));
+      return <>
+        {!!passed.length && <ul className="rc-hist-ok" style={{ paddingLeft: 20, margin: "12px 0 4px", color: "var(--rc-ok,#3DD68C)" }}>{passed.map((w, i) => <li key={i}>{w}</li>)}</ul>}
+        {!!warns.length && <div className="warn" style={{ marginTop: 12 }}><b>기록 당시의 안내</b><ul style={{ paddingLeft: 20, margin: "4px 0" }}>{warns.map((warning, i) => <li key={i}>{warning}</li>)}</ul></div>}
+      </>;
+    })()}
     {!!selected.events.length && <ol className="rc-hist-tl">{selected.events.map((event, i) => <li key={i}><b>{event.title}</b><small>{date(event.at)}</small>{event.detail && <div>{event.detail}</div>}</li>)}</ol>}
     <div className="rc-hist-rb"><b>이전 버전으로 복귀</b>
-      {selected.rollback.target && <code>{selected.rollback.target}</code>}
+      {selected.rollback.target && (isIsoTime(selected.rollback.target) ? <p style={{ margin: "4px 0 0" }}>{date(selected.rollback.target)} 에 배포한 버전으로</p> : <code>{selected.rollback.target}</code>)}
       {!selected.rollback.available && <p style={{ color: "var(--rc-fg3,#67768A)", margin: "4px 0 0" }}>{selected.rollback.reason}</p>}
       {selected.rollback.available && state.review !== selected.key && <div className="rc-hist-acts"><button type="button" className="rc-btn" onClick={() => onReview(selected.key)} disabled={busy || state.loading}>{state.busyKey === selected.key ? "롤백 처리 중…" : "롤백 대상 확인"}</button></div>}
       {state.review === selected.key && <div role="group" aria-label="롤백 실행 확인" className="rc-hist-confirm"><b>{selected.source === "ecs" ? "ECS 롤백 승인 · Level 3" : selected.source === "stack" ? "다중 서비스 롤백 승인" : "로컬 롤백 승인"}</b><p><b>{selected.target}</b>를 위의 이전 버전으로 되돌립니다. 실행 중인 서비스에 영향을 줍니다.</p>{selected.source === "ecs" && <p>요청 후 ECS 서비스 안정화 상태를 확인해야 합니다.</p>}{selected.source === "stack" && <p>모든 서비스를 직전 성공 버전 이미지로 되돌립니다. DB 데이터(볼륨)는 그대로입니다.</p>}<div className="rc-hist-acts"><button type="button" className="rc-btn p" disabled={busy || state.loading} onClick={() => onConfirm(selected)}>승인하고 롤백</button><button type="button" className="rc-btn" disabled={busy} onClick={() => onReview("")}>취소</button></div></div>}

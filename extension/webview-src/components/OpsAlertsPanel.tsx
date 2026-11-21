@@ -12,17 +12,17 @@ export interface OpsAlertView {
   suggestions?: Array<{ action: string; value: unknown; label: string; detail: string }>;
 }
 
-const box: React.CSSProperties = { border: "1px solid var(--vscode-panel-border, #3f3f3f)", borderRadius: 8, padding: 12, marginBottom: 10 };
-const muted: React.CSSProperties = { color: "var(--vscode-descriptionForeground, #999)", fontSize: 11, lineHeight: 1.5 };
+const box: React.CSSProperties = { border: "1px solid var(--rc-line2, #3f3f3f)", borderRadius: 8, padding: 12, marginBottom: 10 };
+const muted: React.CSSProperties = { color: "var(--rc-fg2, #999)", fontSize: 12, lineHeight: 1.5 };
 const btn: React.CSSProperties = { padding: "6px 12px", borderRadius: 5, border: "1px solid var(--vscode-button-border, transparent)",
-  background: "var(--vscode-button-secondaryBackground, #3a3d41)", color: "var(--vscode-button-secondaryForeground, #fff)", cursor: "pointer", fontSize: 12 };
+  background: "var(--rc-tile2, #3a3d41)", color: "var(--rc-fg, #fff)", cursor: "pointer", fontSize: 12 };
 const primary: React.CSSProperties = { ...btn, background: "var(--vscode-button-background, #0e639c)", color: "var(--vscode-button-foreground, #fff)" };
 
 export function OpsAlertCard({ alert, onChoose }: { alert: OpsAlertView; onChoose: (s: NonNullable<OpsAlertView["suggestions"]>[number]) => void }) {
   const open = (alert.status ?? "open") === "open";
-  const tone = alert.severity === "critical" ? "var(--vscode-errorForeground, #f48771)" : "var(--vscode-editorWarning-foreground, #cca700)";
+  const tone = alert.severity === "critical" ? "var(--rc-bad, #f48771)" : "var(--rc-warn, #cca700)";
   return (
-    <div style={{ ...box, borderColor: open ? tone : "var(--vscode-panel-border, #3f3f3f)" }} data-testid="ops-alert">
+    <div style={{ ...box, borderColor: open ? tone : "var(--rc-line2, #3f3f3f)" }} data-testid="ops-alert">
       <div style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
         <b style={{ color: tone }}>{alert.title}</b>
         <span>{alert.service}</span>
@@ -31,7 +31,7 @@ export function OpsAlertCard({ alert, onChoose }: { alert: OpsAlertView; onChoos
       </div>
       <div style={{ marginTop: 4, fontSize: 12, whiteSpace: "pre-line" }}>{alert.detail}</div>
       {(alert.sources?.ips?.length || alert.sources?.paths?.length) ? (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 8, fontSize: 11 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 8, fontSize: 12 }}>
           <div><div style={muted}>상위 IP</div>{(alert.sources?.ips ?? []).map(r => <div key={r.value}><code>{r.value}</code> {r.count.toLocaleString()}회</div>)}</div>
           <div><div style={muted}>많이 맞은 경로</div>{(alert.sources?.paths ?? []).map(r => <div key={r.value}><code>{r.value}</code> {r.count.toLocaleString()}회</div>)}</div>
         </div>

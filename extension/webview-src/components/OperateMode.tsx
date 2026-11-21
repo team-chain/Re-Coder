@@ -130,11 +130,9 @@ export const OperateMode: React.FC<OperateModeProps> = ({ isActive }) => {
   // ── Styles ────────────────────────────────────────────────────────────────
 
   const sectionHeader: React.CSSProperties = {
-    fontSize: 10,
-    fontWeight: 700,
-    textTransform: "uppercase",
-    letterSpacing: "0.06em",
-    color: "var(--vscode-descriptionForeground, #888)",
+    fontSize: 13,
+    fontWeight: 600,
+    color: "var(--rc-fg2, #888)",
     marginBottom: 6,
     marginTop: 12,
   };
@@ -151,30 +149,30 @@ export const OperateMode: React.FC<OperateModeProps> = ({ isActive }) => {
   };
 
   const btnPrimary: React.CSSProperties = {
-    background: "var(--vscode-button-background, #0078d4)",
-    color: "var(--vscode-button-foreground, #fff)",
+    background: "var(--rc-grad, var(--vscode-button-background, #0078d4))",
+    color: "#04121A",
     border: "none",
-    borderRadius: 4,
-    padding: "5px 12px",
-    fontSize: 12,
+    borderRadius: 10,
+    padding: "7px 14px",
+    fontSize: 13,
     cursor: "pointer",
     fontWeight: 600,
   };
 
   const btnSecondary: React.CSSProperties = {
-    background: "var(--vscode-button-secondaryBackground, #3a3a3a)",
-    color: "var(--vscode-button-secondaryForeground, #ccc)",
-    border: "none",
-    borderRadius: 4,
-    padding: "5px 12px",
-    fontSize: 12,
+    background: "var(--rc-tile2, #3a3a3a)",
+    color: "var(--rc-fg, #ccc)",
+    border: "1px solid var(--rc-line2, #3f3f3f)",
+    borderRadius: 10,
+    padding: "7px 14px",
+    fontSize: 13,
     cursor: "pointer",
   };
 
   const riskColors: Record<string, string> = {
-    low: "var(--vscode-testing-iconPassed, #4caf50)",
-    medium: "var(--vscode-editorWarning-foreground, #ff9800)",
-    high: "var(--vscode-editorError-foreground, #f44336)",
+    low: "var(--rc-ok, #4caf50)",
+    medium: "var(--rc-warn, #ff9800)",
+    high: "var(--rc-bad, #f44336)",
     critical: "#b71c1c",
   };
 
@@ -191,17 +189,17 @@ export const OperateMode: React.FC<OperateModeProps> = ({ isActive }) => {
       <div>
       <OpsAlertsPanel />
       <AwsCleanupPanel />
-      <div className="rc-tile rc-op" style={{ color: "var(--vscode-descriptionForeground)", textAlign: "center", fontSize: 12, lineHeight: 1.7 }}>
+      <div className="rc-tile rc-op" style={{ color: "var(--rc-fg2)", textAlign: "center", fontSize: 12, lineHeight: 1.7 }}>
         Operate Mode는 다음이 필요합니다:<br />
         AI Ready · AWS Deploy Ready · Ops Ready<br />
-        <span style={{ color: "var(--vscode-textLink-foreground, #4af)" }}>진단 탭에서 확인하세요</span>
+        <span style={{ color: "var(--rc-teal, #4af)" }}>진단 탭에서 확인하세요</span>
       </div>
       </div>
     );
   }
 
   return (
-    <div style={{ fontFamily: "var(--vscode-font-family, sans-serif)", fontSize: 12, color: "var(--vscode-editor-foreground)" }}>
+    <div style={{ fontSize: 13, color: "var(--rc-fg)" }}>
       <OpsAlertsPanel />
       <AwsCleanupPanel />
 
@@ -236,7 +234,7 @@ export const OperateMode: React.FC<OperateModeProps> = ({ isActive }) => {
 
         {/* 에러 표시 */}
         {error && (
-          <div role="alert" style={{ marginTop: 10, background: "rgba(242,114,114,0.08)", border: "1px solid rgba(242,114,114,.35)", borderRadius: 10, padding: "8px 10px", color: "var(--vscode-editorError-foreground, #f44)" }}>
+          <div role="alert" style={{ marginTop: 10, background: "rgba(242,114,114,0.08)", border: "1px solid rgba(242,114,114,.35)", borderRadius: 10, padding: "8px 10px", color: "var(--rc-bad, #f44)" }}>
             {friendlyError(error)}
           </div>
         )}
@@ -257,9 +255,9 @@ export const OperateMode: React.FC<OperateModeProps> = ({ isActive }) => {
                 border: `1px solid ${
                   alert.severity === "critical" || alert.severity === "high"
                     ? riskColors[alert.severity]
-                    : "var(--vscode-panel-border, #333)"
+                    : "var(--rc-line2, #333)"
                 }`,
-                borderRadius: 4,
+                borderRadius: 10,
                 padding: "7px 10px",
                 marginBottom: 6,
                 cursor: "pointer",
@@ -267,17 +265,17 @@ export const OperateMode: React.FC<OperateModeProps> = ({ isActive }) => {
               onClick={() => handleAnalyzeAlert(alert)}
             >
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
-                <span style={{ fontWeight: 600, fontSize: 11 }}>
+                <span style={{ fontWeight: 600, fontSize: 12 }}>
                   {alert.alert_type.replace(/_/g, " ")}
                 </span>
                 <span style={{
                   background: riskColors[alert.severity],
-                  color: "#fff", borderRadius: 3, padding: "1px 6px", fontSize: 9, fontWeight: 700,
+                  color: "#fff", borderRadius: 8, padding: "1px 6px", fontSize: 9, fontWeight: 700,
                 }}>
                   {alert.severity.toUpperCase()}
                 </span>
               </div>
-              <div style={{ fontSize: 10, color: "var(--vscode-descriptionForeground)" }}>
+              <div style={{ fontSize: 12, color: "var(--rc-fg2)" }}>
                 {alert.container_name && <span>{alert.container_name} · </span>}
                 {alert.environment} · {new Date(alert.detected_at).toLocaleString("ko-KR")}
               </div>
@@ -287,15 +285,15 @@ export const OperateMode: React.FC<OperateModeProps> = ({ isActive }) => {
       )}
 
       {incidents.length === 0 && !isFetching && host && (
-        <div style={{ marginTop: 10, fontSize: 11, color: "var(--vscode-testing-iconPassed, #4caf50)" }}>
+        <div style={{ marginTop: 10, fontSize: 12, color: "var(--rc-ok, #4caf50)" }}>
           인시던트 없음
         </div>
       )}
 
       {/* 로딩 (분석 중) */}
       {isLoading && (
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12, color: "var(--vscode-descriptionForeground)" }}>
-          <div style={{ width: 14, height: 14, border: "2px solid var(--vscode-panel-border)", borderTopColor: "var(--vscode-button-background, #0078d4)", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12, color: "var(--rc-fg2)" }}>
+          <div style={{ width: 14, height: 14, border: "2px solid var(--rc-line2)", borderTopColor: "var(--vscode-button-background, #0078d4)", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
           <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
           <span>AI가 인시던트를 분석 중…</span>
         </div>
@@ -308,7 +306,7 @@ export const OperateMode: React.FC<OperateModeProps> = ({ isActive }) => {
           <div style={{
             background: "var(--vscode-sideBar-background)",
             border: `1px solid ${riskColors[proposal.risk_level]}`,
-            borderRadius: 4,
+            borderRadius: 10,
             padding: "10px 12px",
             marginBottom: 10,
           }}>
@@ -316,27 +314,27 @@ export const OperateMode: React.FC<OperateModeProps> = ({ isActive }) => {
               {actionLabel[proposal.action_type] ?? proposal.action_type}
             </div>
             {proposal.parameters.reasoning && (
-              <div style={{ fontSize: 11, color: "var(--vscode-descriptionForeground)", marginBottom: 8, lineHeight: 1.6 }}>
+              <div style={{ fontSize: 12, color: "var(--rc-fg2)", marginBottom: 8, lineHeight: 1.6 }}>
                 {proposal.parameters.reasoning}
               </div>
             )}
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
-              <span style={{ background: riskColors[proposal.risk_level], color: "#fff", borderRadius: 3, padding: "2px 7px", fontSize: 10, fontWeight: 700 }}>
+              <span style={{ background: riskColors[proposal.risk_level], color: "#fff", borderRadius: 8, padding: "2px 7px", fontSize: 12, fontWeight: 700 }}>
                 {proposal.risk_level.toUpperCase()}
               </span>
               {proposal.target_container && (
-                <span style={{ fontSize: 10, color: "var(--vscode-descriptionForeground)", fontFamily: "monospace" }}>
+                <span style={{ fontSize: 12, color: "var(--rc-fg2)", fontFamily: "monospace" }}>
                   대상: {proposal.target_container}
                 </span>
               )}
             </div>
             {proposal.risk_reasons.length > 0 && (
-              <ul style={{ margin: "6px 0 0", paddingLeft: 16, fontSize: 10, color: "var(--vscode-descriptionForeground)", lineHeight: 1.6 }}>
+              <ul style={{ margin: "6px 0 0", paddingLeft: 16, fontSize: 12, color: "var(--rc-fg2)", lineHeight: 1.6 }}>
                 {proposal.risk_reasons.map((r, i) => <li key={i}>{r}</li>)}
               </ul>
             )}
             {!proposal.parameters.rollback_feasible && (
-              <div style={{ marginTop: 8, fontSize: 10, color: "var(--vscode-editorWarning-foreground, #ff9800)" }}>
+              <div style={{ marginTop: 8, fontSize: 12, color: "var(--rc-warn, #ff9800)" }}>
                 <Icon name="alert" size={14} style={{ verticalAlign: "-2px", marginRight: 6 }} />롤백 불완전: {proposal.parameters.rollback_blocker}
               </div>
             )}
@@ -358,9 +356,9 @@ export const OperateMode: React.FC<OperateModeProps> = ({ isActive }) => {
         <div style={{
           marginTop: 10,
           background: result.status === "executed" ? "rgba(76,175,80,0.12)" : "rgba(244,67,54,0.1)",
-          border: `1px solid ${result.status === "executed" ? "var(--vscode-testing-iconPassed, #4caf50)" : "var(--vscode-editorError-foreground, #f44)"}`,
-          borderRadius: 4, padding: "8px 10px",
-          color: result.status === "executed" ? "var(--vscode-testing-iconPassed, #4caf50)" : "var(--vscode-editorError-foreground, #f44)",
+          border: `1px solid ${result.status === "executed" ? "var(--rc-ok, #4caf50)" : "var(--rc-bad, #f44)"}`,
+          borderRadius: 10, padding: "8px 10px",
+          color: result.status === "executed" ? "var(--rc-ok, #4caf50)" : "var(--rc-bad, #f44)",
           fontWeight: 600,
         }}>
           {result.status === "executed" ? "원격 명령 실행 완료" : `실행 실패: ${result.status}`}

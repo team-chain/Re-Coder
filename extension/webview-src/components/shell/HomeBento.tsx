@@ -30,6 +30,8 @@ export interface HomeData {
   monitor: MonitorCurrentView | null;
   changes: ChangesLite | null;
   now?: number;
+  /** 배포 기록을 읽지 못했다(Core 가 막 켜지는 중 등) — 「배포 없음」 으로 오해하게 그리지 않는다. */
+  historyError?: boolean;
 }
 type Go = (view: string) => void;
 
@@ -161,13 +163,16 @@ function Overview({ data, go, open }: { data: HomeData; go: Go; open: (url: stri
             <div className="poster"><small>{live.source === "ecs" ? "Live · ECS" : "Live · 로컬 Docker"}</small><b>{project}</b><span className="rc-mono">{hostOf(url) || live.target}</span></div>
             {previewable(url) && <iframe title={`${project} 미리보기`} src={url} sandbox="allow-scripts" tabIndex={-1} loading="lazy" referrerPolicy="no-referrer" />}
           </div></div>
+          : data.history === null ? <div className="rc-win ghost" data-testid="home-history-wait"><div className="view" style={{ inset: 0 }}><div className="poster" style={{ background: "transparent" }}>
+            <small>{project}</small><b>{data.historyError ? "배포 기록을 불러오지 못했어요" : "배포 기록을 불러오는 중…"}</b><span>{data.historyError ? "ReCoder Core 가 준비되는 중일 수 있어요. 잠시 뒤 다시 읽어요." : "실행 중인 앱이 있으면 여기에 보여요."}</span>
+          </div></div></div>
           : <div className="rc-win ghost"><div className="view" style={{ inset: 0 }}><div className="poster" style={{ background: "transparent" }}>
             <small>{project}</small><b>아직 배포한 버전이 없습니다</b><span>{last && FAIL.has(last.status) ? `마지막 시도: ${last.status_text} · ${timeAgo(last.started_at, data.now)}` : "로컬 Docker 나 AWS 로 배포하면 여기에 실행 중인 화면이 보입니다."}</span>
           </div></div></div>}
       </div>
       <div className="kv">
         <div><label>배포</label><div className="v">{url ? <span className="rc-mono">{hostOf(url)}</span> : <span className="dim">{live ? live.target : "없음"}</span>}</div></div>
-        <div><label>상태</label><div className="v">{live ? <><i className="rc-dot ok live" />실행 중{failedAfter && <span className="dim"> · 최근 배포 실패</span>}</> : last ? <><i className={`rc-dot ${statusOf(last)}`} />{last.status_text}</> : <><i className="rc-dot" />배포 전</>}</div></div>
+        <div><label>상태</label><div className="v">{data.history === null ? <span className="dim">{data.historyError ? "읽지 못함" : "확인 중"}</span> : live ? <><i className="rc-dot ok live" />실행 중{failedAfter && <span className="dim"> · 최근 배포 실패</span>}</> : last ? <><i className={`rc-dot ${statusOf(last)}`} />{last.status_text}</> : <><i className="rc-dot" />배포 전</>}</div></div>
         <div><label>배포한 시각</label><div className="v">{live ? timeAgo(live.started_at, data.now) || "시각 미기록" : <span className="dim">—</span>}</div></div>
         <div><label>대상</label><div className="v">{live ? <>{live.source === "ecs" ? <TechLogo kind="ecs" size={15} /> : <TechLogo kind="docker" size={15} />}{whereOf(live)}</> : <span className="dim">—</span>}</div></div>
         <div className="full"><label>소스</label><div className="v">{git?.branch ? <><Glyph name="branch" size={14} /><span className="rc-mono">{git.branch}{git.head ? ` · ${git.head.slice(0, 7)}` : ""}</span>{git.dirty && <span className="dim">· 커밋 전 변경 있음</span>}</> : <span className="dim">{git?.initialized === false ? "Git 저장소가 아닙니다" : "브랜치 정보 없음"}</span>}</div></div>
@@ -194,7 +199,7 @@ function Recent({ data, go }: { data: HomeData; go: Go }) {
   return <div>
     <h3>최근 배포<button className="rc-more" onClick={() => go("replay")}>모두 보기<Glyph name="chevron" size={12} /></button></h3>
     <div className="rc-recent">
-      {data.history === null && <div className="empty">불러오는 중…</div>}
+      {data.history === null && <div className="empty">{data.historyError ? "배포 기록을 불러오지 못했어요 · 잠시 뒤 다시 읽어요" : "불러오는 중…"}</div>}
       {data.history !== null && !entries.length && <div className="empty">배포하면 여기에 쌓여요.</div>}
       {entries.map((e, i) => <button key={e.key} onClick={() => go("replay")} style={{ animationDelay: `${0.1 + i * 0.05}s` }} aria-label={`${e.status_text} · ${e.target}`}>
         <i className={`rc-dot ${statusOf(e)}`} /><span>{e.status_text}</span><span className="t">{whereOf(e)} · {e.image || e.target}</span><span className="w">{timeAgo(e.started_at, data.now) || "시각 미기록"}</span>
@@ -219,7 +224,7 @@ function Side({ data, go }: { data: HomeData; go: Go }) {
   ].slice(0, 2) : [];
   const nodes: Array<{ kind: "github" | "docker" | "ecs" | "s3"; name: string; sub: string; tone: string; live?: boolean; dim?: boolean }> = [
     { kind: "github", name: "GitHub", sub: git?.repository ? (git.branch || "연결됨") : "연결 안 됨", tone: git?.repository ? (git.dirty ? "warn" : "") : "off", dim: !git?.repository },
-    { kind: "docker", name: "Docker", sub: local ? local.status_text : "실행 전", tone: local ? (isOk(local) ? "" : "bad") : "off", live: localLive },
+    { kind: "docker", name: "Docker", sub: data.history === null ? "확인 중" : local ? local.status_text : "실행 전", tone: local ? (isOk(local) ? "" : "bad") : "off", live: localLive },
     { kind: "ecs", name: "ECS", sub: !snap?.aws.ready ? "AWS 연결 필요" : topo ? `${topo.running ?? "?"}/${topo.desired ?? "?"} 실행 중` : ecs ? ecs.status_text : "배포 전", tone: topo ? ((topo.running ?? 0) >= (topo.desired ?? 1) ? "" : "warn") : ecs && FAIL.has(ecs.status) ? "bad" : "off", live: ecsLive, dim: !snap?.aws.ready },
     { kind: "s3", name: "S3", sub: snap?.s3 ? snap.s3.bucket : "연결 안 됨", tone: snap?.s3 ? "" : "off", dim: !snap?.s3 },
   ];
@@ -249,6 +254,8 @@ export const HomeBento: React.FC<{ active: boolean; go: Go }> = ({ active, go })
   const { postMessage, useMessage } = useVSCodeApi();
   const [data, setData] = useState<HomeData>({ snapshot: null, history: null, monitor: null, changes: null });
   const reqs = useRef({ snap: "", hist: "", mon: "" });
+  //: 읽기 실패(Core 시작 중 등)는 몇 초 뒤 다시 — 1분 뒤까지 「배포 없음」 으로 두지 않는다.
+  const retry = useRef<{ timer?: number; tries: number }>({ tries: 0 });
   const load = useCallback(() => {
     const t = Date.now();
     reqs.current = { snap: `home-snap-${t}`, hist: `home-hist-${t}`, mon: `home-mon-${t}` };
@@ -272,11 +279,21 @@ export const HomeBento: React.FC<{ active: boolean; go: Go }> = ({ active, go })
     }
     if (type === "replay.historyResult" && p.requestId === reqs.current.hist) {
       const h = p.history as { entries?: HistoryEntryLite[] } | undefined;
-      setData(d => ({ ...d, history: h?.entries ?? [] }));
+      retry.current.tries = 0;
+      setData(d => ({ ...d, history: h?.entries ?? [], historyError: false }));
     }
-    if (type === "replay.historyError" && p.requestId === reqs.current.hist) setData(d => ({ ...d, history: [] }));
+    if (type === "replay.historyError" && p.requestId === reqs.current.hist) {
+      setData(d => ({ ...d, history: d.historyError === undefined || d.history === null ? null : d.history, historyError: true }));
+      const r = retry.current;
+      if (r.tries < 8 && typeof window !== "undefined") {
+        window.clearTimeout(r.timer);
+        r.timer = window.setTimeout(() => load(), Math.min(30_000, 3_000 * 2 ** r.tries));
+        r.tries++;
+      }
+    }
     if (type === "home.changesResult") setData(d => ({ ...d, changes: p as unknown as ChangesLite }));
     if (type === "monitor.result" && p.requestId === reqs.current.mon) setData(d => ({ ...d, monitor: (p.current as MonitorCurrentView) ?? null }));
-  }, [postMessage]));
+  }, [postMessage, load]));
+  useEffect(() => () => { if (typeof window !== "undefined") window.clearTimeout(retry.current.timer); }, []);
   return <HomeView data={data} go={go} open={(url) => postMessage("webview.open.external", { url })} />;
 };

@@ -10,6 +10,7 @@ import { Button, Kit, Line } from "./ui/kit";
 import { Icon } from "./ui/icons";
 import { AreaChart } from "./shell/parts";
 import { Logo } from "./canvas/Logo";
+import { awsErrorText, awsNotes } from "./awsErrors";
 import {
   AlertView, MonitorCurrentView, MonitorData, Offer, TimelineItem, clock, hero, kindIcon, minutesAgo, pendingAlerts, revOf,
   sourceText, timeline,
@@ -220,7 +221,7 @@ function Watcher({ cur, plan, busy, now, onPlan, onInstall, onUninstall, onSetti
   //: 설치 → 설치됨처럼 카드가 바뀌면 열려 있던 확인 단계를 닫는다(설치 확인이 '지우기' 확인으로 이어지지 않게).
   useEffect(() => { setAsk(false); setOpen(false); }, [w.installed]);
   if (w.installed === null) {
-    return <div className="card watch"><Line icon="alert" tone="warn">상시 감시 상태를 확인하지 못했습니다 — {w.error || "AWS 연결을 확인하세요"}</Line></div>;
+    return <div className="card watch"><Line icon="alert" tone="warn">상시 감시 상태를 확인하지 못했어요 · {w.error ? awsErrorText(w.error) : "AWS 연결을 확인하세요"}</Line></div>;
   }
   if (!w.installed) {
     return (
@@ -328,7 +329,8 @@ export function MonitorView(props: MonitorViewProps) {
               <div style={{ minWidth: 0 }}><b><span className="dot" />{h.title}</b><p>{h.sub}</p></div>
               {cur.series && cur.series.requests.length > 1 ? <div className="chart"><AreaChart values={cur.series.requests} errors={cur.series.errors} height={120} /></div> : <div style={{ height: 18 }} />}
             </div>
-            {cur.gaps.map((g) => <Line key={g} icon="alert" tone="warn">{g}</Line>)}
+            {/* 감시 상태 오류는 오른쪽 감시 카드가 이미 말한다 — 같은 문장을 두 번 띄우지 않는다. */}
+            {awsNotes(cur.gaps, (g) => cur.watcher.installed === null && g.startsWith("상시 감시 상태를")).map((g) => <Line key={g} icon="alert" tone="warn">{g}</Line>)}
             <div className="label"><span>지금</span><span>최근 24시간</span></div>
             <Stats cur={cur} />
             <Records items={items} now={new Date(now)} />

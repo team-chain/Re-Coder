@@ -20,6 +20,9 @@ export interface GateScanResult {
   high_count?: number;
   medium_count?: number;
   findings?: unknown;
+  /** 여러 서비스 프로젝트에서 검사하지 못한 서비스(통과로 세지 않는다). */
+  unverified_targets?: string[];
+  services?: string[];
 }
 export type GateState = 'idle' | 'running' | 'clean' | 'issues' | 'unverified';
 export interface GateVerdict { state: GateState; label: string; issues: number; advisories: number; notApplicable: GateKind[]; unverified: GateKind[] }

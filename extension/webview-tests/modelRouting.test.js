@@ -230,3 +230,10 @@ test('provider cards show current, connected, missing key and switching; all con
  assert.equal((locked.match(/data-provider="[^"]+" disabled=""/g)||[]).length,2);
  assert.match(locked,/<select[^>]+disabled=""/);
 });
+
+test('공식 단가는 확인한 모델만, 사용자 단가가 우선',()=>{
+ assert.equal(model.modelPrice({},'claude-opus-5-5'),'$4 / $20 공식');
+ assert.equal(model.modelPrice({},'claude-sonnet-5-5-20261001'),'$2 / $10 공식');
+ assert.equal(model.modelPrice({'claude-opus-5-5':{input:1,output:2}},'claude-opus-5-5'),'$1 / $2');
+ assert.equal(model.modelPrice({},'claude-haiku-5-5'),'단가 미설정','확인하지 않은 단가는 지어내지 않는다');
+});

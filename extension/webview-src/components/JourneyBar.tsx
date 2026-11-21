@@ -85,8 +85,8 @@ export const JourneyBar: React.FC<{ view: string; onGo: (view: string) => void }
   return (
     <nav className="rc-journey" aria-label="진행 흐름" data-testid="journey-bar">
       <style>{`
-        .rc-journey{display:flex;align-items:center;gap:10px;margin:0 22px 10px;padding:8px 10px;border:1px solid var(--rc-line2,#2a2f36);border-radius:14px;background:var(--rc-solid,#0f1318);overflow-x:auto}
-        .rc-journey ol{display:flex;align-items:center;gap:4px;margin:0;padding:0;list-style:none;flex:1;min-width:0}
+        .rc-journey{display:flex;align-items:center;gap:10px;margin:0 22px 10px;padding:8px 10px;border:1px solid var(--rc-line2,#2a2f36);border-radius:14px;background:var(--rc-solid,#0f1318);overflow-x:auto;scrollbar-width:none}
+        .rc-journey ol{display:flex;align-items:center;gap:4px;margin:0;padding:0;list-style:none;flex:none}
         .rc-journey li{display:flex;align-items:center;gap:4px;flex:none}
         .rc-journey li+li::before{content:"";width:14px;height:1px;background:var(--rc-line2,#2a2f36)}
         .rc-journey-step{display:flex;align-items:center;gap:6px;padding:5px 9px;border-radius:999px;border:1px solid transparent;background:none;color:var(--rc-fg2,#9aa0a6);font-size:12px;cursor:pointer;white-space:nowrap}
@@ -96,7 +96,8 @@ export const JourneyBar: React.FC<{ view: string; onGo: (view: string) => void }
         .rc-journey-dot{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;font-size:10px;border:1px solid currentColor}
         .rc-journey-step[data-status=done] .rc-journey-dot{background:var(--rc-ok,#3fb950);border-color:var(--rc-ok,#3fb950);color:#05150a}
         .rc-journey-step[data-status=failed] .rc-journey-dot,.rc-journey-step[data-status=stale] .rc-journey-dot{border-color:var(--rc-warn,#d7a300);color:var(--rc-warn,#d7a300)}
-        .rc-journey-next{flex:none;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--rc-fg2,#9aa0a6)}
+        .rc-journey-next{flex:1 1 0;min-width:0;display:flex;align-items:center;justify-content:flex-end;gap:8px;font-size:12px;color:var(--rc-fg2,#9aa0a6)}
+        .rc-journey-next span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
         .rc-journey-next button{padding:6px 12px;border-radius:999px;border:none;background:var(--rc-teal,#3fb9c7);color:#03191c;font-weight:600;font-size:12px;cursor:pointer;white-space:nowrap}
       `}</style>
       <ol>
@@ -117,7 +118,7 @@ export const JourneyBar: React.FC<{ view: string; onGo: (view: string) => void }
         })}
       </ol>
       <div className="rc-journey-next" data-testid="journey-next">
-        <span>{nextHint(state)}</span>
+        <span title={nextHint(state)}>{nextHint(state)}</span>
         {nextKey && STEP_VIEW[nextKey] && STEP_VIEW[nextKey] !== view &&
           <button type="button" onClick={() => { if (nextKey === "redteam") requestFocus("redteam"); onGo(STEP_VIEW[nextKey]); }}>다음: {state.steps.find(s => s.key === nextKey)?.title} →</button>}
       </div>

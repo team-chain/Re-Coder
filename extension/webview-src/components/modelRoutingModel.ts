@@ -108,17 +108,28 @@ export function compareChoices(routing: ModelRouting): RoutingChoice[] {
   return out;
 }
 
-/** 단가는 사용자가 설정한 입력·출력 가격만 표시한다. */
+/**
+ * 공식 목록 단가(달러/백만 토큰, 입력/출력) — Anthropic 가격 페이지 platform.claude.com/docs/en/about-claude/pricing 에서
+ * 2026-11-21 에 확인한 값만. 확인하지 않은 모델은 넣지 않는다(틀린 값을 정확한 것처럼 보이지 않게).
+ * core/llm/pricing.py 의 _LIST_PRICES 와 같아야 한다.
+ */
+export const LIST_PRICES: Record<string, { input: number; output: number }> = {
+  "claude-opus-5-5": { input: 4, output: 20 },
+  "claude-sonnet-5-5": { input: 2, output: 10 },
+};
+function listPrice(model: string) { return LIST_PRICES[model] ?? LIST_PRICES[model.replace(/-\d{8}$/, "")]; }
+/** 사용자가 정한 단가가 먼저, 없으면 확인한 공식 단가. 둘 다 없으면 "단가 미설정". */
 export function modelPrice(prices: ModelsState["settings"]["prices"], model: string): string {
   const rate = prices?.[model];
-  if (!rate || !Number.isFinite(rate.input) || !Number.isFinite(rate.output) || rate.input < 0 || rate.output < 0) return "단가 미설정";
-  return `$${rate.input} / $${rate.output}`;
+  if (rate && Number.isFinite(rate.input) && Number.isFinite(rate.output) && rate.input >= 0 && rate.output >= 0) return `$${rate.input} / $${rate.output}`;
+  const list = listPrice(model);
+  return list ? `$${list.input} / $${list.output} 공식` : "단가 미설정";
 }
 export function modelWarning(state: ModelsState): string {
   const quality = state.settings.qualityModel || state.routing.choices.find(c => c.spec === "quality")?.model || state.routing.quality.model;
   const fast = state.settings.fastModel || state.routing.choices.find(c => c.spec === "fast")?.model || quality;
   if (quality && quality === fast) return "두 작업에 같은 모델을 씁니다. 간단한 작업에서 아끼는 비용이 없습니다.";
-  const q = state.settings.prices?.[quality], f = state.settings.prices?.[fast];
+  const q = state.settings.prices?.[quality] ?? listPrice(quality), f = state.settings.prices?.[fast] ?? listPrice(fast);
   if (q && f && [q.input, q.output, f.input, f.output].every(n => Number.isFinite(n) && n >= 0)
       && (f.input > q.input || f.output > q.output)) return "간단한 작업 모델이 더 비쌉니다. 두 모델을 바꿔 보세요.";
   return "";
