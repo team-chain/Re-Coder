@@ -167,6 +167,9 @@ def test_agent_deploys_every_service_in_order(tmp_path, monkeypatch):
     monkeypatch.setattr(ecs_build, "build_and_push", lambda ecr, **k: calls.append(("build", Path(k["workspace_path"]).name))
                         or type("R", (), {"image_uri": k["repository_uri"] + ":" + k["tag"], "digest": "sha"})())
     monkeypatch.setattr(ecs_stack, "wait_stable", lambda ecs, cluster, names, **k: {n: "stable" for n in names})
+    import ops_alerts
+    monitors = []
+    monkeypatch.setattr(ops_alerts, "register", lambda **kw: monitors.append(kw) or kw)
 
     req = ECSDeployRequest(project_id="p", cluster="recoder-cluster", service="recoder-app", region="us-east-1", workspace_path=str(ws))
     rec = ECSDeployRecord()
@@ -181,3 +184,35 @@ def test_agent_deploys_every_service_in_order(tmp_path, monkeypatch):
     assert web[3] == ["sg-internal", "sg-public"] and all(c[3] == ["sg-internal"] for c in svcs if c is not web)
     assert ("ingress", [{"GroupId": "sg-internal"}]) in calls
     assert "월 약 $" in out.provisioned["stack_cost"] and "web" in out.provisioned["stack_entry"]
+    # Operate(모니터)에 서비스마다 올라가고, 입구(web)가 마지막 — 화면이 기본으로 입구를 보여 준다.
+    assert len(monitors) == len([c for c in calls if c[0] == "svc"])
+    assert monitors[-1]["service"].endswith("-web") and all(m["metrics"] is False for m in monitors)
+    assert "Operate" in out.provisioned["alerts"]
+
+
+def test_internal_group_is_made_even_without_tag_permission():
+    """옛 권한표(ec2:CreateTags 없음)라도 서비스 사이 보안 그룹을 만들고, 다음 배포에서 다시 쓴다."""
+    class Denied(Exception):
+        response = {"Error": {"Code": "UnauthorizedOperation"}}
+
+    made = []
+
+    class EC2:
+        groups: list = []
+        def describe_security_groups(self, Filters): return {"SecurityGroups": self.groups}
+        def create_security_group(self, **kw):
+            if "TagSpecifications" in kw:
+                raise Denied("no CreateTags")
+            made.append(kw); return {"GroupId": "sg-1"}
+        def create_tags(self, **kw): raise Denied("no CreateTags")
+        def authorize_security_group_ingress(self, **kw): pass
+
+    ec2 = EC2()
+    assert ecs_stack.ensure_internal_group(ec2, vpc_id="v", name="p-internal", tags={"recoder:managed": "true"}) == "sg-1"
+    assert made and made[0]["Description"] == ecs_stack.INTERNAL_GROUP_DESCRIPTION
+    ec2.groups = [{"GroupId": "sg-1", "Description": ecs_stack.INTERNAL_GROUP_DESCRIPTION, "Tags": []}]
+    assert ecs_stack.ensure_internal_group(ec2, vpc_id="v", name="p-internal", tags={}) == "sg-1"
+    ec2.groups = [{"GroupId": "sg-9", "Description": "someone else", "Tags": []}]
+    import pytest
+    with pytest.raises(RuntimeError):
+        ecs_stack.ensure_internal_group(ec2, vpc_id="v", name="p-internal", tags={})

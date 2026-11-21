@@ -290,6 +290,9 @@ def ensure_namespace(ecs: Any, cluster: str, namespace: str) -> None:
     ecs.update_cluster(cluster=cluster, serviceConnectDefaults={"namespace": namespace})
 
 
+INTERNAL_GROUP_DESCRIPTION = "ReCoder stack internal traffic"
+
+
 def ensure_internal_group(ec2: Any, *, vpc_id: str, name: str, tags: dict) -> str:
     """같은 그룹끼리만 오가는 보안 그룹(서비스 사이 통신). 밖에서는 들어오지 못한다."""
     found = ec2.describe_security_groups(Filters=[{"Name": "group-name", "Values": [name]},
@@ -297,12 +300,24 @@ def ensure_internal_group(ec2: Any, *, vpc_id: str, name: str, tags: dict) -> st
     if found:
         gid = found[0]["GroupId"]
         managed = any(t.get("Key") == "recoder:managed" and t.get("Value") == "true" for t in found[0].get("Tags") or [])
-        if not managed:
+        #: 태그 권한이 없던 때 만든 그룹은 태그가 없다 — ReCoder 가 쓰는 설명이면 우리 것으로 본다.
+        if not managed and found[0].get("Description") != INTERNAL_GROUP_DESCRIPTION:
             raise RuntimeError(f"같은 이름의 보안 그룹 {name} 이 이미 있는데 ReCoder 가 만든 것이 아닙니다.")
     else:
-        gid = ec2.create_security_group(GroupName=name, Description="ReCoder stack internal traffic", VpcId=vpc_id,
-                                        TagSpecifications=[{"ResourceType": "security-group",
-                                                            "Tags": [{"Key": k, "Value": v} for k, v in tags.items()]}])["GroupId"]
+        tag_list = [{"Key": k, "Value": v} for k, v in tags.items()]
+        try:
+            gid = ec2.create_security_group(GroupName=name, Description=INTERNAL_GROUP_DESCRIPTION, VpcId=vpc_id,
+                                            TagSpecifications=[{"ResourceType": "security-group", "Tags": tag_list}])["GroupId"]
+        except Exception as exc:  # noqa: BLE001
+            #: 옛 권한표(ec2:CreateTags 없음)면 태그 없이 만들고, 태그는 나중에 붙여 본다 — 배포를 멈추지 않는다.
+            code = str(getattr(exc, "response", {}).get("Error", {}).get("Code", ""))
+            if code not in ("UnauthorizedOperation", "AccessDenied", "AccessDeniedException"):
+                raise
+            gid = ec2.create_security_group(GroupName=name, Description=INTERNAL_GROUP_DESCRIPTION, VpcId=vpc_id)["GroupId"]
+            try:
+                ec2.create_tags(Resources=[gid], Tags=tag_list)
+            except Exception:  # noqa: BLE001
+                pass
     try:
         ec2.authorize_security_group_ingress(GroupId=gid, IpPermissions=[{
             "IpProtocol": "tcp", "FromPort": 0, "ToPort": 65535, "UserIdGroupPairs": [{"GroupId": gid}]}])

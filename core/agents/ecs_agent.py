@@ -22,7 +22,7 @@ import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from core.agents.preflight_agent import PreflightAgent
 from core.agents import ecs_build
@@ -848,7 +848,35 @@ class ECSAgent:
         rec.completed_at = datetime.now(timezone.utc)
         req.service = rec.service or req.service
         self._record_success(req, rec)
+        self._register_stack_monitors(req, rec, plan, log_group)
         return rec
+
+    @staticmethod
+    def _register_stack_monitors(req: ECSDeployRequest, rec: ECSDeployRecord, plan: Any, log_group: str) -> None:
+        """여러 서비스 배포도 Operate(모니터) 목록에 올린다 — 서비스마다 하나, 입구 서비스를 마지막에(기본으로 보이게).
+
+        방패(접속 기록 지표)는 아직 없어 태스크 부족(장애)만 본다(metrics=False).
+        """
+        if not req.alerts:
+            rec.provisioned["alerts"] = "꺼짐 — 배포 설정에서 감지 알림을 껐습니다."
+            return
+        try:
+            import ops_alerts  # type: ignore
+        except ImportError:  # pragma: no cover
+            from core import ops_alerts  # type: ignore
+        entry = plan.entry.name if plan.entry is not None else ""
+        ordered = sorted(plan.services, key=lambda s: s.name == entry)
+        done = 0
+        for svc in ordered:
+            try:
+                ops_alerts.register(region=req.region, cluster=req.cluster,
+                                    service=ecs_stack.service_name(plan.project, svc.name),
+                                    log_group=log_group, health_path=req.health_check_path, metrics=False)
+                done += 1
+            except Exception as exc:  # noqa: BLE001 - 감시 등록 실패가 배포 성공을 바꾸지 않는다
+                logger.info("모니터 등록 생략(%s): %s", svc.name, exc)
+        rec.provisioned["alerts"] = (f"부분 — 서비스 {done}개를 Operate 에 올렸습니다. "
+                                     "여러 서비스 배포는 아직 요청 지표가 없어 태스크 부족(장애)만 봅니다.")
 
     # ------------------------------------------------------------------
     # 단계별 구현
