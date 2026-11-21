@@ -11,8 +11,10 @@ export interface Config { target: "ecs" | "s3" | "github"; image_name: string; t
   shield?: boolean; shield_level?: "loose" | "normal" | "strict"; alerts?: boolean; alert_email?: string;
   edge?: "none" | "alb" | "alb_waf"; waf_rate_limit?: number; waf_window?: number; edge_cost_approved?: boolean;
   https?: boolean; custom_domain?: string; database?: "task" | "rds"; db_cost_approved?: boolean }
+/** 4.0.1 — 여러 서비스 프로젝트의 AWS 배포(서비스마다 ECS 서비스). Core 가 compose 에서 읽은 그대로. */
+export interface StackSummary { services: Array<{ name: string; port: number | null; built: boolean; public: boolean }>; layers: string[][]; entry: string; monthly_usd: number; notes: string[]; errors: string[] }
 export interface Issue { code: string; message: string; fix: string; remediation_available: boolean; proposal_id: string | null }
-export interface Plan { id: string; config: Config; projectName: string; repository: string; branch: string; commit: string; dirty: boolean; account: string; coreRegion: string; preflight: { blocked?: boolean; summary?: string; reasons?: Issue[]; warnings?: Issue[] }; staticSite?: {files:string[];excluded:string;notes?:string[]}; targetState?: { exists: boolean|null; task_definition:string; images:Array<{image:string;digest:string}>; budget:Array<{name:string;limit:string;spent:string;unit:string;period:string}>|null; warnings:string[] };
+export interface Plan { id: string; config: Config; projectName: string; repository: string; branch: string; commit: string; dirty: boolean; account: string; coreRegion: string; preflight: { blocked?: boolean; summary?: string; reasons?: Issue[]; warnings?: Issue[]; stack?: StackSummary }; staticSite?: {files:string[];excluded:string;notes?:string[]}; targetState?: { exists: boolean|null; task_definition:string; images:Array<{image:string;digest:string}>; budget:Array<{name:string;limit:string;spent:string;unit:string;period:string}>|null; warnings:string[] };
   /** 2.0.35 배포 전 신뢰 점검(제로 트러스트) — 코어가 못 하면 없다. */
   trust?: TrustReport | null }
 /** 승인 카드에 보이는 자동 수정 — [모두 적용] 이 한 번에 보낸다. */
@@ -44,6 +46,7 @@ export function ApprovalCard({ plan, onApprove, onCancel, onFix, onFixAll }: { p
   const where=c.target==='ecs' ? `${c.ecs_cluster} › ${c.ecs_service}` : c.target==='github' ? plan.repository : 'S3 정적 호스팅';
   const address=c.cloudfront_domain ? `https://${c.cloudfront_domain}` : c.https ? (c.custom_domain ? `https://${c.custom_domain} (발급 전에는 CloudFront 주소)` : "CloudFront 주소 (HTTPS)") : edgeOn ? "로드밸런서 주소 (HTTP)" : "태스크 IP (HTTP)";
   const blockers=plan.preflight.reasons||[], warnings=plan.preflight.warnings||[];
+  const stack=c.target==='ecs' ? plan.preflight.stack : undefined;
   const approveDisabled=plan.preflight.blocked || Boolean(warning&&!ack);
   return <div className="rc-modal-shade"><Kit className="rc-modal rc-approval" ref={ref} role="dialog" aria-modal="true" aria-labelledby="rc-approval-title">
     <button type="button" className="rc-drawer-x" onClick={onCancel} aria-label="승인 취소"><Icon name="close" size={16} /></button>
@@ -59,7 +62,13 @@ export function ApprovalCard({ plan, onApprove, onCancel, onFix, onFixAll }: { p
           <KvRow label="계정" value={plan.account || '계정 조회 안 됨'} />
           <KvRow label="지역" value={<>{regionName(c.aws_region) || c.aws_region}{regionName(c.aws_region) && <small>{c.aws_region}</small>}</>} />
         </>}
-        {c.target==='ecs' && <>
+        {c.target==='ecs' && stack && <>
+          <KvRow label="서비스" value={<span data-testid="approval-stack">{stack.services.length}개 — {stack.services.map(s=>s.name).join(", ")}</span>} />
+          <KvRow label="띄우는 순서" value={stack.layers.map(l=>l.join("·")).join(" → ")} />
+          <KvRow label="입구" value={`${stack.entry} (밖에서 들어오는 곳은 여기 하나) · 태스크 IP (HTTP)`} />
+          <KvRow label="사양" value={`서비스마다 Fargate 0.25 vCPU · 0.5 GB · 태스크 1개`} />
+        </>}
+        {c.target==='ecs' && !stack && <>
           <KvRow label="이미지" value={<code>{c.image_name.trim().toLowerCase()}:{c.tag}</code>} />
           <KvRow label="사양" value={`Fargate ${Number(c.cpu)/1024} vCPU · ${Number(c.memory)/1024} GB · 포트 ${c.container_port}`} />
           <KvRow label="주소" value={address} />
@@ -70,7 +79,13 @@ export function ApprovalCard({ plan, onApprove, onCancel, onFix, onFixAll }: { p
         </>}
       </Box>
     </Section>
-    {c.target==='ecs' && <Section title="보호 · 유료">
+    {stack && <Section title="여러 서비스 배포">
+      <Box><div className="rc-ap-list">
+        <Line icon="check" tone="ok">{(()=>{const peer=stack.services.find(s=>s.built&&!s.public&&s.port)||stack.services.find(s=>!s.public&&s.port);return `서비스끼리는 docker-compose 와 같은 이름(예: ${peer?`http://${peer.name}:${peer.port}`:"서비스 이름:포트"})으로 연결됩니다 — 코드 수정 없음`;})()}</Line>
+        {stack.notes.map((n,i)=><Line key={i} icon="alert" tone="warn">{n}</Line>)}
+      </div></Box>
+    </Section>}
+    {c.target==='ecs' && !stack && <Section title="보호 · 유료">
       <Box>
         <div className="rc-ap-list">
           <Line icon={c.shield===false ? "close" : "shield"} tone={c.shield===false ? undefined : "ok"}><span data-testid="approval-shield">{c.shield===false ? "기본 방패 끔" : `기본 방패 켬 — 강도 ${level} (앱이 PORT 를 읽을 때만)`}</span></Line>
@@ -108,7 +123,7 @@ export function ApprovalCard({ plan, onApprove, onCancel, onFix, onFixAll }: { p
     {!plan.preflight.blocked && blockers.map((issue,i)=><div className="rc-ap-issue" key={`r-${issue.code}-${i}`}><b>{issue.message}</b><p>{issue.fix}</p>{issue.remediation_available&&issue.proposal_id&&<Button small variant="ghost" onClick={()=>onFix(issue.proposal_id!)}>제안된 수정 적용</Button>}</div>)}
     {warning&&<div className="rc-ap-region"><Line icon="globe" tone="warn">현재 연결 리전({plan.coreRegion})과 배포 리전({c.aws_region})이 다릅니다. 선택한 배포 리전을 확인하고 아래 항목을 체크하세요.</Line><Checkbox tone="warn" checked={ack} onChange={setAck} label="이 리전으로 배포하는 것을 확인했습니다."/></div>}
     <div className="rk-foot">
-      {c.target!=='github' && <div className="rk-cost"><span>예상 추가 요금</span><b data-testid="approval-extra">{c.target==='s3' ? '거의 없음 · 저장·전송량만큼' : extra ? `월 약 $${extra}+ · Fargate 실행비 별도` : '없음 · Fargate 실행비만'}</b></div>}
+      {c.target!=='github' && <div className="rk-cost"><span>예상 추가 요금</span><b data-testid="approval-extra">{c.target==='s3' ? '거의 없음 · 저장·전송량만큼' : stack ? `월 약 $${stack.monthly_usd} · 서비스 ${stack.services.length}개 실행비(어림)` : extra ? `월 약 $${extra}+ · Fargate 실행비 별도` : '없음 · Fargate 실행비만'}</b></div>}
       <div className="rc-ap-actions">
         <button type="button" className="rk-btn ghost" onClick={onCancel}>취소</button>
         <button type="button" className="rk-btn" data-testid="approval-approve" disabled={approveDisabled} onClick={onApprove}>{c.target==='github' ? '승인하고 푸시' : '승인하고 배포'}</button>

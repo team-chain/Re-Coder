@@ -2297,6 +2297,19 @@ def _build_deployment_decision_adr(workspace_path: str, target: str, evidence: l
     return ops[0]
 
 
+def _stack_summary(workspace_path: str) -> dict:
+    """승인 화면용 — 서비스 목록·띄우는 순서·입구·월 비용(어림)·한계. 비밀값은 넣지 않는다."""
+    import compose_deploy
+    import ecs_stack
+    arch = compose_deploy.load(workspace_path) or {}
+    env_path = compose_deploy.env_file(workspace_path, arch)[0] if arch else Path(workspace_path) / ".env"
+    plan = ecs_stack.plan(workspace_path, compose_deploy._read_env(Path(env_path)))
+    entry = plan.entry
+    return {"services": [{"name": s.name, "port": s.port, "built": s.built, "public": s.public} for s in plan.services],
+            "layers": plan.layers, "entry": entry.name if entry else "", "monthly_usd": plan.monthly_estimate(),
+            "notes": plan.notes, "errors": plan.errors}
+
+
 @router.post("/api/deploy/preflight")
 async def deploy_preflight(request: DeployPreflightRequest) -> dict:
     """배포 버튼 직후 앱 감지와 차단 검사 결과를 함께 반환한다.
@@ -2312,8 +2325,19 @@ async def deploy_preflight(request: DeployPreflightRequest) -> dict:
             'static' if request.target == 's3' else detected["app_kind"],
             request.target,
         )
-        if request.target in ('ecs', 's3'):
-            #: 3.1 다중 서비스 프로젝트는 아직 AWS 대상이 아니다 — 배포 버튼 직후에 이유를 보여 준다(자원 생성 전).
+        if request.target == 'ecs':
+            #: 4.0.1 — 다중 서비스는 ECS 에 서비스마다 올린다(ecs_stack). 무엇이 생기고 얼마인지 승인 화면에 보여 준다.
+            import ecs_stack as _ecs_stack
+            if await asyncio.to_thread(_ecs_stack.is_stack, request.workspace_path):
+                stack = await asyncio.to_thread(_stack_summary, request.workspace_path)
+                for message in stack["errors"]:
+                    safety["blocked"] = True
+                    safety["reasons"].append({"code": "STACK_NOT_READY", "severity": "high", "message": message,
+                                              "fix": "로컬 Docker 로 서비스를 함께 띄워 확인한 뒤 다시 시도하세요.",
+                                              "remediation_available": False, "proposal_id": None})
+                return {**detected, "stack": stack, **safety}
+        if request.target == 's3':
+            #: 정적 사이트(S3)는 서비스 하나만 올린다 — 다중 서비스 프로젝트는 배포 버튼 직후에 이유를 보여 준다(자원 생성 전).
             import compose_deploy as _compose_deploy
             _aws_block = await asyncio.to_thread(_compose_deploy.aws_block, request.workspace_path)
             if _aws_block:

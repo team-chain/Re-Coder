@@ -1072,6 +1072,38 @@ def _ecs_statements(
                 _arn("ec2", "vpc/*", ctx),
             ],
         },
+        # ── 4.0.1 여러 서비스 배포(ecs_stack) — 서비스·리포지토리 이름이 `recoder-<프로젝트>-<서비스>` 라 접두어로 좁힌다 ──
+        {
+            "Sid": "StackServices",
+            "Effect": "Allow",
+            "Action": ["ecs:CreateService", "ecs:UpdateService", "ecs:DescribeServices", "ecs:TagResource"],
+            "Resource": _arn("ecs", f"service/{cluster}/recoder-*", ctx),
+        },
+        {
+            # 클러스터의 기본 Service Connect 이름공간을 정한다(서비스끼리 compose 와 같은 이름으로 찾기).
+            "Sid": "StackClusterNamespace",
+            "Effect": "Allow",
+            "Action": ["ecs:UpdateCluster"],
+            "Resource": _arn("ecs", f"cluster/{cluster}", ctx),
+        },
+        {
+            "Sid": "StackImages",
+            "Effect": "Allow",
+            "Action": ["ecr:CreateRepository", "ecr:DescribeRepositories", "ecr:PutLifecyclePolicy", "ecr:TagResource",
+                       "ecr:BatchCheckLayerAvailability", "ecr:InitiateLayerUpload", "ecr:UploadLayerPart",
+                       "ecr:CompleteLayerUpload", "ecr:PutImage", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
+            "Resource": _arn("ecr", "repository/recoder-*", ctx),
+        },
+        {
+            # Service Connect 가 쓰는 Cloud Map(HTTP 이름공간·서비스). 이 API 들은 리소스 단위 제한을 거의 지원하지 않는다.
+            "Sid": "StackServiceConnect",
+            "Effect": "Allow",
+            "Action": ["servicediscovery:CreateHttpNamespace", "servicediscovery:GetNamespace", "servicediscovery:GetOperation",
+                       "servicediscovery:ListNamespaces", "servicediscovery:CreateService", "servicediscovery:GetService",
+                       "servicediscovery:TagResource"],
+            "Resource": "*",
+            "Condition": {"StringEquals": {"aws:RequestedRegion": ctx.region}},
+        },
     ]
 
 

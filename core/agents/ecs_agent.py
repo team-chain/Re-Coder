@@ -36,6 +36,7 @@ from core import shield as shield_mod
 from core import aws_edge
 from core import aws_cdn, aws_rds
 from core import ecs_stable
+from core import ecs_stack
 from core.aws_infra import InfraError
 from core.schemas import (
     ECSDeployRecord,
@@ -346,6 +347,9 @@ class ECSAgent:
             initialize_progress(record, request)
             self._advance_progress(record, "preflight")
             aws_policy.validate_region(request.region)
+            #: 4.0.1 — 서비스가 여럿인 compose 프로젝트는 서비스마다 ECS 서비스로 올린다(예전에는 막았다).
+            if request.workspace_path and ecs_stack.is_stack(request.workspace_path):
+                return await self._deploy_stack(request, record)
             production = request.environment.strip().lower() == "production"
             if production and not request.run_security_scan:
                 raise InfraError("운영 배포는 보안 검사를 생략할 수 없습니다.",
@@ -695,6 +699,156 @@ class ECSAgent:
             self._cdn.pop(id(request), None)
             self._db.pop(id(request), None)
             self._managed.pop(id(request), None)
+
+    async def _deploy_stack(self, req: ECSDeployRequest, rec: ECSDeployRecord) -> ECSDeployRecord:
+        """compose 의 서비스마다 ECS 서비스 — Service Connect 로 compose 와 같은 이름으로 서로 찾는다(ecs_stack 참고)."""
+        loop = asyncio.get_running_loop()
+        try:
+            import compose_deploy
+        except ImportError:  # pragma: no cover
+            from core import compose_deploy  # type: ignore
+        ws = req.workspace_path or ""
+        arch = compose_deploy.load(ws) or {}
+        env_path, _source = await loop.run_in_executor(None, compose_deploy.env_file, ws, arch) if arch else (Path(ws) / ".env", "")
+        env = compose_deploy._read_env(Path(env_path))
+        plan = await loop.run_in_executor(None, ecs_stack.plan, ws, env)
+        if plan.errors:
+            raise InfraError("여러 서비스 AWS 배포를 준비하지 못했습니다: " + " / ".join(plan.errors),
+                             remedy="로컬 Docker 배포로 서비스를 한 번 함께 띄워 확인한 뒤 다시 시도하세요. AWS 자원은 만들지 않았습니다.")
+        entry = plan.entry
+        assert entry is not None and entry.port
+        cluster, project = req.cluster, plan.project
+        rec.service = ecs_stack.service_name(project, entry.name)
+        rec.provisioned["stack"] = f"서비스 {len(plan.services)}개 — " + " → ".join("·".join(layer) for layer in plan.layers)
+        rec.provisioned["stack_entry"] = f"입구: {entry.name} (:{entry.port})"
+        rec.provisioned["stack_cost"] = f"월 약 ${plan.monthly_estimate()} (Fargate 최소 단위 {len(plan.services)}개 · 공인 IP 포함, 데이터 전송 별도)"
+        for i, note in enumerate(plan.notes):
+            rec.provisioned[f"stack_note_{i + 1}"] = note
+        for key in ("source_scan", "image_scan", "sbom"):
+            step = next((x for x in rec.progress_steps if x.key == key), None)
+            if step is not None and step.status == "pending":
+                step.status = "skipped"
+        rec.provisioned["scan_warning"] = ("여러 서비스 AWS 배포는 서비스별 이미지 검사·SBOM 을 아직 하지 않습니다 — "
+                                           "로컬 배포의 서비스별 검사 결과를 확인하세요.")
+        clients = self._clients(req.region)
+        tags = self.resource_tags(req)
+        tags["recoder:stack"] = project
+
+        # 1. 인프라 — 클러스터·이름공간·로그·네트워크·보안 그룹
+        self._advance_progress(rec, "provisioning")
+        log_group = f"/ecs/{project}"
+
+        def _infra() -> tuple[list[str], str, str]:
+            aws_infra.ensure_cluster(clients["ecs"], cluster, tags=tags)
+            ecs_stack.ensure_namespace(clients["ecs"], cluster, project)
+            aws_infra.ensure_log_group(clients["logs"], log_group, tags=tags)
+            network = (aws_infra.resolve_subnet_network(clients["ec2"], req.subnet_ids) if req.subnet_ids
+                       else aws_infra.discover_default_network(clients["ec2"]))
+            internal = ecs_stack.ensure_internal_group(clients["ec2"], vpc_id=network.vpc_id, name=f"{project}-internal", tags=tags)
+            public = aws_infra.ensure_security_group(clients["ec2"], vpc_id=network.vpc_id, name=f"{project}-public",
+                                                     port=int(entry.port), tags=tags, require_managed=True,
+                                                     description="ReCoder stack entry")
+            return list(network.subnet_ids), internal, public
+        try:
+            subnets, internal_sg, public_sg = await loop.run_in_executor(None, _infra)
+        except InfraError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise InfraError("AWS 인프라(클러스터·서비스 연결·보안 그룹)를 준비하지 못했습니다.", detail=aws_infra.error_message(exc),
+                             remedy="IAM 에 ecs:UpdateCluster, servicediscovery:CreateHttpNamespace, ec2:CreateSecurityGroup·"
+                                    "AuthorizeSecurityGroupIngress 권한이 있는지 확인하세요.") from exc
+        rec.provisioned["cluster"] = cluster
+        rec.provisioned["log_group"] = log_group
+        self._abort_if_cancelled(rec, "인프라 준비")
+
+        # 2. 이미지 — 빌드하는 서비스만 ECR 로, DB 등은 원래 이미지 그대로
+        self._advance_progress(rec, "building")
+        tag = req.image_tag or datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        images: dict[str, str] = {}
+        for svc in plan.services:
+            if not svc.built:
+                images[svc.name] = svc.image
+                continue
+            repo = f"{project}-{svc.name}"
+
+            def _push(svc=svc, repo=repo) -> ecs_build.PushResult:
+                uri = aws_infra.ensure_ecr_repository(clients["ecr"], repo, tags=tags)
+                return ecs_build.build_and_push(clients["ecr"], workspace_path=str(Path(ws) / svc.context),
+                                                repository_uri=uri, tag=tag, dockerfile=svc.dockerfile)
+            rec.provisioned["stack_building"] = f"{svc.name} 이미지 빌드·업로드 중"
+            self._save_progress()
+            try:
+                result = await loop.run_in_executor(None, _push)
+            except InfraError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise InfraError(f"{svc.name} 이미지를 만들거나 올리지 못했습니다.", detail=aws_infra.error_message(exc),
+                                 remedy="Docker Desktop 이 켜져 있는지, 로컬 배포에서 이 서비스가 빌드되는지 확인하세요.") from exc
+            images[svc.name] = result.image_uri
+            self._abort_if_cancelled(rec, f"{svc.name} 이미지")
+        rec.provisioned.pop("stack_building", None)
+        self._advance_progress(rec, "ecr_push")
+        rec.image_uri = rec.image = images.get(entry.name, "")
+
+        # 3. 태스크 정의
+        self._advance_progress(rec, "task_def")
+        execution_role, task_role = await loop.run_in_executor(None, self._resolve_role_arns, req, clients)
+        arns: dict[str, str] = {}
+        for svc in plan.services:
+            td = ecs_stack.task_definition(svc, project=project, image=images[svc.name], execution_role=execution_role,
+                                           task_role=task_role, log_group=log_group, region=req.region)
+            try:
+                resp = await loop.run_in_executor(None, lambda td=td: clients["ecs"].register_task_definition(
+                    **td, tags=[{"key": k, "value": v} for k, v in tags.items()]))
+            except Exception as exc:  # noqa: BLE001
+                raise InfraError(f"{svc.name} 태스크 정의를 등록하지 못했습니다.", detail=aws_infra.error_message(exc),
+                                 remedy="IAM 에 ecs:RegisterTaskDefinition 과 실행 역할 iam:PassRole 이 있는지 확인하세요.") from exc
+            arns[svc.name] = resp["taskDefinition"]["taskDefinitionArn"]
+        rec.task_definition_arn = arns[entry.name]
+
+        # 4. 서비스 — 의존 순서대로 층마다 띄우고 안정될 때까지 기다린다
+        self._advance_progress(rec, "svc_update")
+        states: dict[str, str] = {}
+        for i, layer in enumerate(plan.layers, 1):
+            names = []
+            for name in layer:
+                svc = next(s for s in plan.services if s.name == name)
+                sname = ecs_stack.service_name(project, name)
+                groups = [internal_sg] + ([public_sg] if svc.public else [])
+                try:
+                    await loop.run_in_executor(None, lambda svc=svc, sname=sname, groups=groups: ecs_stack.upsert_service(
+                        clients["ecs"], cluster=cluster, name=sname, task_definition_arn=arns[svc.name], subnets=subnets,
+                        groups=groups, connect=ecs_stack.service_connect(svc, project), tags=tags))
+                except Exception as exc:  # noqa: BLE001
+                    raise InfraError(f"{name} 서비스를 만들지 못했습니다.", detail=aws_infra.error_message(exc),
+                                     remedy="IAM 에 ecs:CreateService·UpdateService 권한이 있는지 확인하세요.") from exc
+                names.append(sname)
+            rec.provisioned["stack_progress"] = f"{i}/{len(plan.layers)}층 기다리는 중: {', '.join(layer)}"
+            self._advance_progress(rec, "stabilizing")
+            self._save_progress()
+            states.update(await loop.run_in_executor(None, lambda names=names: ecs_stack.wait_stable(
+                clients["ecs"], cluster=cluster, names=names)))
+            failed = {k: v for k, v in states.items() if v.startswith("failed")}
+            if failed:
+                rec.provisioned["stack_progress"] = " · ".join(f"{k.removeprefix(project + '-')}: {v}" for k, v in states.items())
+                raise InfraError(f"서비스가 뜨지 않았습니다: {', '.join(k.removeprefix(project + '-') for k in failed)}",
+                                 detail="\n".join(f"{k}: {v}" for k, v in failed.items()),
+                                 remedy=f"CloudWatch 로그 {log_group} 에서 그 서비스의 오류를 확인하세요. 이미 뜬 서비스는 그대로 두었습니다 — "
+                                        "「AWS 리소스 정리」에서 멈추거나 지울 수 있습니다.")
+            self._abort_if_cancelled(rec, f"{i}층 서비스")
+        rec.provisioned["stack_progress"] = f"서비스 {len(states)}개 모두 실행 중"
+        rec.running_task_count = len(states)
+
+        # 5. 입구 주소
+        self._advance_progress(rec, "url_check")
+        rec.service_url = await loop.run_in_executor(None, lambda: aws_infra.wait_for_public_url(
+            clients["ecs"], clients["ec2"], cluster=cluster, service=rec.service or "", port=int(entry.port),
+            task_definition_arn=arns[entry.name]))
+        rec.status = ECSDeployStatus.SUCCEEDED
+        rec.completed_at = datetime.now(timezone.utc)
+        req.service = rec.service or req.service
+        self._record_success(req, rec)
+        return rec
 
     # ------------------------------------------------------------------
     # 단계별 구현
@@ -1666,7 +1820,7 @@ class ECSAgent:
                 import journey
             except ImportError:  # pragma: no cover
                 from core import journey  # type: ignore
-            url = str(getattr(rec, "url", "") or getattr(rec, "public_url", "") or "")
+            url = str(getattr(rec, "service_url", "") or "")
             journey.record(req.workspace_path, "release", "done", f"AWS ECS {req.service}" + (f" — {url}" if url else ""))
         except Exception:  # noqa: BLE001
             pass

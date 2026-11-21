@@ -108,6 +108,13 @@ def test_wildcard_resources_are_limited_to_actions_that_require_it():
     여기 목록에 없는 액션이 `*` 로 열리면 범위가 넓어진 것이므로 실패시킨다.
     """
     allowed_wildcard = {
+        "servicediscovery:CreateHttpNamespace": "Cloud Map(Service Connect) — 리소스 단위 제한 거의 미지원, 리전 조건으로 좁혔다",
+        "servicediscovery:GetNamespace": "Cloud Map(Service Connect) — 리소스 단위 제한 거의 미지원, 리전 조건으로 좁혔다",
+        "servicediscovery:GetOperation": "Cloud Map(Service Connect) — 리소스 단위 제한 거의 미지원, 리전 조건으로 좁혔다",
+        "servicediscovery:ListNamespaces": "Cloud Map(Service Connect) — 리소스 단위 제한 거의 미지원, 리전 조건으로 좁혔다",
+        "servicediscovery:CreateService": "Cloud Map(Service Connect) — 리소스 단위 제한 거의 미지원, 리전 조건으로 좁혔다",
+        "servicediscovery:GetService": "Cloud Map(Service Connect) — 리소스 단위 제한 거의 미지원, 리전 조건으로 좁혔다",
+        "servicediscovery:TagResource": "Cloud Map(Service Connect) — 리소스 단위 제한 거의 미지원, 리전 조건으로 좁혔다",
         "sts:GetCallerIdentity":        "계정 단위 조회 — 리소스가 없다",
         "ecr:GetAuthorizationToken":    "계정 단위 토큰 발급",
         "ecs:RegisterTaskDefinition":   "AWS 가 리소스 단위 제한 미지원",
@@ -262,6 +269,22 @@ def test_passing_an_arn_instead_of_a_name_is_rejected():
 # 근거 없이 늘리지 말 것 — 여기 적는 순간 최소권한 원칙에 구멍이 난다.
 
 PINNED_ACTIONS: dict[str, str] = {
+    "servicediscovery:CreateHttpNamespace":
+        "ecs_stack — ECS 가 Service Connect 이름공간·서비스를 만들 때 호출자 권한으로 부른다(update_cluster·create_service 안에서)",
+    "servicediscovery:GetNamespace":
+        "ecs_stack — ECS 가 Service Connect 이름공간·서비스를 만들 때 호출자 권한으로 부른다(update_cluster·create_service 안에서)",
+    "servicediscovery:GetOperation":
+        "ecs_stack — ECS 가 Service Connect 이름공간·서비스를 만들 때 호출자 권한으로 부른다(update_cluster·create_service 안에서)",
+    "servicediscovery:ListNamespaces":
+        "ecs_stack — ECS 가 Service Connect 이름공간·서비스를 만들 때 호출자 권한으로 부른다(update_cluster·create_service 안에서)",
+    "servicediscovery:CreateService":
+        "ecs_stack — ECS 가 Service Connect 이름공간·서비스를 만들 때 호출자 권한으로 부른다(update_cluster·create_service 안에서)",
+    "servicediscovery:GetService":
+        "ecs_stack — ECS 가 Service Connect 이름공간·서비스를 만들 때 호출자 권한으로 부른다(update_cluster·create_service 안에서)",
+    "servicediscovery:TagResource":
+        "ecs_stack — ECS 가 Service Connect 이름공간·서비스를 만들 때 호출자 권한으로 부른다(update_cluster·create_service 안에서)",
+    "ecs:UpdateCluster":
+        "ecs_stack.ensure_namespace — 클러스터 기본 Service Connect 이름공간 지정(update_cluster)",
     "lambda:TagResource":
         "watcher.install 의 create_function(Tags=…) — 태그를 함께 넣는 생성은 TagResource 로도 인가된다(호출은 하나)",
     "events:TagResource":

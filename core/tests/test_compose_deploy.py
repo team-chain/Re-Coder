@@ -306,33 +306,21 @@ def test_same_project_deploys_do_not_overlap_and_records_survive(tmp_path):
     assert run(D.deploy(ws, scan=scanner(), docker=Docker(), http=http))["status"] == "success"
 
 
-def test_aws_paths_stop_before_creating_anything(tmp_path, monkeypatch):
-    """다중 서비스 프로젝트를 ECS·S3 로 보내면 서비스 하나만 올라가거나 엉뚱한 빌드 오류로 끝난다 — 자원 생성 전에 이유를 말한다."""
-    from fastapi import BackgroundTasks, HTTPException
+def test_aws_paths_route_multi_service_to_ecs_stack(tmp_path, monkeypatch):
+    """4.0.1 — 다중 서비스 프로젝트도 ECS 로 보낸다(서비스마다 ECS 서비스). S3(정적 사이트)는 여전히 이유를 말하고 멈춘다."""
+    from fastapi import HTTPException
     from api.routes import deploy as routes
-    from api.routes import ecs as ecs_routes
-    from schemas import ECSDeployRequest
 
     ws = project(tmp_path)
     single = tmp_path / "single"
     single.mkdir()
     assert D.aws_block(ws) == D.AWS_UNSUPPORTED and D.aws_block(single) == "" and D.aws_block(None) == ""
 
-    # 합류점(확장·직접 호출 공통): 자리 예약도 하지 않는다 → 다음 배포를 막지 않는다
-    monkeypatch.setattr(ecs_routes, "_deploy_records", {})
-    reserved = []
-    monkeypatch.setattr(ecs_routes, "_reserve_deployment", lambda r: reserved.append(r) or (_ for _ in ()).throw(AssertionError("예약 금지")))
-    req = ECSDeployRequest(project_id="p", cluster="recoder-cluster", service="recoder-app", region="us-east-1", workspace_path=str(ws))
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(ecs_routes.start_deployment(req, BackgroundTasks(), None))
-    assert exc.value.status_code == 400 and exc.value.detail["error"] == "multi_service_project"
-    assert "로컬 Docker" in exc.value.detail["message"] and not reserved
-
-    # 배포 버튼 직후 점검: ECS·S3 는 막고, 로컬은 막지 않는다
-    for target in ("ecs", "s3"):
-        res = asyncio.run(routes.deploy_preflight(routes.DeployPreflightRequest(workspace_path=str(ws), target=target)))
-        assert res["blocked"] is True
-        assert any(r["code"] == "MULTI_SERVICE_AWS_UNSUPPORTED" for r in res["reasons"])
+    res = asyncio.run(routes.deploy_preflight(routes.DeployPreflightRequest(workspace_path=str(ws), target="ecs")))
+    assert not any(r["code"] == "MULTI_SERVICE_AWS_UNSUPPORTED" for r in res["reasons"])
+    assert res["stack"]["entry"] and len(res["stack"]["services"]) >= 2 and res["stack"]["monthly_usd"] > 0
+    s3 = asyncio.run(routes.deploy_preflight(routes.DeployPreflightRequest(workspace_path=str(ws), target="s3")))
+    assert s3["blocked"] is True and any(r["code"] == "MULTI_SERVICE_AWS_UNSUPPORTED" for r in s3["reasons"])
     local = asyncio.run(routes.deploy_preflight(routes.DeployPreflightRequest(workspace_path=str(ws), target="local")))
     assert not any(r["code"] == "MULTI_SERVICE_AWS_UNSUPPORTED" for r in local["reasons"])
 

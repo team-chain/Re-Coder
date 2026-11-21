@@ -42,7 +42,7 @@ def test_steps_advance_and_rebuild_marks_later_results_stale(tmp_path):
     assert "nope" not in journey.load(ws)
 
 
-def test_multi_service_project_blocks_aws_release_and_reads_stack_history(tmp_path, monkeypatch):
+def test_multi_service_project_offers_aws_release_and_reads_stack_history(tmp_path, monkeypatch):
     import compose_deploy
 
     ws = tmp_path / "shop"
@@ -50,7 +50,7 @@ def test_multi_service_project_blocks_aws_release_and_reads_stack_history(tmp_pa
     (ws / "docker-compose.yml").write_text("services:\n  a:\n    build: ./a\n  b:\n    build: ./b\n", encoding="utf-8")
     (ws / "a.js").write_text("x", encoding="utf-8")
     st = journey.state(ws)
-    assert st["multi"] and _steps(st)["release"] == "blocked" and "다음 버전" in st["steps"][-1]["summary"]
+    assert st["multi"] and _steps(st)["release"] in ("todo", "locked") and "ECS" in st["steps"][-1]["summary"]
     monkeypatch.setattr(compose_deploy, "load", lambda w: {"services": [{"name": "a"}, {"name": "b"}], "databases": []})
     monkeypatch.setattr(compose_deploy, "history", lambda w: [{"status": "success", "services": ["a", "b"], "at": "t"}])
     monkeypatch.setattr("contract_check.check_workspace", lambda w: {"summary": {"error": 0}})

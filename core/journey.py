@@ -149,8 +149,9 @@ def state(workspace: str | Path) -> dict:
         last = stack_history[0]
         if last.get("status") in ("success", "degraded"):
             steps["local"].update(status="done", summary=f"서비스 {len(last.get('services') or [])}개 실행 기록", at=last.get("at", ""))
-    if multi:
-        steps["release"].update(status="blocked", summary="다중 서비스의 AWS 배포는 다음 버전에서 지원합니다 — 로컬 실행까지가 이번 범위")
+    if multi and steps["release"]["status"] == "todo":
+        #: 4.0.1 — 다중 서비스도 AWS 에 올린다(서비스마다 ECS 서비스, ecs_stack).
+        steps["release"].update(summary="서비스마다 ECS 서비스로 AWS 에 올립니다(서비스끼리는 compose 와 같은 이름으로 연결)")
     if not steps["build"]["status"] == "done":
         for key in STEPS[1:]:
             if steps[key]["status"] == "todo":

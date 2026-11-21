@@ -236,3 +236,11 @@ test('2.0.35 승인 카드에 신뢰 점검이 붙고(값 없이 이름만 보�
  await s.send('canvas.prepare',{config});
  assert.equal(s.plan().trust,null);assert.ok(s.plan().id);
 });
+test('4.0.1 여러 서비스 ECS 승인 카드: 서비스 목록 · 순서 · 입구 · 실행비 · 한계를 보이고, 단일 앱 방패·RDS 항목은 숨긴다',()=>{
+ const stack={services:[{name:'users-db',port:5432,built:false,public:false},{name:'users',port:3001,built:true,public:false},{name:'web',port:3000,built:true,public:true}],
+  layers:[['users-db'],['users'],['web']],entry:'web',monthly_usd:41,notes:['DB·Redis 는 컨테이너로 돌아서, 태스크를 다시 띄우면 데이터가 사라집니다.'],errors:[]};
+ const plan={id:'p',config,projectName:'shop',repository:'',branch:'main',commit:'sha',dirty:false,account:'123',coreRegion:config.aws_region,preflight:{blocked:false,stack},targetState:null};
+ const html=renderToStaticMarkup(React.createElement(ApprovalCard,{plan,onApprove(){},onCancel(){},onFix(){}}));
+ for(const t of ['3개 — users-db, users, web','users-db → users → web','web (밖에서 들어오는 곳은 여기 하나)','월 약 $41','데이터가 사라집니다','http://users:3001']) assert.ok(html.includes(t),t);
+ assert.ok(!html.includes('approval-shield')&&!html.includes('approval-db'));
+});
