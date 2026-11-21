@@ -934,6 +934,70 @@
               ]
             },
             {
+              "Sid": "StackServices",
+              "Effect": "Allow",
+              "Action": [
+                "ecs:CreateService",
+                "ecs:UpdateService",
+                "ecs:DescribeServices",
+                "ecs:TagResource"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:service/recoder-*/recoder-*"
+              }
+            },
+            {
+              "Sid": "StackClusterNamespace",
+              "Effect": "Allow",
+              "Action": [
+                "ecs:UpdateCluster"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:cluster/recoder-*"
+              }
+            },
+            {
+              "Sid": "StackImages",
+              "Effect": "Allow",
+              "Action": [
+                "ecr:CreateRepository",
+                "ecr:DescribeRepositories",
+                "ecr:PutLifecyclePolicy",
+                "ecr:TagResource",
+                "ecr:BatchCheckLayerAvailability",
+                "ecr:InitiateLayerUpload",
+                "ecr:UploadLayerPart",
+                "ecr:CompleteLayerUpload",
+                "ecr:PutImage",
+                "ecr:BatchGetImage",
+                "ecr:GetDownloadUrlForLayer"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/recoder-*"
+              }
+            },
+            {
+              "Sid": "StackServiceConnect",
+              "Effect": "Allow",
+              "Action": [
+                "servicediscovery:CreateHttpNamespace",
+                "servicediscovery:GetNamespace",
+                "servicediscovery:GetOperation",
+                "servicediscovery:ListNamespaces",
+                "servicediscovery:CreateService",
+                "servicediscovery:GetService",
+                "servicediscovery:TagResource"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestedRegion": {
+                    "Fn::Sub": "${AWS::Region}"
+                  }
+                }
+              }
+            },
+            {
               "Sid": "S3StaticSiteBucket",
               "Effect": "Allow",
               "Action": [
