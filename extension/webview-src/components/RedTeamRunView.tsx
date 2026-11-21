@@ -6,9 +6,14 @@ type Task={id:string;title:string;status:string;result:string};
 export interface RedTeamRunViewProps {active:boolean;phase?:string;step?:string;outcome?:string;target?:string;tasks?:Task[];assessment?:PentagiAssessment;cleaned?:boolean;updatedAt?:string;httpEvents?:RedTeamHttpEvent[];isolationVerified?:boolean;controls?:React.ReactNode;}
 const names:Record<string,string>={discovery:'경로 탐색',sql_injection:'SQL 입력 검사',authentication:'인증',authorization:'권한',input_handling:'입력 처리'};
 const states:Record<string,string>={created:'대기',running:'검사 중',waiting:'추가 입력 대기',finished:'작업 완료',failed:'실패'};
+const clean=(t?:string)=>(t||'').replace(/https?:\/\/\S+/g,'').replace(/\b\d{1,3}(\.\d{1,3}){3}(:\d+)?\b/g,'').replace(/\s+(at|on|of|for)\s*$/i,'').replace(/\s{2,}/g,' ').trim();
+/** 작업 목록 이름: 한국어면 그대로(주소만 뺌), 영어 원문이면 「AI 공격 작업 N」 — 원문은 펼친 기록에 남는다. */
+export function taskLabel(title:string,index:number):string{
+ const t=clean(title);
+ return t&&/[가-힣]/.test(t)?t:`AI 공격 작업 ${index+1}`;
+}
 /** 화면 자막: 한국어 작업 이름만 그대로 쓰고, 영어 원문·내부 주소(IP/URL)는 보여 주지 않는다. */
 export function stageCaption(title:string|undefined,step:string|undefined):string|undefined{
- const clean=(t?:string)=>(t||'').replace(/https?:\/\/\S+/g,'').replace(/\b\d{1,3}(\.\d{1,3}){3}(:\d+)?\b/g,'').replace(/\s{2,}/g,' ').trim();
  const t=clean(title);
  if(t&&/[가-힣]/.test(t))return `${t} 진행 중`;
  return clean(step)||(t?'공격 작업 진행 중':undefined);
@@ -29,8 +34,8 @@ export function RedTeamRunView({active,phase,step,outcome,target,tasks=[],assess
   <ol className="rc-rt-flow" aria-label="실제 실행 단계">{['환경 준비','작업 시작','PentAGI 진단','결과 정리','환경 정리'].map((label,i)=><li key={label} data-current={active&&i===stage} data-done={!blocked&&(i<stage||i===4&&cleaned===true)}><span className="rc-rt-dot"/>{label}</li>)}</ol>
   {(active||httpEvents!==undefined)&&<RedTeamTrafficView events={httpEvents??[]} traffic={httpEvents!==undefined} active={active} target={target} isolated={isolationVerified} caption={active?stageCaption(current?.title,step):undefined}/>}
   <p className="rc-rt-status" role="status" aria-live="polite">{step||'검사 진행 상태를 기다립니다.'}{blocked?' · 완료되지 않은 결과입니다.':''}</p>
-  {!!tasks.length&&<div className="rc-rt-tasks">{visibleTasks.map(t=><article key={t.id} className="rc-rt-task" data-active={active&&t.status==='running'}><small><span className="rc-rt-dot"/>{states[t.status]||'상태 확인 필요'}</small><div style={{flex:1,minWidth:0}}><strong>{t.title}</strong>{t.result&&<details><summary>작업 원문 · AI 기록</summary><pre>{t.result}</pre></details>}</div></article>)}</div>}
-  {!!hiddenTasks.length&&<details><summary>이전·추가 작업 {hiddenTasks.length}개</summary>{hiddenTasks.map(t=><details key={t.id}><summary>{t.title} · {states[t.status]||'상태 확인 필요'}</summary><pre>{t.result||'결과 대기 중'}</pre></details>)}</details>}
+  {!!tasks.length&&<div className="rc-rt-tasks">{visibleTasks.map(t=><article key={t.id} className="rc-rt-task" data-active={active&&t.status==='running'}><small><span className="rc-rt-dot"/>{states[t.status]||'상태 확인 필요'}</small><div style={{flex:1,minWidth:0}}><strong title={clean(t.title)}>{taskLabel(t.title,tasks.indexOf(t))}</strong>{(t.result||clean(t.title)!==taskLabel(t.title,tasks.indexOf(t)))&&<details><summary>작업 원문 · AI 기록</summary><pre>{[clean(t.title),t.result].filter(Boolean).join('\n\n')}</pre></details>}</div></article>)}</div>}
+  {!!hiddenTasks.length&&<details><summary>이전·추가 작업 {hiddenTasks.length}개</summary>{hiddenTasks.map(t=><details key={t.id}><summary>{taskLabel(t.title,tasks.indexOf(t))} · {states[t.status]||'상태 확인 필요'}</summary><pre>{t.result||'결과 대기 중'}</pre></details>)}</details>}
   {assessment&&<div className="rc-rt-issues"><h4>진단 결과 · 근거 검토</h4><p>근거가 첨부된 후보 {assessment.findings.length}건 · 미검증 범위 {assessment.checks.filter(c=>c.status!=='tested').length}개</p><small>직접 HTTP 대조와 AI 보고를 구분합니다. 검사하지 않은 경로는 결과에 포함되지 않습니다.</small>
    <div className="rc-rt-coverage">{assessment.checks.map(c=><span key={c.kind} title={c.reason}>{names[c.kind]} · {c.status==='tested'?'검사 기록 있음':c.status==='blocked'?'차단됨':'미검증'}</span>)}</div>
    {assessment.findings.map((f,i)=><details key={i}><summary>{f.title}{f.cvss?` · CVSS ${f.cvss.score.toFixed(1)}`:''}</summary><p>{f.route} · {f.evidence==='http_observed'?'HTTP 응답으로 확인':'AI 후보 · 검토 필요'}</p><p>{f.observation}</p>{f.cvss&&<small>벡터로 계산한 점수 · 영향 범위는 검토 필요<br/>{f.cvss.vector}</small>}<div className="rc-rt-evidence"><div><h5>검사 요청·응답</h5><pre>{f.request}{'\n\n'}{f.response}</pre></div><div><h5>대조 요청·응답</h5><pre>{f.controlRequest}{'\n\n'}{f.controlResponse}</pre></div></div><h5>수정 제안</h5><p>{f.remediation}</p></details>)}

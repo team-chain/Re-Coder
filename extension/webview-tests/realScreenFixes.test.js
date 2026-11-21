@@ -12,3 +12,9 @@ test('배포 기록: 통과 기록은 경고가 아니고, 복귀 시각은 ISO 
  assert.ok(isPassNote('배포 검사 45/45 통과'));assert.ok(!isPassNote('배포 검사 44/45 통과'));assert.ok(!isPassNote('배포 검사 45/45 통과 · 경고 1'));
  assert.ok(isIsoTime('2026-11-18T14:41:00.533246+00:00'));assert.ok(!isIsoTime('recoder-app:abc'));
 });
+test('ADR 본문: **굵게** 기호가 그대로 보이지 않고, 머리줄과 같은 제목은 한 번만',()=>{
+ const React=require('react');const {renderToStaticMarkup}=require('react-dom/server');
+ const {AdrBody}=require('../out/webview-test/components/Hubs');
+ const html=renderToStaticMarkup(React.createElement(AdrBody,{text:'# ADR-1: 결제\n\n**키 없이** 실행\n- `stripe` 없음',skipTitle:'ADR-1: 결제'}));
+ assert.doesNotMatch(html,/\*\*/);assert.match(html,/<strong>키 없이<\/strong>/);assert.match(html,/<code[^>]*>stripe<\/code>/);assert.doesNotMatch(html,/ADR-1: 결제/);
+});

@@ -156,6 +156,9 @@ export const SecurityDashboard: React.FC<{onGo?:(view:string)=>void}> = ({onGo})
  const [plan,setPlan]=useState<{loading:boolean;proposals:FixLite[]}>({loading:false,proposals:[]});const [focusFix,setFocusFix]=useState<string>();
  const onPlan=useCallback((p:{loading:boolean;proposals:FixLite[]})=>setPlan(p),[]);
  const summaryId=useRef('');
+ //: 창을 다시 열면 결과 목록은 비어 있다 — 진행 흐름에 남은 지난 검사 기록을 한 줄로 보여 준다(실사용 2026-11-21: 진행 흐름은 「완료」, 보안 화면은 「검사 전」).
+ const [last,setLast]=useState<{summary:string;at?:string}|null>(null);
+ useEffect(()=>{postMessage('journey.get');},[postMessage]);
  //: 화면을 열 때 지난 공격 테스트 결과를 저장 파일에서만 읽어 온다(Docker·클라우드 호출 없음).
  const askSummary=useCallback(()=>{summaryId.current=`rt-summary-${Date.now()}-${Math.random()}`;postMessage('security.redteamSummary',{requestId:summaryId.current});},[postMessage]);
  useEffect(()=>{askSummary();},[askSummary]);
@@ -184,6 +187,7 @@ export const SecurityDashboard: React.FC<{onGo?:(view:string)=>void}> = ({onGo})
    if(p.local!==undefined){const l=p.local;setAttack(l?{assessment:l.assessment,running:!['removed','cleanup_failed'].includes(String(l.phase)),at:l.updatedAt,live:true}:{live:true});}
    else if(p.report&&(p.report.mode??'redteam')==='redteam')setAttack({assessment:p.report.assessment,running:!!p.activeRun&&!p.report.cleaned,live:true});
    return;}
+  if(msg.type==='journey.state'){const st=((msg.payload as {steps?:Array<{key:string;status:string;summary:string;at?:string}>})?.steps||[]).find(x=>x.key==='security');setLast(st&&st.status!=='todo'&&st.status!=='locked'?{summary:st.summary,at:st.at}:null);return;}
   if(msg.type!=='security.checkResult')return;const p=msg.payload as {requestId:string;result?:Record<string,unknown>;error?:string};const entry=pending.current.get(p.requestId);if(!entry)return;
   clearTimeout(entry.timer);pending.current.delete(p.requestId);setChecks(c=>({...c,[entry.kind]:{result:p.result,error:p.error,at:new Date().toLocaleTimeString()}}));
   if(entry.kind==='recheck'&&!p.error)request('history');
@@ -212,7 +216,7 @@ export const SecurityDashboard: React.FC<{onGo?:(view:string)=>void}> = ({onGo})
  <style>{CSS}</style>
  <div className="rc-sec-banner" data-tone={model.verdict} aria-live="polite">
   <span className="ic">{BANNER_ICON[model.verdict]}</span>
-  <div className="t"><h1>{model.title}</h1>{model.reason&&<p>{model.reason}</p>}{!busy&&model.skipped.map(t=><p key={t} className="skip">{t}</p>)}{model.verdict==='idle'&&<p>시크릿 · Dockerfile · 이미지 · 코드를 한 번에 검사해요</p>}{busy&&<p>{model.pending.length?`${model.pending.join(' · ')} 검사 중 · 끝난 검사 ${model.steps.slice(0,4).length-model.pending.length}/${model.steps.slice(0,4).length}`:'결과를 정리하고 있어요'}</p>}</div>
+  <div className="t"><h1>{model.title}</h1>{model.reason&&<p>{model.reason}</p>}{!busy&&model.skipped.map(t=><p key={t} className="skip">{t}</p>)}{model.verdict==='idle'&&<p>시크릿 · Dockerfile · 이미지 · 코드를 한 번에 검사해요</p>}{model.verdict==='idle'&&last&&<p className="skip" data-testid="sec-last">지난 검사{last.at?` (${new Date(last.at).toLocaleString('ko-KR',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false})})`:''}: {last.summary||'기록 있음'} · 다시 검사하면 항목별로 보여요</p>}{busy&&<p>{model.pending.length?`${model.pending.join(' · ')} 검사 중 · 끝난 검사 ${model.steps.slice(0,4).length-model.pending.length}/${model.steps.slice(0,4).length}`:'결과를 정리하고 있어요'}</p>}</div>
   {(model.verdict!=='idle')&&<div className="rc-sec-tally" aria-label={`위험 ${model.tally.danger}, 주의 ${model.tally.caution}, 낮음 ${model.tally.low}`}>
    <div className="d"><b>{danger}</b><span>위험</span></div><div className="c"><b>{caution}</b><span>주의</span></div><div className="l"><b>{low}</b><span>낮음</span></div></div>}
   <button className={`rc-btn${signal?'':' p'}`} disabled={busy} onClick={run}>{busy?'검사 중…':signal?'다시 검사':'보안 검사 시작'}</button>

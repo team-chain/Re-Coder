@@ -240,18 +240,27 @@ export const FeatureFrame: React.FC<{ feature: FeatureId; ctx?: ReadyCtx; onGo?:
 
 // ── ADR 목록/본문 ─────────────────────────────────────────────────────────
 /** 3.0.3 — ADR 마크다운의 제목 · 목록 · 문단만 읽기 좋게(HTML 주입 없이 React 요소로). */
-export const AdrBody: React.FC<{ text: string }> = ({ text }) => {
+/** **굵게** · `코드` 만 — 실사용(2026-11-21) ADR 에 ** 기호가 그대로 보였다. */
+export function inlineMd(text: string): React.ReactNode[] {
+  return text.split(/(\*\*[^*]+\*\*|`[^`]+`)/).filter(Boolean).map((part, i) =>
+    /^\*\*[^*]+\*\*$/.test(part) ? <strong key={i}>{part.slice(2, -2)}</strong>
+      : /^`[^`]+`$/.test(part) ? <code key={i} style={{ fontFamily: "var(--rc-mono, monospace)", fontSize: "0.95em" }}>{part.slice(1, -1)}</code>
+      : part);
+}
+export const AdrBody: React.FC<{ text: string; skipTitle?: string }> = ({ text, skipTitle }) => {
   const out: React.ReactNode[] = [];
   let list: string[] = [];
-  const flush = () => { if (list.length) { const items = list; out.push(<ul key={`u${out.length}`} style={{ margin: "0 0 10px", paddingLeft: 18 }}>{items.map((t, i) => <li key={i}>{t}</li>)}</ul>); list = []; } };
+  const flush = () => { if (list.length) { const items = list; out.push(<ul key={`u${out.length}`} style={{ margin: "0 0 10px", paddingLeft: 18 }}>{items.map((t, i) => <li key={i}>{inlineMd(t)}</li>)}</ul>); list = []; } };
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trimEnd();
     const h = /^(#{1,4})\s+(.*)$/.exec(line);
     const li = /^\s*[-*]\s+(.*)$/.exec(line);
     if (li) { list.push(li[1]); continue; }
     flush();
+    //: 위 머리줄과 같은 제목은 두 번 쓰지 않는다.
+    if (h && !out.length && skipTitle && h[2].trim() === skipTitle.trim()) continue;
     if (h) out.push(<div key={`h${out.length}`} style={{ fontSize: h[1].length === 1 ? 15 : 13, fontWeight: 650, margin: out.length ? "14px 0 6px" : "0 0 6px", color: C.fg }}>{h[2]}</div>);
-    else if (line.trim()) out.push(<p key={`p${out.length}`} style={{ margin: "0 0 8px" }}>{line}</p>);
+    else if (line.trim()) out.push(<p key={`p${out.length}`} style={{ margin: "0 0 8px" }}>{inlineMd(line)}</p>);
   }
   flush();
   return <div className="rc-adr-body" style={{ fontSize: 12.5, lineHeight: 1.65, color: C.fg, overflowWrap: "anywhere" }}>{out}</div>;
@@ -305,7 +314,7 @@ export const AdrPanel: React.FC = () => {
             {meta && <span style={{ color: C.muted, fontSize: 11 }}>{meta}</span>}
             <button onClick={() => postMessage("adr.open", { file: selected })} style={{ ...btnStyle(false), marginLeft: "auto" }}>에디터에서 열기</button>
           </div>
-          {content ? <AdrBody text={content} /> : <div style={{ fontSize: 12, color: C.muted }}>{error ? error : "불러오는 중…"}</div>}
+          {content ? <AdrBody text={content} skipTitle={items.find((i) => i.file === selected)?.title} /> : <div style={{ fontSize: 12, color: C.muted }}>{error ? error : "불러오는 중…"}</div>}
         </> : <div style={{ color: C.muted, fontSize: 12 }}>왼쪽에서 기록을 선택하세요.</div>}
       </div>
     </div>

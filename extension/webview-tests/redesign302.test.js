@@ -116,3 +116,11 @@ test('home never says "no deployment" while the history could not be read yet (C
  const none=renderToStaticMarkup(React.createElement(HomeView,{data:{...base,history:[]},go(){},open(){}}));
  assert.match(none,/아직 배포한 버전이 없습니다/);
 });
+
+test('4.0.1 홈: 가장 최근 성공 배포가 주인공, 확인 안 된 「실행 중」 없음, 보안은 진행 흐름 기록도 반영',()=>{
+ const old={...hist[0],started_at:new Date(NOW-40*86400e3).toISOString()};
+ const stack={key:'stack:1',source:'stack',deployment_id:'s',target:'recoder-app · 서비스 7개',status:'succeeded',status_text:'실행 완료',started_at:new Date(NOW-3*86400e3).toISOString()};
+ const html=renderToStaticMarkup(React.createElement(HomeView,{data:{snapshot:{...snap,topology:null,scan:null},history:[stack,old],monitor:null,changes,now:NOW,journeySecurity:{status:'done',summary:'보안 검사 통과'}},go(){},open(){}}));
+ assert.match(html,/로컬 다중 서비스/);assert.match(html,/3일 전/);assert.doesNotMatch(html,/>실행 중</);assert.match(html,/실행 완료/);
+ assert.match(html,/검사함/);assert.doesNotMatch(html,/검사 전/);
+});

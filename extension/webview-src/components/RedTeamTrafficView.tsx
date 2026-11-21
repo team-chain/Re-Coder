@@ -16,9 +16,11 @@ export function outcomeOf(e:Pick<RedTeamHttpEvent,'status'|'blocked'>):Outcome{
 //: limited = 중계가 막은 요청(검사 범위 밖 경로·허용 안 된 메서드·너무 빠른 요청). 앱이 막은 것(거부)과 구분한다.
 const OUT_LABEL:Record<Outcome,string>={refused:'거부',answered:'응답',error:'오류',limited:'중계 차단'};
 /** 같은 화면을 가리키는 요청을 한 줄로 — 쿼리는 빼고 숫자·긴 ID 는 :id 로. */
+const ID_START=/^(\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|(?=[0-9a-f]*\d)[0-9a-f]{8,})(?![0-9a-z_-])/i;
 export function routeOf(path:string):string{
  const p=(path||'/').split('?')[0].split('#')[0]||'/';
- const out=p.split('/').map(seg=>/^\d+$/.test(seg)||/^[0-9a-f]{8,}(-[0-9a-f]{4,})*$/i.test(seg)?':id':seg).join('/');
+ //: 숫자·UUID 로 시작하는 칸은 뒤에 붙은 공격 문자열(' OR 1=1 등)까지 :id 하나로 — 실사용에서 UUID 줄이 따로 생겼다.
+ const out=p.split('/').map(seg=>{let s=seg;try{s=decodeURIComponent(seg);}catch{}return ID_START.test(s)?':id':seg;}).join('/');
  return out.length>48?out.slice(0,47)+'…':out;
 }
 interface Route{path:string;methods:string[];n:number;by:Record<Outcome,number>;last:number;lastOutcome:Outcome}

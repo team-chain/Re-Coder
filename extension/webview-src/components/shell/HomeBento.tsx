@@ -32,6 +32,8 @@ export interface HomeData {
   now?: number;
   /** 배포 기록을 읽지 못했다(Core 가 막 켜지는 중 등) — 「배포 없음」 으로 오해하게 그리지 않는다. */
   historyError?: boolean;
+  /** 진행 흐름의 보안 검사 단계(보안 화면에서 한 검사) — ECS 배포 기록에 검사가 없을 때 홈 「보안」 칸에 쓴다. */
+  journeySecurity?: { status: string; summary: string } | null;
 }
 type Go = (view: string) => void;
 
@@ -118,9 +120,17 @@ const CSS = `
 const statusOf = (e?: HistoryEntryLite | null) => !e ? "off" : isOk(e) ? "ok" : FAIL.has(e.status) ? "bad" : "warn";
 const whereOf = (e: HistoryEntryLite) => e.source === "ecs" ? `ECS ${e.region || ""}`.trim() : e.source === "stack" ? "로컬 다중 서비스" : "로컬 Docker";
 
-export function securitySummary(snapshot: Snapshot | null): { tone: "ok" | "warn" | "bad" | "off"; label: string; vulns: number; secrets: number; unverified: number } {
+const JOURNEY_SEC: Record<string, { tone: "ok" | "warn" | "bad"; label: string }> = {
+  done: { tone: "ok", label: "검사함" }, failed: { tone: "bad", label: "다시 필요" }, stale: { tone: "warn", label: "코드 바뀜 · 다시 검사" },
+  unverified: { tone: "warn", label: "일부 미확인" }, cancelled: { tone: "warn", label: "중단됨" },
+};
+export function securitySummary(snapshot: Snapshot | null, journey?: { status: string; summary: string } | null): { tone: "ok" | "warn" | "bad" | "off"; label: string; vulns: number; secrets: number; unverified: number; note?: string } {
   const scan = snapshot?.scan;
-  if (!scan) return { tone: "off", label: "검사 전", vulns: 0, secrets: 0, unverified: 0 };
+  //: 배포 기록의 검사가 없으면 보안 화면에서 한 검사(진행 흐름 기록)를 쓴다 — 실사용(2026-11-21): 진행 흐름은 「보안 검사 완료」 인데 홈은 「검사 전」.
+  if (!scan) {
+    const j = journey && JOURNEY_SEC[journey.status];
+    return j ? { ...j, vulns: 0, secrets: 0, unverified: 0, note: journey!.summary } : { tone: "off", label: "검사 전", vulns: 0, secrets: 0, unverified: 0 };
+  }
   const vulns = scan.findings.filter(f => f.tool !== "gitleaks").length;
   const secrets = scan.findings.filter(f => f.tool === "gitleaks").length;
   const unverified = scan.tools.filter(t => ["unverified", "not_run", "pending"].includes(t.state)).length;
@@ -132,14 +142,18 @@ export function securitySummary(snapshot: Snapshot | null): { tone: "ok" | "warn
 
 function Overview({ data, go, open }: { data: HomeData; go: Go; open: (url: string) => void }) {
   const entries = data.history ?? [];
-  const live = entries.find(e => isOk(e) && e.service_url) ?? entries.find(isOk) ?? null;
+  //: 가장 최근에 성공한 배포 — 주소가 있는 옛 배포(예: 40일 전 ECS)를 최근 로컬 배포보다 앞세우지 않는다(실사용 2026-11-21).
+  const live = entries.find(isOk) ?? null;
   const last = entries[0] ?? null;
   const project = data.snapshot?.projectName || "프로젝트";
   const url = live?.service_url || "";
   const failedAfter = !!last && last !== live && FAIL.has(last.status);
   const git = data.snapshot?.git;
   const repoUrl = git?.repository ? (/^https?:\/\//.test(git.repository) ? git.repository : `https://github.com/${git.repository}`) : "";
-  const sec = securitySummary(data.snapshot);
+  const sec = securitySummary(data.snapshot, data.journeySecurity);
+  //: 「실행 중」 은 확인한 것만 — ECS 실시간 조회가 실행 중 태스크를 보여 줄 때. 나머지는 기록의 상태 글자.
+  const topoNow = data.snapshot?.topology as { running?: number } | null | undefined;
+  const liveNow = !!live && live.source === "ecs" && (topoNow?.running ?? 0) > 0;
   const m = data.monitor;
   const s = m?.series;
   const hasTraffic = !!m && !!m.metrics && !!s && (s.requests?.length ?? 0) >= 2;
@@ -172,14 +186,14 @@ function Overview({ data, go, open }: { data: HomeData; go: Go; open: (url: stri
       </div>
       <div className="kv">
         <div><label>배포</label><div className="v">{url ? <span className="rc-mono">{hostOf(url)}</span> : <span className="dim">{live ? live.target : "없음"}</span>}</div></div>
-        <div><label>상태</label><div className="v">{data.history === null ? <span className="dim">{data.historyError ? "읽지 못함" : "확인 중"}</span> : live ? <><i className="rc-dot ok live" />실행 중{failedAfter && <span className="dim"> · 최근 배포 실패</span>}</> : last ? <><i className={`rc-dot ${statusOf(last)}`} />{last.status_text}</> : <><i className="rc-dot" />배포 전</>}</div></div>
+        <div><label>상태</label><div className="v">{data.history === null ? <span className="dim">{data.historyError ? "읽지 못함" : "확인 중"}</span> : live ? <><i className={`rc-dot ok${liveNow ? " live" : ""}`} />{liveNow ? "실행 중" : live.status_text}{failedAfter && <span className="dim"> · 최근 배포 실패</span>}</> : last ? <><i className={`rc-dot ${statusOf(last)}`} />{last.status_text}</> : <><i className="rc-dot" />배포 전</>}</div></div>
         <div><label>배포한 시각</label><div className="v">{live ? timeAgo(live.started_at, data.now) || "시각 미기록" : <span className="dim">—</span>}</div></div>
         <div><label>대상</label><div className="v">{live ? <>{live.source === "ecs" ? <TechLogo kind="ecs" size={15} /> : <TechLogo kind="docker" size={15} />}{whereOf(live)}</> : <span className="dim">—</span>}</div></div>
         <div className="full"><label>소스</label><div className="v">{git?.branch ? <><Glyph name="branch" size={14} /><span className="rc-mono">{git.branch}{git.head ? ` · ${git.head.slice(0, 7)}` : ""}</span>{git.dirty && <span className="dim">· 커밋 전 변경 있음</span>}</> : <span className="dim">{git?.initialized === false ? "Git 저장소가 아닙니다" : "브랜치 정보 없음"}</span>}</div></div>
       </div>
       <div className="rc-strip">
         <button className="rc-stat" data-testid="home-security" data-t={sec.tone} onClick={() => go("hub:security")}>
-          <small>보안</small><b>{sec.label}{sec.tone !== "off" && (sec.vulns + sec.secrets) > 0 && <em>{sec.vulns + sec.secrets}건</em>}</b></button>
+          <small>보안</small><b title={sec.note || undefined}>{sec.label}{sec.tone !== "off" && (sec.vulns + sec.secrets) > 0 && <em>{sec.vulns + sec.secrets}건</em>}</b></button>
         <button className="rc-stat" data-testid="home-traffic" data-t={hasTraffic ? (rate > 5 ? "bad" : "") : "off"} onClick={() => go("hub:monitor")}>
           <small>요청{hasTraffic ? " · 24시간" : ""}</small>
           {hasTraffic ? <b>{(m!.now?.rpm ?? 0).toLocaleString()}<em>/분 · 오류율 {rate.toFixed(rate < 10 ? 1 : 0)}%</em></b> : <b title={data.snapshot?.aws.ready ? "ECS 에 배포하면 요청 · 오류가 표시됩니다." : "AWS 를 연결하고 배포하면 요청 · 오류가 표시됩니다."}>—<em>배포 후 표시</em></b>}
@@ -262,6 +276,7 @@ export const HomeBento: React.FC<{ active: boolean; go: Go }> = ({ active, go })
     postMessage("canvas.snapshot", { requestId: reqs.current.snap });
     postMessage("replay.history", { requestId: reqs.current.hist });
     postMessage("home.changes");
+    postMessage("journey.get");
   }, [postMessage]);
   useEffect(() => {
     if (!active) return undefined;
@@ -290,6 +305,10 @@ export const HomeBento: React.FC<{ active: boolean; go: Go }> = ({ active, go })
         r.timer = window.setTimeout(() => load(), Math.min(30_000, 3_000 * 2 ** r.tries));
         r.tries++;
       }
+    }
+    if (type === "journey.state") {
+      const st = (p.steps as Array<{ key: string; status: string; summary: string }> | undefined)?.find(x => x.key === "security");
+      setData(d => ({ ...d, journeySecurity: st ? { status: st.status, summary: st.summary } : null }));
     }
     if (type === "home.changesResult") setData(d => ({ ...d, changes: p as unknown as ChangesLite }));
     if (type === "monitor.result" && p.requestId === reqs.current.mon) setData(d => ({ ...d, monitor: (p.current as MonitorCurrentView) ?? null }));

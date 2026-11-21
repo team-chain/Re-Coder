@@ -168,3 +168,11 @@ test('red team caption is Korean and never shows internal addresses',()=>{
  assert.equal(stageCaption('로그인 우회 172.30.0.10:8080',undefined),'로그인 우회 진행 중');
  assert.equal(stageCaption('Recon of 172.30.0.10',undefined),'공격 작업 진행 중');
 });
+test('route rows merge UUIDs even with payload suffixes, task titles hide English + IPs',()=>{
+ assert.equal(routeOf('/api/products/7c097324-f1da-4002-8dc2-54afe3b1f00a'),'/api/products/:id');
+ assert.equal(routeOf("/api/products/7c097324-f1da-4002-8dc2-54afe3b1f00a'%20OR%201=1--"),'/api/products/:id');
+ assert.equal(routeOf('/api/v2/orders'),'/api/v2/orders');
+ const {taskLabel}=require('../out/webview-test/components/RedTeamRunView');
+ assert.equal(taskLabel('Authorized Black-Box Security Assessment of Isolated Test Application at http://172.30.0.10:8080',0),'AI 공격 작업 1');
+ assert.equal(taskLabel('로그인 우회 시도 http://172.30.0.10:8080',1),'로그인 우회 시도');
+});

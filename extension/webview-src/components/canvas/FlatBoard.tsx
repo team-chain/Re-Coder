@@ -91,11 +91,19 @@ export const FlatBoard: React.FC<{
   const gate = nodes.find(n => n.id === "gate");
   const discord = nodes.find(n => n.id === "discord");
   const workspaceKey = project?.name ?? "";
-  useEffect(() => { if (initialSpec) return; req.current = `board-${Date.now()}`; postMessage("spec.load", { requestId: req.current }); }, [postMessage, workspaceKey, initialSpec]);
+  //: Core 가 켜지는 중이라 명세를 못 읽으면 몇 번 다시 묻는다 — 실사용(2026-11-21): 서비스 7개 프로젝트가 「단일 서비스」 로 보였다.
+  const tries = useRef(0);
+  const [specFailed, setSpecFailed] = useState(false);
+  const askSpec = useCallback(() => { req.current = `board-${Date.now()}`; postMessage("spec.load", { requestId: req.current }); }, [postMessage]);
+  useEffect(() => { if (initialSpec) return; tries.current = 0; setSpecFailed(false); askSpec(); }, [askSpec, workspaceKey, initialSpec]);
   useMessage(useCallback(({ type, payload }) => {
     const p = (payload ?? {}) as { requestId?: string; spec?: Spec };
-    if (type === "spec.result" && p.requestId === req.current && p.spec) setSpec(p.spec);
-  }, []));
+    if (type === "spec.result" && p.requestId === req.current && p.spec) { setSpec(p.spec); setSpecFailed(false); }
+    if (type === "spec.error" && p.requestId === req.current) {
+      if (tries.current < 6) { const n = tries.current++; window.setTimeout(askSpec, Math.min(20_000, 2_000 * 2 ** n)); }
+      else setSpecFailed(true);
+    }
+  }, [askSpec]));
 
   // 선 — 프로젝트 → 보안 검사 → 대상. 실제 카드 위치에서 그린다(창 크기가 바뀌어도 맞게).
   const root = useRef<HTMLDivElement>(null);
@@ -153,7 +161,7 @@ export const FlatBoard: React.FC<{
             {services.slice(0, 6).map(s => <div className="fb-svc" key={s.name}><b><i className={`fb-d ${status(s.name)}`} />{s.name}</b><small>{s.port ? `:${s.port}` : s.kind === "worker" ? "worker" : " "}</small></div>)}
             {dbs.slice(0, 2).map(x => <div className="fb-svc db" key={x.name}><b><i className={`fb-d ${status(x.name)}`} />{x.name}</b><small>{x.engine}</small></div>)}
             {services.length + dbs.length > 8 && <div className="fb-svc db"><b>+{services.length + dbs.length - 8}</b><small>&nbsp;</small></div>}
-          </div> : <div style={{ padding: "14px", color: "var(--fb-fg3)", fontSize: 12.5 }}>단일 서비스</div>}
+          </div> : <div style={{ padding: "14px", color: "var(--fb-fg3)", fontSize: 12.5 }}>{spec ? "단일 서비스" : specFailed ? "서비스 구성을 읽지 못했어요" : "서비스 확인 중…"}</div>}
         </div>
       </div>
       <div className="fb-mid">
