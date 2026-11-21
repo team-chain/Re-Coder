@@ -35,7 +35,49 @@ def session_for(region: str):
     return boto3.session.Session(region_name=region)
 
 
+def sync_stack_monitors() -> int:
+    """성공한 여러 서비스 배포인데 감시 목록에 없는 서비스를 올린다(rc7 이전 배포 · 등록 실패 복구).
+
+    감지 알림을 끄고 배포한 것은 올리지 않는다. 입구 서비스를 마지막에 올려 Operate 가 기본으로 보여 준다.
+    """
+    try:
+        try:
+            from api.routes import ecs as ecs_routes  # type: ignore
+        except ImportError:  # pragma: no cover
+            from core.api.routes import ecs as ecs_routes  # type: ignore
+        try:
+            import ecs_stack  # type: ignore
+        except ImportError:  # pragma: no cover
+            from core import ecs_stack  # type: ignore
+        records = sorted(ecs_routes._deploy_records.values(), key=lambda r: str(r.started_at))
+    except Exception as exc:  # noqa: BLE001
+        logger.info("배포 기록을 읽지 못해 감시 목록을 채우지 않았습니다: %s", exc)
+        return 0
+    known = {m.get("key") for m in ops_alerts.monitors()}
+    added = 0
+    for r in records:
+        if str(getattr(r.status, "value", r.status)) != "succeeded" or not (r.region and r.cluster and r.service):
+            continue
+        prov = dict(r.provisioned or {})
+        if str(prov.get("alerts") or "").startswith("꺼짐"):
+            continue
+        project, names, entry = ecs_stack.services_from_record(prov, str(r.service))
+        if not names:
+            continue
+        for name in sorted(names, key=lambda n: n == entry):
+            svc = ecs_stack.service_name(project, name)
+            key = f"{r.region}/{r.cluster}/{svc}"
+            if key in known:
+                continue
+            ops_alerts.register(region=r.region, cluster=r.cluster, service=svc, log_group=f"/ecs/{project}",
+                                metrics=False)
+            known.add(key)
+            added += 1
+    return added
+
+
 def _monitor(key: str) -> dict:
+    sync_stack_monitors()
     found = next((m for m in ops_alerts.monitors() if m.get("key") == key), None)
     if found is None:
         raise HTTPException(status_code=404, detail="감시 중인 서비스가 아닙니다 — ECS 배포에서 감지 알림을 켜면 생깁니다.")
@@ -100,6 +142,7 @@ def _stable_from_records(m: dict, current_td: str) -> str:
 
 def overview(key: str = "", now: Optional[float] = None, *, light: bool = False) -> dict:
     """모니터 화면 한 장 — 서비스 상태 · 24시간 지표 · 감시자 상태 · 기록 · 승인 대기."""
+    sync_stack_monitors()
     mons = ops_alerts.monitors()
     listed = [{"key": m["key"], "service": m["service"], "region": m["region"], "cluster": m["cluster"]} for m in mons]
     if not mons:

@@ -721,6 +721,7 @@ class ECSAgent:
         rec.service = ecs_stack.service_name(project, entry.name)
         rec.provisioned["stack"] = f"서비스 {len(plan.services)}개 — " + " → ".join("·".join(layer) for layer in plan.layers)
         rec.provisioned["stack_entry"] = f"입구: {entry.name} (:{entry.port})"
+        rec.provisioned["stack_services"] = ",".join(svc.name for svc in plan.services)
         rec.provisioned["stack_cost"] = f"월 약 ${plan.monthly_estimate()} (Fargate 최소 단위 {len(plan.services)}개 · 공인 IP 포함, 데이터 전송 별도)"
         for i, note in enumerate(plan.notes):
             rec.provisioned[f"stack_note_{i + 1}"] = note

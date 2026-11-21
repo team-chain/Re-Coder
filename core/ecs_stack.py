@@ -366,3 +366,25 @@ def wait_stable(ecs: Any, *, cluster: str, names: list[str], timeout: float = 90
         if monotonic() >= deadline:
             return {n: (v if v != "pending" else "failed: 시간 안에 안정되지 않음") for n, v in state.items()}
         sleep(interval)
+
+
+def services_from_record(provisioned: dict, service: str) -> tuple[str, list[str], str]:
+    """여러 서비스 배포 기록에서 (프로젝트, 서비스 이름들, 입구) 를 읽는다. 여러 서비스 배포가 아니면 ("", [], "").
+
+    4.0.1-rc8 부터는 stack_services 에 이름을 그대로 남기고, 그 전 기록은 stack("서비스 N개 — a·b → c") 을 읽는다.
+    """
+    provisioned = provisioned or {}
+    if "stack" not in provisioned:
+        return "", [], ""
+    m = re.match(r"\s*입구:\s*([A-Za-z0-9_.-]+)", str(provisioned.get("stack_entry") or ""))
+    entry = m.group(1) if m else ""
+    raw = str(provisioned.get("stack_services") or "")
+    if raw:
+        names = [n for n in raw.split(",") if n]
+    else:
+        body = str(provisioned["stack"]).split("—", 1)[-1]
+        names = [n.strip() for part in body.split("→") for n in part.split("·") if n.strip()]
+    names = [n for n in names if re.fullmatch(r"[A-Za-z0-9_.-]+", n)]
+    if not names or not entry or not service.endswith("-" + entry):
+        return "", [], ""
+    return service[: -len(entry) - 1], names, entry

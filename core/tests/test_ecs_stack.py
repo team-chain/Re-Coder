@@ -216,3 +216,30 @@ def test_internal_group_is_made_even_without_tag_permission():
     import pytest
     with pytest.raises(RuntimeError):
         ecs_stack.ensure_internal_group(ec2, vpc_id="v", name="p-internal", tags={})
+
+
+def test_operate_picks_up_stack_deployed_before_registration(monkeypatch):
+    """rc7 처럼 감시 등록 없이 끝난 여러 서비스 배포도, 배포 기록을 보고 Operate 목록에 채운다(입구가 마지막)."""
+    from api.routes import ecs as ecs_routes, ops_watch
+    from schemas import ECSDeployRecord, ECSDeployStatus
+    import ops_alerts
+
+    old = {"stack": "서비스 3개 — users-db → users · gateway → web", "stack_entry": "입구: web (:3000)",
+           "alerts": "켜짐"}
+    assert ecs_stack.services_from_record(old, "recoder-app-343a75-web") == (
+        "recoder-app-343a75", ["users-db", "users", "gateway", "web"], "web")
+    assert ecs_stack.services_from_record({"stack_services": "a,b", "stack": "x", "stack_entry": "입구: b (:80)"}, "p-b") == ("p", ["a", "b"], "b")
+    assert ecs_stack.services_from_record({}, "recoder-app") == ("", [], "")
+
+    rec = ECSDeployRecord(region="us-east-1", cluster="recoder-cluster", service="recoder-app-343a75-web",
+                          status=ECSDeployStatus.SUCCEEDED, provisioned=old)
+    off = ECSDeployRecord(region="us-east-1", cluster="recoder-cluster", service="q-web", status=ECSDeployStatus.SUCCEEDED,
+                          provisioned={"stack": "서비스 1개 — web", "stack_entry": "입구: web (:80)", "alerts": "꺼짐 — 껐습니다."})
+    monkeypatch.setattr(ecs_routes, "_deploy_records", {"a": rec, "b": off})
+    store = [{"key": "us-east-1/recoder-cluster/recoder-app", "service": "recoder-app"}]
+    monkeypatch.setattr(ops_alerts, "monitors", lambda: list(store))
+    monkeypatch.setattr(ops_alerts, "register", lambda **kw: store.append({"key": f"{kw['region']}/{kw['cluster']}/{kw['service']}", **kw}))
+    assert ops_watch.sync_stack_monitors() == 4
+    assert store[-1]["service"] == "recoder-app-343a75-web" and store[-1]["log_group"] == "/ecs/recoder-app-343a75"
+    assert not any(m["service"] == "q-web" for m in store)
+    assert ops_watch.sync_stack_monitors() == 0  # 두 번 올리지 않는다
