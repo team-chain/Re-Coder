@@ -94,7 +94,7 @@ interface GenerateRequest { instruction: string; targetFolder: string; contextFi
   /** 2.0.45 역할별 모델(설계·개발·검토·테스트 → 공급자 이름) · 테스트 리코더를 돌릴지. */
   models?: Partial<Record<string, string>> | null; test?: boolean; lockSensitive?: boolean; }
 interface PausedInfo { message: string; jobId: string; done: number; total: number; reason?: string; failed?: FailedFile[]; }
-interface Turn { id: number; prompt: string; targetFolder: string; contextNames?: string[]; status: "planning" | "generating" | "done" | "error"; result?: CodeResult; error?: string; progress?: string;
+interface Turn { id: number; prompt: string; targetFolder: string; contextNames?: string[]; status: "planning" | "generating" | "done" | "error" | "cancelled"; result?: CodeResult; error?: string; progress?: string;
   roster?: TeamMember[]; team?: TeamView; request?: GenerateRequest; paused?: PausedInfo | null;
   /** 2.0.45 예상 시간·비용 기록용 — 생성을 시작한 때와 고른 프리셋. 이어서 만든 턴은 기록하지 않는다. */
   run?: { startedAt: number; preset: Preset; resumed?: boolean }; }
@@ -528,7 +528,7 @@ export const CodeAgent: React.FC<{ isActive: boolean; onReviewRequired?: () => v
   const cancelDecision = useCallback(() => {
     if (!decisionModal) { return; }
     setTurns((ts) => ts.map((turn) => turn.id === decisionModal.requestId
-      ? { ...turn, status: "error", error: "설계 결정을 취소해서 생성을 중단했습니다." }
+      ? { ...turn, status: "cancelled", error: "설계 결정을 취소해서 만들지 않았어요. 요청을 고쳐 다시 보내면 돼요." }
       : turn));
     delete pendingRequestsRef.current[decisionModal.requestId];
     activeRequest.current = null;
@@ -827,6 +827,10 @@ export const CodeAgent: React.FC<{ isActive: boolean; onReviewRequired?: () => v
           )}
           {turn.status === "error" && turn.paused && !turn.team && (
             <PausePanel standalone paused={turn.paused} disabled={isBusy} onResume={(mode) => resumeTurn(turn, mode)} />
+          )}
+          {turn.status === "cancelled" && (
+            //: 사용자가 취소한 것은 오류가 아니다 — 빨간 상자 대신 흐린 안내 한 줄(실사용 2026-11-21).
+            <div data-testid="turn-cancelled" style={{ color: "var(--rc-fg3, #67768A)", fontSize: 12.5, padding: "4px 2px" }}>{turn.error}</div>
           )}
           {turn.status === "error" && !turn.paused && (
             <div style={{ background: "var(--vscode-inputValidation-errorBackground, rgba(239,68,68,0.1))", border: "1px solid var(--vscode-inputValidation-errorBorder, #ef4444)", borderRadius: 4, padding: "7px 10px", color: "var(--vscode-errorForeground, #f48771)", fontSize: 11 }}>{turn.error}</div>

@@ -28,6 +28,8 @@ def test_stops_at_limit_without_visiting_remaining_directories(tmp_path, monkeyp
         visited.append(Path(path))
         return original(path)
     monkeypatch.setattr(os, 'scandir', scan)
+    #: 얕은 파일을 고르려고 한도보다 넉넉히 훑지만, 훑는 양에는 상한이 있다(_TREE_SCAN_CAP).
+    monkeypatch.setattr(code_agent, '_TREE_SCAN_CAP', 2)
     assert code_agent._list_project_files(tmp_path, limit=1) == ['a.ts']
     assert visited == [tmp_path]
     assert code_agent._list_project_files(tmp_path, limit=0) == []

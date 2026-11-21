@@ -828,26 +828,84 @@ _CODE_AGENT_MAX_TOKENS = 8192
 _CODE_AGENT_TREE_LIMIT = 80   # 컨텍스트에 넣을 기존 파일 경로 최대 수
 
 
+#: 보관용 폴더 — 옛 코드 사본이 실제 서비스 파일보다 먼저 80개 한도를 채우지 않게 뺀다.
+#: 얕은 파일을 고르려고 한도보다 넉넉히 훑되, 큰 저장소에서 멈추지 않게 상한을 둔다.
+_TREE_SCAN_CAP = 2000
+_ARCHIVE_DIRS = {"_old", "old", "backup", "backups", "_backup", "archive", "_archive"}
+
+
+class ProjectFiles(list):
+    """기존 파일 경로 목록 + 프로젝트 구조 요약(architecture.json). 그냥 list 처럼 쓴다."""
+    arch: str = ""
+
+
+def _architecture_summary(root: Path) -> str:
+    """architecture.json 의 서비스·DB 를 몇 줄로 — AI 가 이미 있는 서비스를 새로 만들자고 하지 않게(실사용 2026-11-21:
+    users 서비스가 있는 7서비스 프로젝트에서 「users 서비스 신설」 을 추천)."""
+    try:
+        data = json.loads((root / "architecture.json").read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    lines: list[str] = []
+    for svc in (data.get("services") or [])[:30]:
+        if not isinstance(svc, dict) or not svc.get("name"):
+            continue
+        port = f", :{svc['port']}" if svc.get("port") else ""
+        dbs = f", DB {', '.join(map(str, svc.get('databases') or []))}" if svc.get("databases") else ""
+        purpose = str(svc.get("purpose") or "")[:160]
+        lines.append(f"- 서비스 {svc['name']} ({svc.get('path', '')}, {svc.get('kind', '')}{port}{dbs}): {purpose}")
+    for db in (data.get("databases") or [])[:20]:
+        if isinstance(db, dict) and db.get("name"):
+            tables = ", ".join(map(str, (db.get("tables") or [])[:12]))
+            lines.append(f"- DB {db['name']} ({db.get('engine', '')}): {tables}")
+    endpoints = data.get("endpoints") or []
+    if isinstance(endpoints, list) and endpoints:
+        lines.append(f"- API {len(endpoints)}개 (계약 파일 architecture.json)")
+    if not lines:
+        return ""
+    return ("[이미 있는 프로젝트 구조 — architecture.json]\n" + "\n".join(lines)
+            + "\n이미 있는 서비스·DB·API 를 새로 만들자고 하지 말고, 있는 것을 고치거나 넓히는 선택지를 먼저 제시하세요.\n")
+
+
+def _tree_text(existing_files: list[str], limit: int | None = None) -> str:
+    files = existing_files if limit is None else existing_files[:limit]
+    tree = "\n".join(f"- {f}" for f in files) or "(빈 프로젝트)"
+    arch = getattr(existing_files, "arch", "")
+    return f"{arch}\n{tree}" if arch else tree
+
+
 def _list_project_files(root: Path, limit: int = _CODE_AGENT_TREE_LIMIT) -> list[str]:
-    """충돌 회피·맥락용 기존 파일 경로 목록(상대경로). 가벼운 트리."""
-    out: list[str] = []
+    """충돌 회피·맥락용 기존 파일 경로 목록(상대경로). 가벼운 트리.
+
+    얕은 파일 먼저, docs/ 는 뒤로 — 예전에는 이름순 깊이 우선이라 `_old/`·`docs/adr/` 가 한도를 다 쓰고
+    `services/` 는 하나도 들어가지 않았다(실사용 2026-11-21).
+    """
+    out = ProjectFiles()
     if limit <= 0:
         return out
+    found: list[tuple[int, int, str]] = []
     try:
-        # Prune before descent. Sorting rglob materialized the entire dependency
-        # tree before the 80-file limit could take effect, stalling AI requests.
         for directory, dirs, files in os.walk(root, followlinks=False):
-            dirs[:] = sorted(name for name in dirs if name not in _SKIP_DIRS)
+            dirs[:] = sorted(name for name in dirs
+                             if name not in _SKIP_DIRS and name.lower() not in _ARCHIVE_DIRS and not name.startswith("."))
             for name in sorted(files):
                 p = Path(directory) / name
                 if p.suffix.lower() in _SOURCE_EXTS or p.suffix.lower() in {
                     ".html", ".css", ".json", ".md", ".txt", ".yml", ".yaml", ".toml",
                 }:
-                    out.append(p.relative_to(root).as_posix())
-                    if len(out) >= limit:
-                        return out
+                    rel = p.relative_to(root).as_posix()
+                    parts = rel.split("/")
+                    found.append((1 if parts[0] == "docs" else 0, len(parts), rel))
+                    if len(found) >= _TREE_SCAN_CAP:
+                        break
+            if len(found) >= _TREE_SCAN_CAP:
+                break
     except Exception:
         pass
+    out.extend(rel for _, _, rel in sorted(found)[:limit])
+    out.arch = _architecture_summary(root) if out else ""
     return out
 
 
@@ -948,7 +1006,7 @@ def _build_code_prompt(
     `decisions` 는 `adr.normalize_decisions` 를 거친 목록이어야 한다.
     """
     open_file, prior_files, context_files = _scrub_context(open_file, prior_files, context_files)
-    tree = "\n".join(f"- {f}" for f in existing_files) or "(빈 프로젝트)"
+    tree = _tree_text(existing_files)
     prior_block = ""
     for pf in (prior_files or [])[:4]:
         body = _prompt_body(pf.get("content") or "", _MAX_PROMPT_BYTES)
@@ -1106,7 +1164,7 @@ def _build_plan_prompt(
 ) -> str:
     """/api/code/plan 용 프롬프트 — 코드가 아니라 '설계 결정 선택지'를 요구한다."""
     open_file, _prior, context_files = _scrub_context(open_file, None, context_files)
-    tree = "\n".join(f"- {f}" for f in existing_files) or "(빈 프로젝트)"
+    tree = _tree_text(existing_files)
 
     folder_block = ""
     if (target_folder or "").strip():
@@ -1785,7 +1843,7 @@ def _build_spec_prompt(
 ) -> str:
     """설계 결정까지 고른 요청 → "무엇이 되면 완성인가"(목표·범위·합격 조건) 초안을 요구하는 프롬프트."""
     open_file, _prior, context_files = _scrub_context(open_file, None, context_files)
-    tree = "\n".join(f"- {f}" for f in existing_files[:200]) or "(빈 프로젝트)"
+    tree = _tree_text(existing_files, 200)
     folder_block = f"\n[대상 폴더] {target_folder.strip().rstrip('/')}/\n" if (target_folder or "").strip() else ""
     ctx_block = ""
     for cf in (context_files or [])[:3]:

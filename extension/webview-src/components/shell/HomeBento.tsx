@@ -145,7 +145,7 @@ function Overview({ data, go, open }: { data: HomeData; go: Go; open: (url: stri
   //: 가장 최근에 성공한 배포 — 주소가 있는 옛 배포(예: 40일 전 ECS)를 최근 로컬 배포보다 앞세우지 않는다(실사용 2026-11-21).
   const live = entries.find(isOk) ?? null;
   const last = entries[0] ?? null;
-  const project = data.snapshot?.projectName || "프로젝트";
+  const project = data.snapshot ? (data.snapshot.projectName || "프로젝트") : "…";
   const url = live?.service_url || "";
   const failedAfter = !!last && last !== live && FAIL.has(last.status);
   const git = data.snapshot?.git;
@@ -174,7 +174,7 @@ function Overview({ data, go, open }: { data: HomeData; go: Go; open: (url: stri
       <div className="pv">
         {live ? <div className="rc-win"><div className="bar"><i /><i /><i /><span><Glyph name="lock" size={11} />{hostOf(url) || "주소 없음"}</span></div>
           <div className="view">
-            <div className="poster"><small>{live.source === "ecs" ? "Live · ECS" : "Live · 로컬 Docker"}</small><b>{project}</b><span className="rc-mono">{hostOf(url) || live.target}</span></div>
+            <div className="poster"><small>{liveNow ? "Live · ECS" : `최근 배포 · ${live.source === "ecs" ? "ECS" : "로컬 Docker"}`}</small><b>{project}</b><span className="rc-mono">{hostOf(url) || live.target}</span></div>
             {previewable(url) && <iframe title={`${project} 미리보기`} src={url} sandbox="allow-scripts" tabIndex={-1} loading="lazy" referrerPolicy="no-referrer" />}
           </div></div>
           : data.history === null ? <div className="rc-win ghost" data-testid="home-history-wait"><div className="view" style={{ inset: 0 }}><div className="poster" style={{ background: "transparent" }}>
