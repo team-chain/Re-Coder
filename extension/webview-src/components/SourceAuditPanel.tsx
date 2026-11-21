@@ -26,7 +26,7 @@ export const SourceAuditPanel:React.FC<{onFix?:(finding:Finding)=>void}>=({onFix
   {(error||state.error)&&<p role="alert" className="rc-security-error">{error||state.error}</p>}
   {state.stale&&<p role="alert">감사 중 소스가 변경됐습니다. 아래는 이전 사본의 결과이므로 수정 후 다시 검사하세요.</p>}
   {state.report&&<>
-   <p>{state.report.files.length}개 파일 검사 · 제외 {state.report.skipped.length}개 · {state.finishedAt?new Date(state.finishedAt).toLocaleString():''}</p>
+   <p>{state.report.files.length}개 파일 검사 · 제외 {state.report.skipped.length}개 · {state.finishedAt?new Date(state.finishedAt).toLocaleString('ko-KR',{hour12:false}):''}</p>
    {!state.report.findings.length&&<p>검사한 범위에서 독립 검토가 일치한 문제를 찾지 못했습니다. 전체 코드의 안전을 보장하지 않습니다.</p>}
    {state.report.findings.map((f,i)=><details key={i}><summary><strong>{f.title}</strong><small>{f.file}:{f.line} · {f.severity}</small></summary><p>{f.impact}</p><pre>{f.evidence}</pre><p>{f.fix}</p><p>{f.verification}</p><div className="rc-security-actions"><button className="rc-btn" onClick={()=>postMessage('map.openFile',{id:f.file,line:f.line})}>코드 위치 열기</button>{onFix&&<button className="rc-btn" onClick={()=>onFix(f)}>Develop에서 수정 검토</button>}</div></details>)}
    {!!state.report.needsValidation.length&&<details><summary>추가 검증 필요 {state.report.needsValidation.length}개</summary>{state.report.needsValidation.map((f,i)=><p key={i}>{f.title} — {f.reason}</p>)}</details>}

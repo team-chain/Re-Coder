@@ -10,6 +10,7 @@
  * 채워지는지 한 줄과 버튼 하나를 보여 준다. AWS 를 바꾸는 버튼은 여기 없다 — 해당 화면으로 옮겨 갈 뿐이다.
  */
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useCoreReady } from "../../hooks/useCoreReady";
 import { useVSCodeApi } from "../../hooks/useVSCodeApi";
 import type { Snapshot } from "../canvas/model";
 import type { MonitorCurrentView } from "../monitorModel";
@@ -278,6 +279,7 @@ export const HomeBento: React.FC<{ active: boolean; go: Go }> = ({ active, go })
     postMessage("home.changes");
     postMessage("journey.get");
   }, [postMessage]);
+  useCoreReady(() => { if (active) load(); });
   useEffect(() => {
     if (!active) return undefined;
     load();

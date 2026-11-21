@@ -16,7 +16,7 @@ export function outcomeOf(e:Pick<RedTeamHttpEvent,'status'|'blocked'>):Outcome{
 //: limited = 중계가 막은 요청(검사 범위 밖 경로·허용 안 된 메서드·너무 빠른 요청). 앱이 막은 것(거부)과 구분한다.
 const OUT_LABEL:Record<Outcome,string>={refused:'거부',answered:'응답',error:'오류',limited:'중계 차단'};
 /** 같은 화면을 가리키는 요청을 한 줄로 — 쿼리는 빼고 숫자·긴 ID 는 :id 로. */
-const ID_START=/^(\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|(?=[0-9a-f]*\d)[0-9a-f]{8,})(?![0-9a-z_-])/i;
+const ID_START=/^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|(?:\d+|(?=[0-9a-f]*\d)[0-9a-f]{8,})(?![0-9a-z_-]))/i;
 export function routeOf(path:string):string{
  const p=(path||'/').split('?')[0].split('#')[0]||'/';
  //: 숫자·UUID 로 시작하는 칸은 뒤에 붙은 공격 문자열(' OR 1=1 등)까지 :id 하나로 — 실사용에서 UUID 줄이 따로 생겼다.
@@ -88,7 +88,7 @@ const CSS=`
 .rc-rt-traffic .rt-routes{list-style:none;margin:0;padding:4px 0}
 .rc-rt-traffic .rt-routes li{display:grid;grid-template-columns:62px minmax(0,1fr) auto;align-items:center;gap:10px;padding:6px 12px;font-size:12px;border-left:2px solid transparent;transition:background .3s}
 .rc-rt-traffic .rt-routes .m{font-weight:600;color:var(--rc-fg2,#9AA8B8);font-variant-numeric:tabular-nums}
-.rc-rt-traffic .rt-routes code{font:12px var(--rc-mono,monospace);color:var(--rc-fg,#EEF3F8);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rc-rt-traffic .rt-routes code{background:none;padding:0;border:0;font:12px var(--rc-mono,monospace);color:var(--rc-fg,#EEF3F8);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .rc-rt-traffic .rt-routes .c{display:flex;gap:8px;white-space:nowrap;color:var(--rc-fg3,#67768A)}
 .rc-rt-traffic .rt-routes em{font-style:normal;font-variant-numeric:tabular-nums}
 .rc-rt-traffic .rt-routes em[data-o=refused]{color:var(--rc-ok,#3DD68C)}.rc-rt-traffic .rt-routes em[data-o=answered]{color:var(--rc-teal,#35A9D1)}.rc-rt-traffic .rt-routes em[data-o=error]{color:var(--rc-warn,#F2B544)}

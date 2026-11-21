@@ -1,4 +1,5 @@
 import React, {useCallback, useEffect, useRef, useState} from 'react';
+import { useCoreReady } from "../hooks/useCoreReady";
 import {useVSCodeApi} from '../hooks/useVSCodeApi';
 import {SecurityScanPanel, PolicyPanel, ScanResultLite} from './Hubs';
 import {ScanKind} from './scanQueue';
@@ -162,6 +163,7 @@ export const SecurityDashboard: React.FC<{onGo?:(view:string)=>void}> = ({onGo})
  //: 화면을 열 때 지난 공격 테스트 결과를 저장 파일에서만 읽어 온다(Docker·클라우드 호출 없음).
  const askSummary=useCallback(()=>{summaryId.current=`rt-summary-${Date.now()}-${Math.random()}`;postMessage('security.redteamSummary',{requestId:summaryId.current});},[postMessage]);
  useEffect(()=>{askSummary();},[askSummary]);
+ useCoreReady(()=>{askSummary();postMessage('journey.get');});
  const [open,setOpen]=useState<Partial<Record<Section,boolean>>>({});
  const refs={detail:useRef<HTMLDetailsElement>(null),watch:useRef<HTMLDetailsElement>(null),audit:useRef<HTMLDetailsElement>(null),attack:useRef<HTMLDetailsElement>(null),more:useRef<HTMLDetailsElement>(null)};
  const reveal=useCallback((s:Section)=>{setOpen(o=>({...o,[s]:true}));later(()=>refs[s].current?.scrollIntoView?.({block:'start',behavior:'smooth'}));
@@ -189,7 +191,7 @@ export const SecurityDashboard: React.FC<{onGo?:(view:string)=>void}> = ({onGo})
    return;}
   if(msg.type==='journey.state'){const st=((msg.payload as {steps?:Array<{key:string;status:string;summary:string;at?:string}>})?.steps||[]).find(x=>x.key==='security');setLast(st&&st.status!=='todo'&&st.status!=='locked'?{summary:st.summary,at:st.at}:null);return;}
   if(msg.type!=='security.checkResult')return;const p=msg.payload as {requestId:string;result?:Record<string,unknown>;error?:string};const entry=pending.current.get(p.requestId);if(!entry)return;
-  clearTimeout(entry.timer);pending.current.delete(p.requestId);setChecks(c=>({...c,[entry.kind]:{result:p.result,error:p.error,at:new Date().toLocaleTimeString()}}));
+  clearTimeout(entry.timer);pending.current.delete(p.requestId);setChecks(c=>({...c,[entry.kind]:{result:p.result,error:p.error,at:new Date().toLocaleTimeString('ko-KR',{hour12:false})}}));
   if(entry.kind==='recheck'&&!p.error)request('history');
  },[request,askSummary]));
  useEffect(()=>()=>{pending.current.forEach(p=>clearTimeout(p.timer));pending.current.clear();},[]);

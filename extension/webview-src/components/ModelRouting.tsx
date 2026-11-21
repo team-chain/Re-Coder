@@ -6,6 +6,7 @@
  * - 같은 요청을 두 공급자로 돌려 비용·교정 횟수·남은 오류·보안 점수를 나란히 보여 준다. 종합 승자는 정하지 않는다.
  */
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useCoreReady } from "../hooks/useCoreReady";
 import { friendlyError } from "./ui/friendlyError";
 import { Switch } from "./Check";
 import { RecommendationIcon } from "./TeamSetup";
@@ -76,6 +77,7 @@ export const ModelRouting: React.FC = () => {
   const seenRunning = useRef<string>("");
 
   const load = useCallback(() => { setError(""); postMessage("models.load"); }, [postMessage]);
+  useCoreReady(load);
   useEffect(() => { load(); return () => clearTimeout(poll.current); }, [load]);
 
   useMessage((m) => {

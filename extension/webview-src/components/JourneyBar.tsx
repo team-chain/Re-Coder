@@ -6,6 +6,7 @@
  * 상태는 Core 가 실제 결과로 남긴 기록(+ 폴더 내용)에서 온다. 화면이 임의로 "완료" 를 만들지 않는다.
  */
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useCoreReady } from "../hooks/useCoreReady";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import { Glyph } from "./shell/parts";
 import { requestFocus } from "./focusIntent";
@@ -49,6 +50,7 @@ export const JourneyBar: React.FC<{ view: string; onGo: (view: string) => void }
   const recorded = useRef<string>("");
   const offered = useRef(false);
   const refresh = useCallback(() => postMessage("journey.get"), [postMessage]);
+  useCoreReady(refresh);
   useEffect(() => { refresh(); }, [refresh, view]);
   useEffect(() => {
     const id = window.setInterval(refresh, 20000);

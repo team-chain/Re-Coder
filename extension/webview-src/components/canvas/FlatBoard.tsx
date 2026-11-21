@@ -6,6 +6,7 @@
  * 프로젝트 카드의 서비스 목록과 로컬 실행 상태는 명세(spec.load)에서 읽는다.
  */
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCoreReady } from "../../hooks/useCoreReady";
 import { useVSCodeApi } from "../../hooks/useVSCodeApi";
 import { BRAND_GLYPHS } from "./brandIcons";
 import type { SceneNode, Target } from "./model";
@@ -96,6 +97,7 @@ export const FlatBoard: React.FC<{
   const [specFailed, setSpecFailed] = useState(false);
   const askSpec = useCallback(() => { req.current = `board-${Date.now()}`; postMessage("spec.load", { requestId: req.current }); }, [postMessage]);
   useEffect(() => { if (initialSpec) return; tries.current = 0; setSpecFailed(false); askSpec(); }, [askSpec, workspaceKey, initialSpec]);
+  useCoreReady(() => { if (!initialSpec) { tries.current = 0; setSpecFailed(false); askSpec(); } });
   useMessage(useCallback(({ type, payload }) => {
     const p = (payload ?? {}) as { requestId?: string; spec?: Spec };
     if (type === "spec.result" && p.requestId === req.current && p.spec) { setSpec(p.spec); setSpecFailed(false); }

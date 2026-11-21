@@ -5,6 +5,7 @@
  *  · 태그 없는 옛 리소스는 "수동 확인 필요" 로 보여 주기만 한다(코어도 지우지 않는다).
  */
 import React, { useCallback, useEffect, useState } from "react";
+import { awsNotes } from "./awsErrors";
 import { MarkGlyph } from "./ui/marks";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import { Checkbox } from "./Check";
@@ -167,7 +168,7 @@ export const AwsCleanupPanel: React.FC<{ defaultRegion?: string }> = ({ defaultR
           <div style={{ ...muted, marginBottom: 6 }} data-testid="cleanup-summary">
             실행 중 태스크 {plan.summary.running_tasks}개 · 로드밸런서 {plan.summary.load_balancers}개 · WAF {plan.summary.web_acls}개 · 이미지 {plan.summary.image_mb.toLocaleString()} MB
           </div>
-          {plan.gaps.map(g => <div key={g} style={{ ...muted, color: "var(--rc-warn, #cca700)" }}>{g}</div>)}
+          {awsNotes(plan.gaps).map(g => <div key={g} style={{ ...muted, color: "var(--rc-warn, #cca700)" }}>{g}</div>)}
           {plan.groups.length === 0 && <div style={muted}>이 리전에 ReCoder 가 만든 리소스가 없습니다.</div>}
           {plan.groups.map(g => (
             <CleanupGroup key={g.service} group={g} picked={picked} disabled={busy} stopping={stopping}

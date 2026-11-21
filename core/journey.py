@@ -67,6 +67,40 @@ def record(workspace: str | Path | None, step: str, status: str, summary: str = 
         print(f"[journey] 기록 실패({step}): {exc}", flush=True)
 
 
+_SECURITY_TOOLS = {"code": "코드", "gitleaks": "시크릿", "hadolint": "Dockerfile", "trivy": "이미지"}
+
+
+def security_part(workspace: str | Path | None, tool: str, ran: bool, critical: int = 0, high: int = 0, medium: int = 0) -> None:
+    """보안 검사 한 갈래(코드·시크릿·Dockerfile·이미지)의 결과를 남기고, 갈래를 합쳐 「보안 검사」 단계를 다시 쓴다.
+
+    예전에는 코드 규칙 검사만 단계를 남겨서, 이미지에서 위험이 나와도 진행 흐름은 「심각한 발견 없음 · 완료」 였다(실사용 2026-11-21).
+    """
+    if not workspace or tool not in _SECURITY_TOOLS:
+        return
+    try:
+        path = _file(workspace)
+        with _lock:
+            data = load(workspace)
+            parts = data.get("security_parts") if isinstance(data.get("security_parts"), dict) else {}
+            parts[tool] = {"ran": bool(ran), "critical": int(critical or 0), "high": int(high or 0), "medium": int(medium or 0),
+                           "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+            data["security_parts"] = parts
+            serious = sum(p["critical"] + p["high"] for p in parts.values())
+            medium_total = sum(p["medium"] for p in parts.values())
+            missed = [_SECURITY_TOOLS[t] for t, p in parts.items() if not p["ran"]]
+            done = "·".join(_SECURITY_TOOLS[t] for t in _SECURITY_TOOLS if t in parts and parts[t]["ran"])
+            status = "failed" if serious else "unverified" if missed else "done"
+            summary = (f"심각·높음 {serious}건" if serious else "심각·높음 없음") + (f" · 중간 {medium_total}건" if medium_total else "")
+            summary += f" ({done or '검사 없음'})" + (f" · 못 한 검사: {', '.join(missed)}" if missed else "")
+            data["security"] = {"status": status, "summary": summary[:300], "at": parts[tool]["at"]}
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+            os.replace(tmp, path)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[journey] 보안 검사 기록 실패({tool}): {exc}", flush=True)
+
+
 def _has_code(root: Path) -> bool:
     count = 0
     for dirpath, dirnames, filenames in os.walk(root):

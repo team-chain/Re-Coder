@@ -37,11 +37,15 @@ class Relay(http.server.BaseHTTPRequestHandler):
     def handle_request(self):
         global count,last
         start=time.monotonic()
+        # Pace instead of refusing bursts: each request takes the next 0.2s slot (at most ~5s queue).
+        # Refusing reset the clock on every rejected request, so parallel probes were mostly 429 (field run 2026-11-21).
         with lock:
             count+=1
             eid=count
-            permitted=eid<=300 and start-last>=0.20
-            last=start
+            slot=max(start,last+0.20)
+            permitted=eid<=300 and slot-start<=5.0
+            if permitted: last=slot
+        if permitted and slot>start: time.sleep(slot-start)
         status=502
         blocked=False
         response=b''

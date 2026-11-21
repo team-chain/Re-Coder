@@ -5,6 +5,7 @@
  *  · 밤에는 감시자가 감지 · 기록 · 알림 · 준비까지만 한다. AWS 를 바꾸는 버튼은 모두 확인을 한 번 더 거친다.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCoreReady } from "../hooks/useCoreReady";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import { Button, Kit, Line } from "./ui/kit";
 import { Icon } from "./ui/icons";
@@ -385,6 +386,7 @@ export const MonitorPage: React.FC<{ active: boolean; onOpenDeploy: () => void; 
     reqRef.current = `mon-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     setLoading(true); postMessage("monitor.load", { key: k, requestId: reqRef.current });
   }, [postMessage]);
+  useCoreReady(() => load());
   useEffect(() => {
     if (!active) { seenAtOpen.current = {}; return; }
     load();

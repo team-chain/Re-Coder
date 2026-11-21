@@ -143,7 +143,7 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({
     <Kit className="rc-diag"><style>{DIAG_CSS}</style>
       <div className="hd">
         <b>시스템 점검</b>
-        <small>{readyCount}/{CHECK_ITEMS.length} 정상{diagnostics.validation_time && ` · ${new Date(diagnostics.validation_time).toLocaleTimeString()}`}</small>
+        <small>{readyCount}/{CHECK_ITEMS.length} 정상{diagnostics.validation_time && ` · ${new Date(diagnostics.validation_time).toLocaleTimeString('ko-KR',{hour12:false})}`}</small>
         <span className="sp" />
         <Button small variant="ghost" onClick={handleRetry} disabled={retrying}>{retrying ? "점검 중…" : "다시 점검"}</Button>
       </div>

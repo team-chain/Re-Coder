@@ -56,12 +56,12 @@ const LegacyRedTeamPanel: React.FC = () => {
   {state.engine&&<EngineCacheRow engine={state.engine} busy={busy} blocked={localActive} send={send}/>}
   <p role="status" aria-live="polite">{busy?'요청 처리 중…':local?`${local.outcome?OUTCOME[local.outcome]+' · ':''}${local.step}`:'대상 선택 → 환경 준비 → 검사 → 결과 저장 · 환경 삭제'}</p>
   {(error||local?.error)&&<p role="alert" className="rc-security-error">{error||local?.error}</p>}
-  {local&&<p>{local.target} · {new Date(local.createdAt).toLocaleString()}</p>}
+  {local&&<p>{local.target} · {new Date(local.createdAt).toLocaleString('ko-KR',{hour12:false})}</p>}
   {local?.phase==='removed'&&<p>검사 컨테이너·DB·볼륨·네트워크를 삭제했습니다. 아래 결과와 재사용할 이미지 캐시는 남아 있습니다.</p>}
   {local?.flow?.status==='waiting'&&localActive&&<p>검사 도구가 입력을 기다리고 있습니다. 필요한 경우 중단한 뒤 대상을 다시 확인하세요.</p>}
   {local&&<RedTeamRunView key={local.session} active={localActive&&!error} phase={local.phase} step={error?'연결 확인 중 · 마지막 수신 기록':local.step} outcome={local.outcome} target={local.target} tasks={local.tasks} assessment={local.assessment} cleaned={local.phase==='removed'} updatedAt={local.updatedAt} httpEvents={local.httpEvents||[]} isolationVerified={local.isolationVerified} controls={localActive&&<button className="rc-btn" disabled={busy} onClick={()=>send('localStop')}>중단 · 환경 삭제</button>}/>}
   {local&&<details><summary>원본 기록 · 검증되지 않은 AI 설명 포함</summary><button className="rc-btn" disabled={busy} onClick={()=>send('localOpenRawReport')}>원본 JSON 열기</button>{local.evidence?.map(m=><details key={m.id}><summary>{m.type==='ask'?'추가 확인 요청':'AI 보고 원문'}</summary><pre>{m.message}{m.result?'\n'+m.result:''}</pre></details>)}</details>}
-  {!!state.localHistory?.length&&<details><summary>이전 검사 {state.localHistory.length}개</summary>{state.localHistory.map(r=><details key={r.session}><summary>{new Date(r.createdAt).toLocaleString()} · {OUTCOME[r.outcome||'']||r.step}</summary><p>{r.target} · {r.step}</p>{r.tasks?.map(t=><pre key={t.id}>{t.title}{'\n'}{t.result}</pre>)}</details>)}</details>}
+  {!!state.localHistory?.length&&<details><summary>이전 검사 {state.localHistory.length}개</summary>{state.localHistory.map(r=><details key={r.session}><summary>{new Date(r.createdAt).toLocaleString('ko-KR',{hour12:false})} · {OUTCOME[r.outcome||'']||r.step}</summary><p>{r.target} · {r.step}</p>{r.tasks?.map(t=><pre key={t.id}>{t.title}{'\n'}{t.result}</pre>)}</details>)}</details>}
   <details><summary>실행 조건 · 연결 설정</summary><p>Docker Desktop Linux 엔진과 OpenAI 또는 Anthropic 키를 사용합니다. 환경 준비는 최대 60분, 검사는 최대 30분입니다. 모델 사용료가 발생할 수 있습니다. 결과는 검토할 근거이며 안전 보증이 아닙니다.</p><p>검사 도구의 외부 네트워크를 분리하고 승인한 앱의 경로로만 요청을 전달합니다. 앱에서 다른 서비스로 이어지는 동작은 별도 검증이 필요합니다. 최대 300개 요청, GET·HEAD·OPTIONS·POST만 허용합니다.</p><p>VS Code를 닫아도 검사와 정리가 이어집니다. PC나 Docker가 종료되면 다시 켠 후 환경 정리를 재시도할 수 있습니다.</p><div className="rc-security-actions"><button className="rc-btn" disabled={busy} onClick={()=>send('localKey')}>모델 키 변경</button>{state.engine?.warm&&<button className="rc-btn" disabled={busy||localActive||prewarming} onClick={()=>send('localCacheClear')}>검사 도구 보관 공간 비우기</button>}<button className="rc-btn" disabled={busy||localActive} onClick={()=>{setState({});setLocalMode(false);}}>별도 PentAGI 서버 연결</button></div></details>
  </div>;
  return <div className="rc-security-detail" aria-busy={busy}>
@@ -75,7 +75,7 @@ const LegacyRedTeamPanel: React.FC = () => {
   </div>
   <p role="status">{busy?'요청 처리 중…':state.configured?`연결됨 · ${state.server}`:'별도 PentAGI 서버와 모델 공급자 설정이 필요합니다. 기존 검사는 연결 없이 사용할 수 있습니다.'}</p>
   {error&&<p role="alert" className="rc-security-error">{error}</p>}
-  {run&&<p>{run.target} · {new Date(run.createdAt).toLocaleString()}<br/>{run.uncertain?'실행 여부 미확인 — 새로 실행하지 말고 서버에서 실행 ID를 복구하세요.':OUTCOME[state.outcome||'']||STATUS[state.flow?.status||'']||'상태 확인 필요'}{run.stopped?' · 중단 요청 수락됨':''}</p>}
+  {run&&<p>{run.target} · {new Date(run.createdAt).toLocaleString('ko-KR',{hour12:false})}<br/>{run.uncertain?'실행 여부 미확인 — 새로 실행하지 말고 서버에서 실행 ID를 복구하세요.':OUTCOME[state.outcome||'']||STATUS[state.flow?.status||'']||'상태 확인 필요'}{run.stopped?' · 중단 요청 수락됨':''}</p>}
   {state.reportError&&<p role="alert" className="rc-security-error">{state.reportError}</p>}
   {run&&<RedTeamRunView key={run.id} active={!run.terminal&&!error} phase={state.flow?.status} outcome={state.outcome} target={run.target} tasks={state.tasks} assessment={state.assessment} step={error?'연결 확인 중 · 마지막 수신 기록':OUTCOME[state.outcome||'']||STATUS[state.flow?.status||'']} controls={run?.id&&!run.terminal&&<button className="rc-btn" disabled={busy} onClick={()=>send('stop')}>검사 중단</button>}/>}
   {(state.runs?.length??0)>1&&<details><summary>이전 실행 {state.runs!.length-1}개</summary>{state.runs!.slice(1).map((r,i)=><p key={i}>{r.createdAt} · {r.target} · Flow {r.id||'미확인'}</p>)}</details>}

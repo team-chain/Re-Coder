@@ -18,3 +18,7 @@ test('ADR 본문: **굵게** 기호가 그대로 보이지 않고, 머리줄과 
  const html=renderToStaticMarkup(React.createElement(AdrBody,{text:'# ADR-1: 결제\n\n**키 없이** 실행\n- `stripe` 없음',skipTitle:'ADR-1: 결제'}));
  assert.doesNotMatch(html,/\*\*/);assert.match(html,/<strong>키 없이<\/strong>/);assert.match(html,/<code[^>]*>stripe<\/code>/);assert.doesNotMatch(html,/ADR-1: 결제/);
 });
+test('AWS 정리 목록의 권한 오류도 한국어 한 줄(계정 번호 없음)',()=>{
+ const g='ECS: 확인하지 못했습니다 — User: arn:aws:iam::419784061854:user/recoder-deploy is not authorized to perform: ecs:ListClusters on resource: * because no identity-based policy allows the ecs:ListClusters action';
+ assert.deepEqual(awsNotes([g]),['ECS · AWS 권한이 없어요 — recoder-deploy 에 ecs:ListClusters 권한을 추가하세요']);
+});

@@ -10,6 +10,7 @@
  * "전체 아키텍처 보기"는 같은 화면인데 다른 항목처럼 보였다.
  */
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useCoreReady } from "../hooks/useCoreReady";
 import { HubIcon, HubIconName } from "./HubIcons";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import { useSelfHeal } from "../hooks/useSelfHeal";
@@ -276,6 +277,7 @@ export const AdrPanel: React.FC = () => {
   const [error, setError] = useState<string>("");
 
   useEffect(() => { postMessage("adr.list", {}); }, [postMessage]);
+  useCoreReady(() => postMessage("adr.list", {}));
   useMessage(useCallback((msg) => {
     if (msg.type === "adr.listResult") {
       const p = msg.payload as { items?: AdrItem[]; error?: string };

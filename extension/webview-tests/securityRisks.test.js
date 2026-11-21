@@ -172,6 +172,7 @@ test('route rows merge UUIDs even with payload suffixes, task titles hide Englis
  assert.equal(routeOf('/api/products/7c097324-f1da-4002-8dc2-54afe3b1f00a'),'/api/products/:id');
  assert.equal(routeOf("/api/products/7c097324-f1da-4002-8dc2-54afe3b1f00a'%20OR%201=1--"),'/api/products/:id');
  assert.equal(routeOf('/api/v2/orders'),'/api/v2/orders');
+ assert.equal(routeOf('/api/products/d168d877-3fd3-41c2-b898-67dae1f22c0aXYZ'),'/api/products/:id','UUID 뒤에 무엇이 붙어도 한 줄로');assert.equal(routeOf('/api/2fa'),'/api/2fa');
  const {taskLabel}=require('../out/webview-test/components/RedTeamRunView');
  assert.equal(taskLabel('Authorized Black-Box Security Assessment of Isolated Test Application at http://172.30.0.10:8080',0),'AI 공격 작업 1');
  assert.equal(taskLabel('로그인 우회 시도 http://172.30.0.10:8080',1),'로그인 우회 시도');

@@ -3734,9 +3734,20 @@ async def run_scan(request: ScanRequest) -> dict:
     ``{status: "error", message: "..."}``. Only invalid ``scan_type`` raises
     HTTP 400.
     """
-    return await _execute_scan(
+    result = await _execute_scan(
         request.scan_type, request.workspace_path, request.target_path
     )
+    #: 프로젝트 전체 검사(대상 지정 없음)만 진행 흐름의 「보안 검사」 에 합친다.
+    if request.workspace_path and not request.target_path and isinstance(result, dict):
+        try:
+            import journey
+            ran = result.get("status") == "ok" and not result.get("unverified_targets")
+            await asyncio.to_thread(journey.security_part, request.workspace_path, request.scan_type, ran,
+                                    int(result.get("critical_count") or 0), int(result.get("high_count") or 0),
+                                    int(result.get("medium_count") or 0))
+        except Exception:  # noqa: BLE001 - 기록 실패가 검사 결과를 막지 않는다
+            pass
+    return result
 
 
 _SKIP_DIRS = {"node_modules", ".git", "_old", "dist", "build", ".venv", "venv", "__pycache__"}

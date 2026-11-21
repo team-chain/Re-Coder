@@ -154,9 +154,8 @@ async def code_scan(body: CodeScanRequest) -> dict:
     result = await asyncio.to_thread(code_security.report, files)
     try:
         import journey
-        high = sum(1 for f in result.get("findings") or [] if str(f.get("severity")).lower() in ("critical", "high"))
-        journey.record(root, "security", "failed" if high else "done",
-                       f"코드 보안 점수 {result.get('score', '?')}점" + (f" · 심각·높음 {high}건" if high else " · 심각한 발견 없음"))
+        sev = [str(f.get("severity")).lower() for f in result.get("findings") or []]
+        journey.security_part(root, "code", True, critical=sev.count("critical"), high=sev.count("high"), medium=sev.count("medium"))
     except Exception:  # noqa: BLE001 - 기록 실패가 검사 결과를 막지 않는다
         pass
     return {**result, 'files_checked': len(files), 'engine': 'recoder-rules',

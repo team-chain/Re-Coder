@@ -53,4 +53,7 @@ test('real loopback relay enforces scope, forwards to one app and omits secrets 
  assert.equal(hits.length,1);assert.equal(hits[0].host,config.authority);
  const journal=await fs.readFile(config.journal,'utf8');assert.ok(!journal.includes('PRIVATE_QUERY'));assert.ok(!journal.includes('PRIVATE_TOKEN'));assert.ok(!journal.includes('unapproved.example'));
  const events=journal.trim().split('\n').map(JSON.parse);assert.equal(events.length,7);assert.equal(events[0].path,'/app/search');assert.equal(events[0].blocked,false);assert.ok(events.slice(1).every(e=>e.blocked));
+ //: 한꺼번에 온 요청은 거절하지 않고 0.2초 간격으로 차례대로 보낸다(실사용: 병렬 탐색이 대부분 429 로 막혔다).
+ const burst=await Promise.all([1,2,3,4,5].map(i=>new Promise((resolve,reject)=>{const req=http.request({hostname:'127.0.0.1',port,path:'/app/burst'+i,method:'GET'},res=>{res.resume();res.on('end',()=>resolve(res.statusCode));});req.on('error',reject);req.end();})));
+ assert.deepEqual(burst,[200,200,200,200,200]);assert.equal(hits.length,6);
 });

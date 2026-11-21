@@ -1,5 +1,6 @@
 /** Saved deployment history, with a separate review step before rollback. */
 import React, { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { useCoreReady } from "../hooks/useCoreReady";
 import { useVSCodeApi } from "../hooks/useVSCodeApi";
 import { serviceLink } from "./EcsDeploymentProgress";
 import { friendlyError } from "./ui/friendlyError";
@@ -186,6 +187,7 @@ export const Replay: React.FC = () => {
     const requestId = `${instance.current}-${++sequence.current}`;
     dispatch({ type: "load", requestId }); postMessage("replay.history", { requestId });
   }, [postMessage]);
+  useCoreReady(() => load());
   useEffect(() => { load(); }, [load]);
   useMessage(useCallback(({ type, payload }) => {
     const p = payload as { requestId: string; history: HistoryData; message?: string; status?: string; warning?: string; auditWarning?: string };

@@ -94,7 +94,7 @@ export function EcsDeploymentProgress({ state }: { state: EcsProgressState }) {
       {!state.submitting && !status && <p role="status">{state.expectedId ? "새 배포의 상태를 확인하는 중…" : "배포 상태를 확인하는 중…"}</p>}
       {status && <>
         <div role="status" style={{ marginTop: 6, fontWeight: 600 }}>{status.stage === "idle" && !status.deployment_id ? "아직 ECS 배포 기록이 없습니다." : title}</div>
-        {status.started_at && <div style={{ color: colors.pending }}>시작: {new Date(status.started_at).toLocaleString()}</div>}
+        {status.started_at && <div style={{ color: colors.pending }}>시작: {new Date(status.started_at).toLocaleString('ko-KR',{hour12:false})}</div>}
         {!!status.steps?.length && (status.running || status.stage === "done" || status.stage === "failed") && (() => {
           const steps = status.steps!;
           const failedStep = steps.findIndex(s => s.status === "failed");

@@ -1,6 +1,7 @@
 /** ReCoder workspace and sidebar: Develop, Deploy, Security, and shared status. */
 
 import React, { useState, useCallback, useEffect, useRef } from "react";
+import { CORE_READY_EVENT } from "./hooks/useCoreReady";
 import { useVSCodeApi } from "./hooks/useVSCodeApi";
 import { useHostLink } from "./hooks/useHostLink";
 import { loadUiState, saveUiState } from "./hooks/useVSCodeApi";
@@ -480,6 +481,13 @@ const App: React.FC = () => {
   const { postMessage, useMessage } = useVSCodeApi();
   const isWorkspacePanel = typeof document !== "undefined" && document.documentElement.dataset.recoderLayout === "workspace";
   const { coreHealth, costSummary } = usePolling(4000);
+  //: Core 가 연결 안 됨 → 연결됨으로 바뀌면 화면들이 실패한 읽기를 다시 한다(useCoreReady).
+  const coreOk = coreHealth?.status === "ok";
+  const wasCoreOk = useRef(false);
+  useEffect(() => {
+    if (coreOk && !wasCoreOk.current) window.dispatchEvent(new Event(CORE_READY_EVENT));
+    wasCoreOk.current = coreOk;
+  }, [coreOk]);
   const hostLost = useHostLink(postMessage, useMessage);
 
   //: 다시 그려져도(창 다시 불러오기·확장 재시작) 보던 화면으로 돌아온다.
