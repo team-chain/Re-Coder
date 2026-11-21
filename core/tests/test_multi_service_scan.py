@@ -45,6 +45,7 @@ def test_merged_result_counts_every_service_and_never_hides_a_failed_one(tmp_pat
 
     async def fake(scan_type, workspace_path, target):
         calls.append(target)
+        target = target.replace("\\", "/")  # Windows 경로도 같은 규칙으로
         if target.endswith("orders/Dockerfile"):
             return {"status": "error", "findings": []}
         n = 1 if "web" in target else 0
