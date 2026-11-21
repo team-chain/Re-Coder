@@ -21,7 +21,8 @@ async function main(){
   await fs.mkdir(path.join(scratch,'source'));await fs.mkdir(path.join(scratch,'runtime'));
   await fs.writeFile(path.join(scratch,'source','Dockerfile'),'FROM python:3.12-alpine\nWORKDIR /app\nCOPY app.py /app/app.py\nUSER 65534:65534\nCMD ["python", "/app/app.py"]\n');
   await fs.writeFile(path.join(scratch,'source','app.py'),'print("recoder-owned-fixture")\n');
-  for(const file of ['managedScans.js','localPentagi.js','pentagiClient.js'])await fs.copyFile(path.join(extension,'out/security',file),path.join(scratch,'runtime',file));
+  //: managedScans 가 불러오는 모듈이 늘어도 빠지지 않게 out/security 의 스크립트를 모두 복사한다(목록을 손으로 두면 새 모듈에서 'Cannot find module').
+  for(const file of (await fs.readdir(path.join(extension,'out/security'))).filter(f=>f.endsWith('.js')))await fs.copyFile(path.join(extension,'out/security',file),path.join(scratch,'runtime',file));
   await fs.copyFile(path.join(extension,'media/security-audit/deploy.rego'),path.join(scratch,'runtime/policy.rego'));
   process.chdir(scratch);
   const {runManagedScans}=require(path.join(scratch,'runtime/managedScans.js'));

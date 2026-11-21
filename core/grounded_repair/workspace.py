@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import os
 import shutil
@@ -148,13 +149,24 @@ class DockerVerifier:
     """Build only. Cloud/runtime failures require a different environment verifier."""
 
     identity = "docker-build-v1"
+    #: 하위 클래스가 __init__ 을 부르지 않아도 기본값이 있게 클래스 속성으로 둔다.
+    service = ""
 
     def __init__(self, service: str = ""):
         self.service = service
 
     def for_log(self, log: str) -> "DockerVerifier":
-        """여러 서비스 프로젝트 — 빌드 로그에서 실패한 서비스를 찾아 그 폴더만 다시 빌드한다(실사용 2026-11-18)."""
-        return DockerVerifier(failed_service(log))
+        """여러 서비스 프로젝트 — 빌드 로그에서 실패한 서비스를 찾아 그 폴더만 다시 빌드한다(실사용 2026-11-18).
+
+        새 DockerVerifier 를 만들면 감싼 검증기(하위 클래스·계수기)가 빠진다 — 같은 종류를 복사해 서비스만 바꾼다.
+        로그에서 서비스를 못 찾으면 자기 자신을 그대로 쓴다.
+        """
+        service = failed_service(log)
+        if not service or service == getattr(self, "service", ""):
+            return self
+        bound = copy.copy(self)
+        bound.service = service
+        return bound
 
     def context(self, workspace: Path) -> str | None:
         """빌드할 폴더 — 루트 Dockerfile 이 있으면 루트, 없으면 실패한 서비스(또는 하나뿐인 서비스) 폴더."""

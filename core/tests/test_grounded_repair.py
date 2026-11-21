@@ -393,3 +393,24 @@ def test_web_image_builds_on_glibc_so_native_build_tools_load():
     arch, _ = A.normalize({"services": [{"name": "web", "kind": "web", "port": 3000, "public": True}]})
     text = K.render_dockerfile(arch["services"][0])
     assert "FROM node:22-bookworm-slim AS build" in text and "FROM nginx:1.30.7-alpine" in text and "USER nginx" in text
+
+
+def test_for_log_keeps_wrapped_verifier_and_only_rebinds_service():
+    """CI 스모크(smoke_execution_policy)가 잡은 회귀: for_log 가 새 DockerVerifier 를 만들어 감싼 검증기를 건너뛰었다."""
+    from grounded_repair.workspace import DockerVerifier
+
+    class Counting(DockerVerifier):
+        def __init__(self):  # 부모 __init__ 을 부르지 않는 하위 클래스도 동작해야 한다
+            self.calls = 0
+
+        def __call__(self, root):
+            self.calls += 1
+            return {"passed": True}
+
+    base = Counting()
+    assert base.for_log("COPY payload.txt /payload.txt/child.txt: not a directory") is base
+    assert base.service == ""
+    bound = base.for_log("target orders: failed to solve: process did not complete")
+    assert isinstance(bound, Counting) and bound.service == "orders" and base.service == ""
+    bound("x")
+    assert bound.calls == 1
