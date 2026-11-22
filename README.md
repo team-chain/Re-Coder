@@ -22,7 +22,7 @@ From Prompt to Production — 만드는 속도만큼, 안전하게.
 ![Amazon Bedrock](https://img.shields.io/badge/Amazon_Bedrock-232F3E?style=flat-square)
 ![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat-square&logo=docker&logoColor=white)
 
-[**시연 영상**](https://youtu.be/8W2SarV1orU) &nbsp;·&nbsp; [**발표 자료**](발표자료/ReCoder_2학기_중간발표.pptx) &nbsp;·&nbsp; [**구현 설계서**](docs/ReCoder_구현설계서_v2.md) &nbsp;·&nbsp; [**설치 · 실행**](#설치--실행)
+[**시연 영상**](https://youtu.be/8W2SarV1orU) &nbsp;·&nbsp; [**발표 자료**](발표자료/ReCoder_2학기_중간발표.pptx) &nbsp;·&nbsp; [**구현 설계서**](docs/design/ReCoder_구현설계서_v2.md) &nbsp;·&nbsp; [**설치 · 실행**](#설치--실행)
 
 </div>
 
@@ -335,7 +335,7 @@ flowchart LR
 - **"문서를 붙이면 좋아진다"는 가설은 이번 실험에서 확인되지 않았습니다.** 대형 모델 단독(A)이 해결률이 가장 높고 해결당 비용도 가장 낮았습니다.
 - 로직 오류 대조군 6개는 문서 근거 조건(B · D)에서 자동 수정 0건 — 로직 오류는 자동 수정 대신 사람의 검토로 넘깁니다.
 - 조건별 1회(seed 42) 탐색 실험이며 통계적 우월성을 뜻하지 않습니다. 총 모델 사용료 추정 $5.49 (승인 상한 $30).
-- 상세: [실험 보고서](benchmarks/repair/RESULTS.md) · [문서 근거 수정 설계](docs/document-grounded-repair.md)
+- 상세: [실험 보고서](benchmarks/repair/RESULTS.md) · [문서 근거 수정 설계](docs/design/document-grounded-repair.md)
 
 </details>
 
@@ -381,7 +381,7 @@ AI 에이전트가 사용자 PC에서 코드를 만들고 실행하는 만큼, R
 | 의존성 감사 | 루트 · 확장 · 쇼핑몰 npm, 세 플랫폼 Python 배포 목록에서 알려진 취약점 0 |
 
 > [!NOTE]
-> 실제 AWS 계정 검증은 2026-10-09 기준입니다. 이후 2.0.25~2.0.36에서 추가한 WAF · CloudFront · ACM · RDS 자동 생성, 원본 잠금, OSV 재검사는 모의 AWS(moto) · 로컬 · 실제 nginx로 검증했습니다. 모의 결제 통과는 실제 결제사 승인을 뜻하지 않습니다. 자세한 범위는 [생성 · 배포 · 보안 검증 범위](docs/production-readiness.md)를 참고하세요.
+> 실제 AWS 계정 검증은 2026-10-09 기준입니다. 이후 2.0.25~2.0.36에서 추가한 WAF · CloudFront · ACM · RDS 자동 생성, 원본 잠금, OSV 재검사는 모의 AWS(moto) · 로컬 · 실제 nginx로 검증했습니다. 모의 결제 통과는 실제 결제사 승인을 뜻하지 않습니다. 자세한 범위는 [생성 · 배포 · 보안 검증 범위](docs/verification/production-readiness.md)를 참고하세요.
 
 <br>
 
@@ -465,16 +465,16 @@ python scripts/golden_path_smoke.py --live
 
 | 문서 | 내용 |
 |---|---|
-| [구현 설계서 v2](docs/ReCoder_구현설계서_v2.md) | **2.0.36 기준** 컴포넌트 · 파이프라인 · API · 보안 · 검증 · 한계 |
-| [구현 설계서 v1](docs/ReCoder_구현설계서_v1.md) | 1학기 MVP 기준 (게이트웨이 · S3 정적 배포) |
-| [설계 확정서 (ADR 20)](docs/ReCoder_설계_확정서_ADR.md) | AI-DLC로 확정한 설계 결정 20개 |
+| [구현 설계서 v2](docs/design/ReCoder_구현설계서_v2.md) | **2.0.36 기준** 컴포넌트 · 파이프라인 · API · 보안 · 검증 · 한계 |
+| [구현 설계서 v1](docs/design/ReCoder_구현설계서_v1.md) | 1학기 MVP 기준 (게이트웨이 · S3 정적 배포) |
+| [설계 확정서 (ADR 20)](docs/design/ReCoder_설계_확정서_ADR.md) | AI-DLC로 확정한 설계 결정 20개 |
 | [SETUP.md](SETUP.md) | 운영자용 설치 · 실행 가이드 |
-| [API 명세](docs/API_v10.md) | Local Core REST API 공통 규칙 · 엔드포인트 |
-| [생성 · 배포 · 보안 검증 범위](docs/production-readiness.md) | 쇼핑몰 기반, 실제 Docker · AWS 검증과 남은 제한 |
-| [문서 근거 수정](docs/document-grounded-repair.md) | RAG 색인 · 검색 · 실험 설계 |
+| [API 명세](docs/design/API_v10.md) | Local Core REST API 공통 규칙 · 엔드포인트 |
+| [생성 · 배포 · 보안 검증 범위](docs/verification/production-readiness.md) | 쇼핑몰 기반, 실제 Docker · AWS 검증과 남은 제한 |
+| [문서 근거 수정](docs/design/document-grounded-repair.md) | RAG 색인 · 검색 · 실험 설계 |
 | [쇼핑몰 통합 검사](benchmarks/commerce/README.md) | 독립 DB와 모의 결제로 주문 · 재고 · 권한 검증 재현 |
 | [팀 벤치마크](benchmarks/team/README.md) | 혼자 · 팀 · 팀+테스트 비교, 사람이 쓴 판정 시험과 기준 구현 |
-| [AWS 최소 권한](docs/aws-minimum-permissions.md) | 배포에 필요한 IAM 권한 |
+| [AWS 최소 권한](docs/guides/aws-minimum-permissions.md) | 배포에 필요한 IAM 권한 |
 | [변경 기록](extension/CHANGELOG.md) | 버전별 변경 내용 |
 
 <br>

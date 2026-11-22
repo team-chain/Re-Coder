@@ -6,7 +6,7 @@
 >
 > **표기** 🟢 구현 · 검증 완료 &nbsp;/&nbsp; 🟡 구현됨(선택 구성 · 실제 AWS 미확인 · 부분) &nbsp;/&nbsp; ⚪ 계획
 >
-> **관련 문서** [구현 설계서 v1 (1학기 MVP)](ReCoder_구현설계서_v1.md) · [설계 확정서 (ADR 20)](ReCoder_설계_확정서_ADR.md) · [API 명세](API_v10.md) · [검증 범위](production-readiness.md) · [문서 근거 수정](document-grounded-repair.md)
+> **관련 문서** [구현 설계서 v1 (1학기 MVP)](ReCoder_구현설계서_v1.md) · [설계 확정서 (ADR 20)](ReCoder_설계_확정서_ADR.md) · [API 명세](API_v10.md) · [검증 범위](../verification/production-readiness.md) · [문서 근거 수정](document-grounded-repair.md)
 
 ---
 
@@ -84,7 +84,7 @@ ReCoder는 VS Code 확장으로 동작하는 **AI DevOps 에이전트**다. 자�
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/readme/flow-dark.png">
-  <img src="images/readme/flow-light.png" alt="설계 결정, 생성·빌드 검증, 보안 게이트, 승인 후 배포, 5분 감시로 이어지는 ReCoder 흐름">
+  <img src="../images/readme/flow-light.png" alt="설계 결정, 생성·빌드 검증, 보안 게이트, 승인 후 배포, 5분 감시로 이어지는 ReCoder 흐름">
 </picture>
 
 1. **요청** — 채팅에 만들고 싶은 것을 적는다.
@@ -100,7 +100,7 @@ ReCoder는 VS Code 확장으로 동작하는 **AI DevOps 에이전트**다. 자�
 
 ### 2.1 전체 구조
 
-![ReCoder 서비스 아키텍처](images/readme/architecture.png)
+![ReCoder 서비스 아키텍처](../images/readme/architecture.png)
 
 | 연결 | 방식 | 내용 |
 |---|---|---|
@@ -657,7 +657,7 @@ VS Code 인증 세션(`vscode.authentication.getSession('github')`)으로 받은
 - **Watchdog**: EC2에서 `watchdog/install.sh`(전용 가상환경 · systemd 서비스).
 - **정리**: 운영 화면의 「AWS 리소스 정리」에서 리전 선택 → 중지 또는 완전 삭제.
 
-자세한 절차는 [SETUP.md](../SETUP.md)와 [release-runbook.md](release-runbook.md)를 따른다.
+자세한 절차는 [SETUP.md](../../SETUP.md)와 [release-runbook.md](../guides/release-runbook.md)를 따른다.
 
 ---
 
@@ -694,7 +694,7 @@ VS Code 인증 세션(`vscode.authentication.getSession('github')`)으로 받은
 - **"문서를 붙이면 좋아진다"는 가설은 확인되지 않았다.** 대형 모델 단독(A)이 해결률이 가장 높고 해결당 비용도 가장 낮았다.
 - 로직 오류 대조군 6개는 B · D 조건에서 자동 수정 0건이다. 인가 · 비즈니스 로직 오류는 규칙과 스캐너 범위 밖이므로 자동 수정 대신 사람 검토로 넘긴다.
 - 조건별 1회(seed 42, 온도 0) 탐색 실험이며, 같은 과제로 검색기를 개선한 이력이 있어 통계적 우월성으로 해석하지 않는다. 인용 검토자는 코드를 작성한 AI다.
-- 상세: [실험 보고서](../benchmarks/repair/RESULTS.md)
+- 상세: [실험 보고서](../../benchmarks/repair/RESULTS.md)
 
 ---
 
@@ -830,4 +830,4 @@ docs/               구현 설계서 v1 · v2 · ADR · API · 검증 · 런북
 | 2.0.35 | 10-16 | 제로 트러스트 점검, CloudFront → 로드밸런서 HTTPS |
 | 2.0.36 | 10-16 | 작업별 AI 공급자, 비용 원장, 공급자 비교 |
 
-전체 변경 내용은 [extension/CHANGELOG.md](../extension/CHANGELOG.md)를 참고한다.
+전체 변경 내용은 [extension/CHANGELOG.md](../../extension/CHANGELOG.md)를 참고한다.

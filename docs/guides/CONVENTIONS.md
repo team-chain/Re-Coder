@@ -183,7 +183,7 @@ Fixes #65
 ## 테스트
 - [ ] 단위 테스트 추가
 - [ ] 수동 테스트 완료 (PowerShell 명령 첨부)
-- [ ] schemas.py 변경 → docs/API_v10.md 동시 갱신
+- [ ] schemas.py 변경 → docs/design/API_v10.md 동시 갱신
 
 ## 영향 범위
 - 다른 팀원 영역 영향 (Y/N) → Y면 누구 알림
@@ -206,7 +206,7 @@ Fixes #65
 - `core/schemas.py`
 - `core/api/routes/__init__.py`
 - `extension/package.json`
-- `docs/API_v10.md`
+- `docs/design/API_v10.md`
 
 → 위 파일 수정 PR 은 가능한 한 작게 + 자주 merge.
 

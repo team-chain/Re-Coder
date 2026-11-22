@@ -27,7 +27,7 @@ Windows x64에서 Git·Node/npm이 없으면 공식 MinGit 2.56.0.4와 Node 22.2
 
 계정 비용은 사용자 AWS에 청구된다. ReCoder 공용 모델 키나 중앙 SaaS 인증 서버를 구현한 것은 아니다. SignInLocalDevelopmentAccess는 브라우저 로그인을 선택할 때만 필요하다. 환경 설치에는 CloudFormation·CodeBuild·검사용 IAM/S3/DynamoDB/Logs 관리 권한이 필요하다. 기존 배포 전용 역할에 이 권한이 있다고 가정하지 않으며 현재 연결의 사용자/역할에 부족한 권한만 추가한다.
 
-계정별 JSON 정책과 적용 절차는 [관리형 AWS 권한](aws-permissions/README.md)에 있다. 확장 명령 **ReCoder: 관리형 AWS 권한 보기**와 Security 권한 오류의 **AWS 권한 보기**에서도 현재 계정·리전의 정책을 생성한다. 관리자가 사전 설치하거나 일시적으로 설치 정책을 부여하고 설치 후 제거한다.
+계정별 JSON 정책과 적용 절차는 [관리형 AWS 권한](../guides/aws-permissions/README.md)에 있다. 확장 명령 **ReCoder: 관리형 AWS 권한 보기**와 Security 권한 오류의 **AWS 권한 보기**에서도 현재 계정·리전의 정책을 생성한다. 관리자가 사전 설치하거나 일시적으로 설치 정책을 부여하고 설치 후 제거한다.
 
 S3의 자동 프런트엔드 빌드에는 **AWS에서 빌드** 선택을 추가했다. 기존 AWS 연결로 선택할 수 있으며, Node/npm/Docker를 사용자 PC에서 실행하지 않는다. 별도 `recoder-build-v1` 환경에서 의존성 설치·빌드를 수행하고 실제 CodeBuild 상태와 진행 단계를 표시한다. 취소·중복 실행 방지·응답 불명확 시 상태 확인을 사용한다. 결과는 실행 ID·소스 digest·파일별 SHA256을 검증해 `.recoder/cloud-build-*` 새 폴더에 저장하고, 기존 S3 검토/승인/업로드/SSE/롤백 경로로 전달한다. 기존 `dist`와 소스 파일을 덮어쓰지 않는다. 로컬 npm/Docker 빌드 선택은 유지한다.
 

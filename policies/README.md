@@ -4,7 +4,7 @@
 
 2.0.41부터 `recoder/execution.rego`가 문서 근거 수정·MCP 분석의 실행 직전 정책을 추가한다.
 기본 로컬 모드와 명시적 OPA 모드, 정책 철회 및 적용 범위는
-[실행 정책 안내](../docs/execution-policy.md)를 참고한다. OPA 실행 통제 모드는 서버 장애 시 차단한다.
+[실행 정책 안내](../docs/design/execution-policy.md)를 참고한다. OPA 실행 통제 모드는 서버 장애 시 차단한다.
 
 ## 구조
 

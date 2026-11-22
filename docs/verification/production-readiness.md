@@ -8,10 +8,10 @@
 
 ## 재현
 
-- [쇼핑몰 실행과 설정](../core/starter_templates/commerce/README.md)
-- [독립 DB·모의 결제 서버로 통합 검사](../benchmarks/commerce/README.md)
-- [ECS HTTPS 인프라와 네트워크 입력](../infra/production-edge.README.md)
-- [기존 문서 검색 기반 오류 수정](document-grounded-repair.md)
+- [쇼핑몰 실행과 설정](../../core/starter_templates/commerce/README.md)
+- [독립 DB·모의 결제 서버로 통합 검사](../../benchmarks/commerce/README.md)
+- [ECS HTTPS 인프라와 네트워크 입력](../../infra/production-edge.README.md)
+- [기존 문서 검색 기반 오류 수정](../design/document-grounded-repair.md)
 
 CI는 Core, 확장, 골든패스, Watchdog, Discord에 더해 쇼핑몰 통합 검사와 배포 의존성 취약점 검사를 수행합니다. npm 개발 의존성도 포함하며, Python은 Windows·Linux·macOS 배포용 고정 버전 목록을 검사합니다.
 

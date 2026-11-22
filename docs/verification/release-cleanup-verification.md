@@ -82,8 +82,8 @@ Core에서는 기존 `datetime.utcnow()` 등 폐기 예정 API 경고 2,256건�
 - 기동·종료 변경 후 확장 361개, Core 기동/인증 113개 회귀 검사가 통과했다.
 - 고정 의존성 파일, 배포 빌드 스크립트, Windows CI, 체크섬과 의존성 명세를 추가했다.
 
-설치 절차는 [1.1.0 설치 안내](releases/1.1.0-windows.md),
-재빌드 절차는 [PACKAGING.md](../extension/PACKAGING.md)를 참고한다.
+설치 절차는 [1.1.0 설치 안내](../releases/1.1.0-windows.md),
+재빌드 절차는 [PACKAGING.md](../../extension/PACKAGING.md)를 참고한다.
 후속 로그는 `.canvas-qa/windows-release-build.txt`, `windows-release-smoke.txt`,
 `vscode-1.1.0-install.txt`, `extension-1.1.0-tests.txt`, `core-1.1.0-startup-tests.txt`다.
 

@@ -51,4 +51,4 @@ python3 scripts/setup_budget.py --email <내메일> --dry-run   # 페이로드 �
 2. `python3 scripts/golden_path_smoke.py` 통과.
 3. 위 1(E2E)·2(롤백 리허설) 실 AWS 1회.
 4. `bash scripts/package-extension.sh` (플랫폼별) 또는 `--no-binary`.
-5. `docs/mvp-acceptance-checklist.md` 전 항목 체크.
+5. `docs/verification/mvp-acceptance-checklist.md` 전 항목 체크.

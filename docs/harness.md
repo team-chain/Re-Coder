@@ -130,7 +130,7 @@ AI 호출 한 번에 앱 전체를 담지 않습니다. 개발팀이 일하는 �
 | 설계 | 서비스 · DB · 연결과 전체 API 표 |
 | 작업 | 고칠 것: 계약 위반, 실패한 테스트, 인증이 빠진 쓰기 API |
 
-근거: `core/compose_check.py`, `core/contract_check.py`, `core/spec_review.py`, `docs/enterprise-harness.md`
+근거: `core/compose_check.py`, `core/contract_check.py`, `core/spec_review.py`, `docs/design/enterprise-harness.md`
 
 ## 여러 서비스 배포
 
@@ -176,4 +176,4 @@ AI 호출 한 번에 앱 전체를 담지 않습니다. 개발팀이 일하는 �
 - 계약 대조는 정적 분석입니다. 실행 중에 만들어지는 변수 이름이나 주소는 보지 못합니다.
 - AWS 다중 서비스 배포에서 DB는 컨테이너로 돌아 데이터가 유지되지 않습니다.
 
-근거: `docs/enterprise-harness.md`
+근거: `docs/design/enterprise-harness.md`

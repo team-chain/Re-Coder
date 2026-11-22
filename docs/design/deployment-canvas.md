@@ -77,4 +77,4 @@ node harness/serve-canvas-preview.js
 
 Core 테스트는 UTF-8 모드와 저장소 밖 임시 경로를 권장한다. 저장소 안의 임시 폴더는 `git`이 상위 저장소의 브랜치를 찾기 때문에 “Git 저장소가 아닌 폴더” 테스트의 전제를 깨뜨린다.
 
-추가 검증에서 지연된 조회 응답의 무한 대기, 완료 상태의 역전, S3 절대경로 해석 불일치를 수정했다. 세부 검증 범위와 실행 한계는 [검증 기록](deployment-canvas-verification.md)에 정리했다.
+추가 검증에서 지연된 조회 응답의 무한 대기, 완료 상태의 역전, S3 절대경로 해석 불일치를 수정했다. 세부 검증 범위와 실행 한계는 [검증 기록](../verification/deployment-canvas-verification.md)에 정리했다.

@@ -56,7 +56,7 @@
 
 재순위화도 실측에서 이점이 없었습니다. 정확도(Hit@1)가 100%에서 95%로 내려가고 검색 시간이 36.6ms에서 약 11초로 늘어, 기본값을 꺼짐으로 유지합니다.
 
-근거: `core/grounded_repair/`, `docs/document-grounded-repair.md`, `benchmarks/repair/RESULTS.md`, `benchmarks/repair/RERANKER.md`
+근거: `core/grounded_repair/`, `docs/design/document-grounded-repair.md`, `benchmarks/repair/RESULTS.md`, `benchmarks/repair/RERANKER.md`
 
 ## 한계
 

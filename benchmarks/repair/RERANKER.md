@@ -28,5 +28,5 @@ sentence-transformers 5.7.0, torch 2.14.1, transformers 5.20.1, huggingface-hub 
 라이브 모델 결과를 유닛 테스트 기대값으로 고정하지 않는다. CI에서는 후보 한도·버전 차단·
 잘못된 점수 거부·옵션/캐시 분리·지표 계산을 비용 없이 검증한다.
 
-재실행 명령은 [RAG 운영 문서](../../docs/document-grounded-repair.md#선택형-reranker와-비교-2039)에 있다.
+재실행 명령은 [RAG 운영 문서](../../docs/design/document-grounded-repair.md#선택형-reranker와-비교-2039)에 있다.
 향후 더 큰 독립 질의 세트와 실제 수정 성공률을 평가한 뒤 기본값 변경을 검토한다.

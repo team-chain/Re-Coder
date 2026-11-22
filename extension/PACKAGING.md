@@ -4,7 +4,7 @@
 플랫폼 지정 VSIX(`dist/recoder-<버전>-win32-x64.vsix`, `-linux-x64.vsix`, `-darwin-arm64.vsix`)이며,
 Core 실행에는 사용자 PC의 Python·Node.js 설치가 필요 없다. Windows x64는 Git·Node/npm이 없으면 고정 SHA256의 공식 도구를 자동 준비한다. 다른 OS의 Git·로컬 빌드 도구는 기존 설치를 사용한다. VS Code·AWS/AI 계정 연결은 별도다. Docker Desktop은 내 PC에서 컨테이너를 실행하는 로컬 모드에 필요하다. 관리형 S3/ECS 빌드·보안 검사는 AWS에서 실행한다. Intel Mac(darwin-x64)은 잠근 의존성(grpcio 등)의 x86_64 휠이 없어 대상에서 뺐다. `nobinary` 파일은 개발용이다.
 
-현재 새 설치본의 대상은 Windows x64다. 버전별 빌드·설치본 실행 검사 결과는 `docs/managed-execution-release.md`에 기록한다. Linux·macOS 같은 버전의 설치 검증과 AWS 실환경 검증을 완료하기 전까지 해당 플랫폼·관리형 기능의 출시 완료로 표현하지 않는다.
+현재 새 설치본의 대상은 Windows x64다. 버전별 빌드·설치본 실행 검사 결과는 `docs/releases/managed-execution-release.md`에 기록한다. Linux·macOS 같은 버전의 설치 검증과 AWS 실환경 검증을 완료하기 전까지 해당 플랫폼·관리형 기능의 출시 완료로 표현하지 않는다.
 
 `npm run package`는 Core가 포함되지 않으면 실패한다. 웹뷰 빌드와 `verify:package` 통과만으로 사용자 설치본이 완성되었다고 판단하지 않는다. 사용자 배포본은 아래 `build-release.py`로 플랫폼에 맞는 Core를 새로 빌드하고 버전을 확인한 뒤 생성한다. Core 없는 3.0.4 일반 VSIX는 설치만으로 작동하는 배포본이 아니며, 사용자 설치 안내에서 제외한다.
 
