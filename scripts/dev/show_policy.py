@@ -1,5 +1,8 @@
-﻿import json, sys
-sys.path.insert(0, "core")
+import json, sys
+from pathlib import Path
+
+# 저장소 어디서 실행해도 core 를 찾는다.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "core"))
 from aws_policy import build_policy
 
 policy = build_policy()

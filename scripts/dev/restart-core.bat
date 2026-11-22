@@ -8,7 +8,7 @@ echo [ReCoder] 3) venv 소스 Core 시작. 이 창은 켜둔 채로 두세요.
 echo            ('Application startup complete' 가 보이면 성공.
 echo             VSCode 사이드바에서 지도를 누르면 여기에 POST /api/map 로그가 찍힙니다.)
 echo.
-cd /d C:\ReCoder\Re-Coder\core
+cd /d "%~dp0..\..\core"
 ".venv\Scripts\python.exe" main.py
 echo.
 echo [ReCoder] Core 가 종료되었습니다.

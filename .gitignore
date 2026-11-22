@@ -68,3 +68,13 @@ discord-bot/guild_config.db-*
 discord-bot/bridge_settings.json
 discord-bot/policy.json
 discord-bot/connections*.json
+
+# 로컬 작업 메모·백업 (저장소에 올리지 않음)
+CLAUDE_HANDOFF*.txt
+HANDOFF.md
+야간작업-결과.md
+카드배치-적용-명령어.md
+Claude outputs/
+_patches/
+_to_delete/
+*.bundle
