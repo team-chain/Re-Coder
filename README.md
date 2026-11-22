@@ -13,7 +13,7 @@ From Prompt to Production — 만드는 속도만큼, 안전하게.
 
 <br>
 
-![version](https://img.shields.io/badge/version-2.0.36-1283a6?style=flat-square)
+![version](https://img.shields.io/badge/version-4.0.1-1283a6?style=flat-square)
 ![VS Code](https://img.shields.io/badge/VS_Code-1.85+-007ACC?style=flat-square)
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?style=flat-square&logo=typescript&logoColor=white)
@@ -22,7 +22,7 @@ From Prompt to Production — 만드는 속도만큼, 안전하게.
 ![Amazon Bedrock](https://img.shields.io/badge/Amazon_Bedrock-232F3E?style=flat-square)
 ![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat-square&logo=docker&logoColor=white)
 
-[**시연 영상**](https://youtu.be/8W2SarV1orU) &nbsp;·&nbsp; [**발표 자료**](발표자료/ReCoder_2학기_중간발표.pptx) &nbsp;·&nbsp; [**구현 설계서**](docs/design/ReCoder_구현설계서_v2.md) &nbsp;·&nbsp; [**설치 · 실행**](#설치--실행)
+[**시연 영상**](https://youtu.be/8W2SarV1orU) &nbsp;·&nbsp; [**발표 자료**](docs/presentations/ReCoder_최종발표.pptx) &nbsp;·&nbsp; [**문서**](docs/README.md) &nbsp;·&nbsp; [**설치 · 실행**](#설치--실행)
 
 </div>
 
@@ -32,7 +32,7 @@ From Prompt to Production — 만드는 속도만큼, 안전하게.
   <img src="docs/images/readme/hero-deploy.png" width="92%" alt="VS Code 안의 ReCoder 배포 캔버스">
 </p>
 
-ReCoder는 VS Code 확장으로 동작하는 AI DevOps 에이전트입니다. 자연어 요청 하나로 **설계 결정 → 코드 생성 → 빌드 검증 → 보안 검사 → 배포 → 배포 후 감시**까지 이어서 진행합니다. AI는 만들고 고치는 일을 맡고, 무엇을 적용하고 배포할지는 사람이 승인합니다.
+ReCoder는 VS Code 확장으로 동작하는 AI DevOps 에이전트입니다. 자연어 요청 하나로 **설계 결정 → 코드 생성 → 함께 띄워 검증 → 보안 검사 → 로컬 실행 → 공격 테스트 → 운영 배포 → 배포 후 감시**까지 이어서 진행합니다. 서비스와 DB가 여럿인 프로젝트도 같은 흐름으로 만들고 배포합니다. AI는 만들고 고치는 일을 맡고, 무엇을 적용하고 배포할지는 사람이 승인합니다.
 
 <br>
 
@@ -72,9 +72,11 @@ ReCoder는 VS Code 확장으로 동작하는 AI DevOps 에이전트입니다. �
 
 | 발표 | 시기 | 주요 내용 | 자료 |
 |---|:---:|---|:---:|
-| 프로젝트 제안서 발표 (중간) | 2026 1학기 | 시장 배경, 프로젝트 개요, 경쟁 서비스 비교, 핵심 기능 · 아키텍처, 데모 시나리오 | [PPT](발표자료/ReCoder_중간발표.pptx) |
-| 1학기 기말 발표 | 2026 1학기 | 문제 정의 · 수요 근거, 대상 사용자, 워크플로, 시스템 아키텍처, 구현 현황, 로드맵 | [PPT](발표자료/ReCoder_기말발표.pptx) |
-| 2학기 중간 발표 | **2026.10.13** | 문제 정의, 서비스 소개, 기능별 심층 분석, 시연, 기대 효과, RAG 실험 결과 · 한계, 확장 방향 | [**PPT**](발표자료/ReCoder_최종발표.pptx) |
+| 프로젝트 제안서 발표 (중간) | 2026 1학기 | 시장 배경, 프로젝트 개요, 경쟁 서비스 비교, 핵심 기능 · 아키텍처, 데모 시나리오 | [PPT](docs/presentations/ReCoder_중간발표.pptx) |
+| 1학기 기말 발표 | 2026 1학기 | 문제 정의 · 수요 근거, 대상 사용자, 워크플로, 시스템 아키텍처, 구현 현황, 로드맵 | [PPT](docs/presentations/ReCoder_기말발표.pptx) |
+| 2학기 중간 발표 | **2026.10.13** | 문제 정의, 서비스 소개, 기능별 심층 분석, 시연, 기대 효과, RAG 실험 결과 · 한계, 확장 방향 | [**PPT**](docs/presentations/ReCoder_최종발표.pptx) |
+
+발표에서 다룬 수치와 구조의 자세한 내용은 [모델별 비용 · 시간 측정](docs/model-benchmark.md), [하네스](docs/harness.md), [RAG](docs/rag.md) 문서에 있습니다.
 
 
 <br>
@@ -139,6 +141,7 @@ AI 코딩 도구로 코드를 만드는 일은 쉬워졌지만, 만든 코드를
 - 새 앱은 결정 카드 5~8장 (기술 → 데이터 → 인증 → 기능 규칙 순서), 고른 선택에 따라 이어서 물을 결정이 추가됨
 - 카드마다 선택지 2~4개와 장단점, 추천 표시 · 설계 갈림길이 없는 작은 요청은 확인 창 하나로 진행
 - 고른 결정은 코드 생성 지시에 반영되고, 같은 내용이 `docs/adr/ADR-NNN-*.md`로 남음
+- **명세 · 합격 조건** — 결정을 다 고르면 "무엇이 되면 완성인가"를 조건 목록으로 먼저 맞추고, 사람이 고쳐 승인한 조건만 생성에 반영 (`docs/spec/SPEC-*.md`로 기록)
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/readme/feature-dlc-dark.jpg">
@@ -153,7 +156,8 @@ AI 코딩 도구로 코드를 만드는 일은 쉬워졌지만, 만든 코드를
 - **공용 게시판** — 서버 API 파일이 끝나면 실제 경로 · 응답 키 · 로그인 필요 여부를 뽑아 화면 코드에 전달 (AI 호출 없음)
 - **의존 관문** — 파일이 끝날 때마다 내보내기 누락 · 타입 어긋남을 바로 검사하고, 기계적으로 고칠 수 있으면 즉시 수정
 - 중간에 끊겨도 체크포인트에서 이어서 생성
-- **팀 구성 창** — 프리셋(품질 우선 · 균형 · 비용 절약)과 역할(설계 · 개발 · 검토 · 테스트)별 모델, 개발 인원, 테스트 켜기. 예상 시간 · 비용은 지난 실행 기록으로만 표시
+- **아키텍처 계약 (하네스)** — 서비스 · DB가 여럿인 요청은 서비스 · DB · API 계약을 먼저 받고, 이름 · 포트 · 접속 변수 · Dockerfile · `docker-compose.yml`을 ReCoder가 확정. 생성 뒤에는 일회용 복사본을 함께 띄워 빌드 · 기동 · 서비스 간 연결 · 테이블 · 계약 통합 테스트를 확인하고, 실패하면 원인 파일만 고침 (서비스 최대 12개 · DB 8개, [하네스 문서](docs/harness.md))
+- **팀 구성 창** — 프리셋(품질 우선 · 균형 · 비용 절약)과 역할(설계 · 개발 · 검토 · 테스트)별 모델, 개발 인원(1~6명), 테스트 켜기. 예상 시간 · 비용은 지난 실행 기록으로만 표시 ([모델별 비용 · 시간 측정](docs/model-benchmark.md))
 - **테스트 리코더** — 승인한 완성 기준을 실행 중인 앱에 HTTP 시험으로 확인하고, 실패하면 고친 뒤 다시 시험. 결과 화면에 조건별 통과 · 실패 · 확인 불가와 요청 · 응답 근거
 - **리코더별 기록** — 카드마다 지금 파일 · 일한 시간 · AI 호출 · 비용, 오른쪽 패널에 코드 · 검사 · 기록, 끝난 뒤 다시 보기
 - **[팀 벤치마크](benchmarks/team/README.md)** — 혼자 · 팀 · 팀+테스트를 사람이 쓴 판정 시험으로 비교(통과율 · 실행 성공 · 연결 오류 · 보안 · 시간 · 비용)
@@ -171,6 +175,9 @@ AI 코딩 도구로 코드를 만드는 일은 쉬워졌지만, 만든 코드를
 - 바로 고칠 수 있는 항목은 수정안을 보여 주고, 적용하면 원본을 `.recoder/backups/`에 남긴 뒤 재검사
 - **AI 코드 보안 점수** — SQL 인젝션 · 인증 누락 · 평문 비밀번호 등 AI가 자주 하는 보안 실수 9가지를 규칙으로 점검
 - **슬롭스쿼팅 방어** — AI가 지어내거나 흉내 낸 npm 패키지를 설치 전에 차단
+- **여러 서비스 검사** — 루트에 Dockerfile이 없는 다중 서비스 프로젝트는 서비스마다 Dockerfile과 이미지를 따로 검사하고, 검사하지 못한 서비스는 이름을 밝혀 경고로 남김
+- **AI 소스 감사** — Cloudflare security-audit 기반으로 AI가 소스를 읽고 취약점 후보를 근거와 함께 제시, 재검토를 거친 것만 결과로
+- **공격 테스트 (레드팀)** — 실행 중인 내 앱을 PentAGI가 격리된 Docker 환경에서 실제 HTTP 요청으로 공격. 고정 대상 중계기만 거치고 범위 밖 경로 · 위험 메서드는 거절, 직접 관찰한 응답과 AI의 추정을 구분해 보고
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/readme/feature-gate-dark.jpg">
@@ -179,17 +186,19 @@ AI 코딩 도구로 코드를 만드는 일은 쉬워졌지만, 만든 코드를
 
 ### 4. Drag & Drop 배포 · 운영
 
-배포 캔버스에서 프로젝트를 배포 대상 위로 끌어 놓고, 설정 확인과 승인을 거쳐 배포합니다. 놓기만으로는 배포되지 않습니다.
+배포 캔버스(2D 보드)에서 프로젝트 카드를 배포 대상 위로 끌어 놓고, 설정 확인과 승인을 거쳐 배포합니다. 놓기만으로는 배포되지 않습니다.
 
 | 대상 | 동작 |
 |---|---|
 | **GitHub** | 보안 검사 후 푸시, 저장소 생성 · 연결, GitHub Actions 워크플로 생성 |
-| **Local Docker** | AWS 키 없이 빌드 → 실행 → Health Check, 통과한 뒤에만 기존 컨테이너 교체, 실패하면 이전 이미지로 복구 |
-| **AWS ECS Fargate** | 사전 점검 → 인프라 준비 → 소스 · Dockerfile 검사 → 이미지 빌드 → ECR 업로드 → 이미지 취약점 검사 → SBOM 생성 → 태스크 정의 등록 → 서비스 갱신 → 안정화 · 헬스체크 → 공개 주소 확인 |
+| **Local Docker** | AWS 키 없이 빌드 → 실행 → Health Check, 통과한 뒤에만 기존 컨테이너 교체, 실패하면 이전 이미지로 복구. 다중 서비스는 docker compose로 비밀값 검사 → 서비스별 Dockerfile · 이미지 검사 → DB · 서비스 순서로 기동 → 연결 · 통합 테스트 |
+| **AWS ECS Fargate** | 사전 점검 → 인프라 준비 → 소스 · Dockerfile 검사 → 이미지 빌드 → ECR 업로드 → 이미지 취약점 검사 → SBOM 생성 → 태스크 정의 등록 → 서비스 갱신 → 안정화 · 헬스체크 → 공개 주소 확인. 다중 서비스는 compose 서비스마다 ECS 서비스를 만들고 **ECS Service Connect**로 compose와 같은 이름으로 연결, 의존 순서대로 띄움 |
 | **Amazon S3** | 정적 사이트 빌드 결과를 사용자 계정 버킷에 업로드 |
 
 - 배포 직후 5분 동안 헬스 · 오류 로그를 감시하고, 이상이 있으면 이전 버전 롤백을 제안 → 승인 후 실행
+- **Operate 탭** — 배포 후 상태 · 승인 대기 · 최근 기록을 한 화면에. **상시 감시**를 켜면 내 AWS 계정의 작은 Lambda가 VS Code를 꺼도 경보 · ECS 이벤트를 지켜보고 롤백을 준비 (월 약 $0.1 미만)
 - 선택 구성: HTTPS 주소(CloudFront · 내 도메인), 관리형 DB(RDS), 앞단 방패(nginx 속도 제한 · ALB + AWS WAF), 공격 · 장애 감지 알림, AWS 리소스 정리
+- 한계: ECS 다중 서비스 배포에서 DB · Redis는 컨테이너로 돌아 태스크를 다시 띄우면 데이터가 사라집니다. 운영 데이터는 RDS · ElastiCache로 옮겨야 합니다.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/readme/feature-deploy-dark.jpg">
@@ -200,45 +209,65 @@ AI 코딩 도구로 코드를 만드는 일은 쉬워졌지만, 만든 코드를
 
 ## 전체 기능 목록
 
-VS Code 확장은 **Develop · Deploy · Security** 세 화면으로 구성됩니다.
+VS Code 확장은 **홈 · Develop · Deploy · Security · Operate** 다섯 화면으로 구성됩니다. 모든 화면 맨 위에 **만들기 → 함께 띄워 검증 → 보안 검사 → 로컬 실행 → 공격 테스트 → 운영 배포** 진행 표시와 「다음」 버튼이 있고, 각 단계 상태는 Core가 실제 결과로 정합니다.
+
+#### 홈 — 지금 돌고 있는 버전 한 장
+
+| 기능 | 설명 |
+|---|---|
+| 현재 버전 | 미리보기 · 배포 주소 · 상태 · 대상 · 보안 결과 · 승인 대기 · 바뀐 코드 한 줄, 최근 배포와 배포 경로 |
 
 #### Develop — 요청부터 코드 적용까지
 
 | 기능 | 설명 |
 |---|---|
-| 코드 생성 · 수정 | 채팅 요청 → 설계 카드 → 생성 → 변경 내용(diff) 확인 → 적용, 시크릿 경고 |
+| 코드 생성 · 수정 | 요청 → 설계 카드 → 명세 · 합격 조건 → 생성 → 변경 내용(diff) 확인 → 적용, 시크릿 경고 |
+| 팀 구성 | 프리셋(품질 우선 · 균형 · 비용 절약), 역할별 모델, 개발 인원, 완성 기준 테스트 |
 | 에러 분석 | 터미널 오류의 원인 분석과 수정 패치 제안, 승인 후 적용 |
-| 아키텍처 (구조 지도) | 파일 import 관계 → 함수 호출 그래프의 2단계 지도, 고립 · 과부하 파일 표시 |
+| 아키텍처 (구조 지도) | 서비스 · 폴더 · 파일 단위 구조 다이어그램, 함수 호출 지도, 고립 · 과부하 파일 표시 |
+| 계약 대조 | 설계도(`architecture.json`)와 실제 코드를 비교해 쓰이는 연결 · 안 쓰이는 연결 · 계약에 없는 연결을 파일 · 줄 근거와 함께 표시 |
+| 명세 (요구사항 · 설계 · 작업) | API를 기능별로 묶어 수용 기준과 통과 여부, 서비스 · DB 구성, 고칠 작업 목록 |
 | 흐름 dry run | API 경로 · 화면 동작 · 실행 파일을 골라 요청이 지나가는 함수를 호출 순서대로 재생, 적용 전 흐름 미리 보기 |
 | 설계 기록 (ADR) | 이전에 결정한 설계와 선택 이유 열람 |
-| AI 공급자 · 비용 | 작업 등급(품질 · 절약)별 공급자 선택, 비용 원장, 같은 요청을 두 공급자로 돌려 비교 |
+| AI 모델 · 비용 | Claude ↔ GPT 전환, 작업 등급(품질 · 절약)별 모델, 공식 단가 기반 비용 원장, 같은 요청을 두 모델로 돌려 비교 |
 
 #### Deploy — 로컬 Docker부터 AWS까지
 
 | 기능 | 설명 |
 |---|---|
-| 로컬 Docker 배포 | Dockerfile 생성 → 검사 → 빌드 → 실행 → 헬스 체크, 실패 시 이전 이미지로 복구 |
+| 로컬 Docker 배포 | Dockerfile 생성 → 검사 → 빌드 → 실행 → 헬스 체크, 실패 시 이전 이미지로 복구. 다중 서비스는 compose 실행 계획을 보여 주고 승인 후 실행 |
 | 배포 캔버스 | 프로젝트 카드를 GitHub · Docker · ECS · S3 대상으로 끌어다 놓아 배포, 승인 · 보안 검사 · 실행 상태 표시 |
+| ECS 다중 서비스 배포 | compose 서비스마다 ECS 서비스, Service Connect 연결, 의존 순서 기동, 승인 화면에 서비스 목록 · 순서 · 입구 · 월 실행비(어림) · 한계 |
 | 제로 트러스트 점검 | 배포 승인 화면에서 5가지 원칙 기준으로 통과 · 주의 · 막힘 표시 |
-| 롤백 · Replay | 배포 · 롤백 이력과 이전 버전 복귀 대상 확인 |
-| 운영 대응 | 장애 감지 → 원인 분석 → 조치 제안, 실행은 승인 후 |
-| 공격 · 장애 감지 알림 | ECS 앱의 요청 급증 · 차단 비율 · 오류 비율 · 태스크 부족 감지, IP 차단 · 방패 강화 · 태스크 증설 · 이전 버전 제안 |
-| AWS 리소스 정리 | ReCoder가 만든(태그가 붙은) 리소스만 찾아 중지 또는 완전 삭제 |
+| 배포 기록 · 롤백 | 배포 · 롤백 이력, 진행 순서, 이전 버전 복귀 승인 |
 
 #### Security — 배포 전 검사와 정책
 
 | 기능 | 설명 |
 |---|---|
-| 취약점 스캔 | Trivy · Hadolint로 이미지 · 의존성 · Dockerfile 검사 |
+| Security 현황판 | 맨 위 판정(검사 전 · 검사 중 · 안전 · 주의 · 위험)과 위험 · 주의 · 낮음 개수, 취약점을 쉬운 말로, 같은 패키지는 한 줄로 |
+| 취약점 스캔 | Trivy · Hadolint로 이미지 · 의존성 · Dockerfile 검사 (다중 서비스는 서비스별) |
 | 시크릿 검사 | Gitleaks + 내장 스캐너로 소스에 남은 키 · 비밀번호 검사 (값은 가려서 표시) |
+| AI 소스 감사 | AI가 소스를 읽고 취약점 후보를 근거와 함께 제시, 재검토를 거친 것만 결과로 |
+| 공격 테스트 (레드팀) | 실행 중인 앱을 PentAGI가 격리 환경에서 공격, 공격받은 실제 경로와 경로별 거부 · 응답 수 표시 |
 | 정책 게이트 | 배포 승인 · 차단 기준과 OPA 규칙 원문 확인 |
+
+#### Operate — 배포 후 상태와 대응
+
+| 기능 | 설명 |
+|---|---|
+| 상태 · 승인 대기 | 서비스 상태(요청 · 오류율 · 실행 중 태스크), 할 일, 최근 기록 |
+| 상시 감시 | 내 AWS 계정의 Lambda가 PC가 꺼져 있어도 경보 · ECS 이벤트를 감시하고 롤백 제안을 준비. 승인은 VS Code 또는 일회용 링크로 |
+| 운영 대응 | 장애 감지 → 원인 분석 → 조치 제안, 실행은 승인 후 |
+| 공격 · 장애 감지 알림 | ECS 앱의 요청 급증 · 차단 비율 · 오류 비율 · 태스크 부족 감지, IP 차단 · 방패 강화 · 태스크 증설 · 이전 버전 제안 |
 | 배포 후 취약점 재검사 | 하루 한 번 SBOM을 공개 취약점 DB(OSV)와 다시 대조해 새 취약점만 알림, 버전 올리기 제안 |
+| AWS 리소스 정리 | ReCoder가 만든(태그가 붙은) 리소스만 찾아 중지 또는 완전 삭제 |
 
 #### 연동 · 운영 구성 (선택)
 
 | 구성 | 설명 |
 |---|---|
-| Discord 봇 | `/recoder` 명령으로 개발 · 배포 · 롤백 · 사전 점검 · 상태 조회, 알림 채널 |
+| Discord 봇 | `/recoder deploy · rollback · status` 또는 "배포해줘 · 롤백해줘 · 상태 알려줘"로 요청 → VS Code에서 승인해야 진행, 결과는 같은 채널로 알림 |
 | Watchdog | EC2 · ECS 컨테이너 감시 데몬 — 크래시 · 헬스 실패 · OOM · 5xx 급증 · 지연 감지, Discord 알림 |
 | ReCoder Gateway | 운영자 AWS 계정의 서버리스 AI 대행 — 학생은 반 코드로 AWS 키 없이 사용, 사용자별 쿼터 · 전체 비용 상한 |
 | Control Plane | 조직 · 프로젝트 관리, OIDC 로그인, 기기 등록, 정책 번들, 다중 승인, 해시 체인 감사 로그 |
@@ -254,10 +283,10 @@ VS Code 확장은 **Develop · Deploy · Security** 세 화면으로 구성됩�
 | 구성 요소 | 위치 | 역할 |
 |---|---|---|
 | **VS Code 확장** | 개발자 PC | 요청 · 진행 상태 · 승인 화면, Core 자동 실행, 승인된 변경만 파일에 기록 |
-| **Local Core** | 개발자 PC (`127.0.0.1:17894~17910`) | AI 호출, 생성 · 검증 · 보안 검사 · 배포 오케스트레이션 (FastAPI 라우터 22개) |
-| **Docker** | 개발자 PC | 검증 빌드, 실행 점검, 로컬 배포, 보안 도구 실행 |
+| **Local Core** | 개발자 PC (`127.0.0.1:17894~17910`) | AI 호출, 생성 · 검증 · 보안 검사 · 배포 오케스트레이션 (FastAPI 라우터 23개) |
+| **Docker** | 개발자 PC | 검증 빌드, 실행 점검, 다중 서비스 함께 띄워 검증, 로컬 배포, 보안 도구 실행, 공격 테스트 격리 환경 |
 | **AI 모델** | 외부 | Amazon Bedrock · ReCoder Gateway · Claude API · OpenAI(호환) API 중 하나를 연결 |
-| **사용자 AWS 계정** | 클라우드 | ECR 이미지 저장, ECS Fargate 실행, S3 정적 호스팅, CloudWatch 로그 |
+| **사용자 AWS 계정** | 클라우드 | ECR 이미지 저장, ECS Fargate 실행(다중 서비스는 Service Connect), S3 정적 호스팅, CloudWatch 로그, 상시 감시 Lambda |
 | **협업 · 알림** | 외부 | GitHub 푸시 · Actions, Discord 알림 · ChatOps |
 
 <details>
@@ -266,10 +295,10 @@ VS Code 확장은 **Develop · Deploy · Security** 세 화면으로 구성됩�
 ```text
 Re-Coder/
 ├── extension/            VS Code 확장 (TypeScript · React · Tailwind)
-│   ├── src/              확장 본체 — Core 실행, 명령 23개, 웹뷰 메시지 처리
-│   └── webview-src/      Develop · Deploy · Security 화면, 배포 캔버스, AI Village
+│   ├── src/              확장 본체 — Core 실행, 명령 52개, 웹뷰 메시지 처리, 레드팀 · 관리형 실행
+│   └── webview-src/      홈 · Develop · Deploy · Security · Operate 화면, 배포 캔버스, AI Village
 ├── core/                 Local Core (Python · FastAPI)
-│   ├── api/routes/       REST 라우터 22개
+│   ├── api/routes/       REST 라우터 23개
 │   ├── llm/              AI 공급자 · 작업 등급 · 비용 원장 · 비밀값 가리기
 │   ├── agents/           ECS 배포 · 인프라 · 사전 점검 · 장애 대응 에이전트
 │   ├── grounded_repair/  문서 근거 수정(RAG)
@@ -280,10 +309,17 @@ Re-Coder/
 ├── discord-bot/          Discord 봇 (discord.py)
 ├── policies/recoder/     OPA 배포 정책 (Rego)
 ├── infra/                IAM 권한 템플릿 · HTTPS 인프라 · 문서 갱신 스택
-├── benchmarks/           쇼핑몰 통합 검사 · RAG 수정 실험
-├── scripts/              골든패스 스모크 · 릴리스 빌드 · 실험 실행기
-├── docs/                 구현 설계서 · ADR · API · 검증 문서
-└── 발표자료/              제안서 · 기말 · 최종 발표 PPT
+├── benchmarks/           쇼핑몰 통합 검사 · RAG 수정 실험 · 팀 벤치마크
+├── evals/                수정안 보안 회귀 평가 (Promptfoo)
+├── scripts/              골든패스 스모크 · 실환경 검증 · 릴리스 빌드 · 실험 실행기 (dev/: 개발용 도구)
+└── docs/                 문서 목차 · 측정 · 하네스 · RAG
+    ├── design/           구현 설계서 · API · 기능별 설계
+    ├── guides/           설치 · 권한 · 릴리스 · 데모 안내
+    ├── verification/     검증 기록
+    ├── releases/         릴리스 노트 · 출시 점검
+    ├── planning/         계획 · 분석
+    ├── adr/              설계 결정 기록
+    └── presentations/    제안서 · 기말 · 최종 발표 PPT
 ```
 
 </details>
@@ -306,6 +342,7 @@ flowchart LR
 - 검증 빌드는 비밀값을 걸러 낸 임시 사본에서 실행하고, 원본 프로젝트는 건드리지 않음
 - 실행 점검은 이미지를 실제로 띄워 사용자 흐름의 API를 호출하고 5xx · 기동 실패를 잡음
 - AI 교정은 최대 6회 · 시간 예산 안에서 진행하고, 오류가 줄지 않으면 멈춤
+- 서비스 · DB가 여럿인 프로젝트는 아키텍처 계약을 기준으로 일회용 복사본을 `docker compose up --wait`로 함께 띄워, 서비스 간 연결 · 테이블 · 계약 통합 테스트까지 확인 ([하네스](docs/harness.md))
 
 배포 중 빌드 · ECS 오류가 나면 **문서 근거 수정(RAG)** 경로를 사용할 수 있습니다.
 
@@ -335,7 +372,7 @@ flowchart LR
 - **"문서를 붙이면 좋아진다"는 가설은 이번 실험에서 확인되지 않았습니다.** 대형 모델 단독(A)이 해결률이 가장 높고 해결당 비용도 가장 낮았습니다.
 - 로직 오류 대조군 6개는 문서 근거 조건(B · D)에서 자동 수정 0건 — 로직 오류는 자동 수정 대신 사람의 검토로 넘깁니다.
 - 조건별 1회(seed 42) 탐색 실험이며 통계적 우월성을 뜻하지 않습니다. 총 모델 사용료 추정 $5.49 (승인 상한 $30).
-- 상세: [실험 보고서](benchmarks/repair/RESULTS.md) · [문서 근거 수정 설계](docs/design/document-grounded-repair.md)
+- 상세: [RAG 요약](docs/rag.md) · [실험 보고서](benchmarks/repair/RESULTS.md) · [문서 근거 수정 설계](docs/design/document-grounded-repair.md)
 
 </details>
 
@@ -349,6 +386,15 @@ flowchart LR
 - **판정** — OPA [`deploy.rego`](policies/recoder/deploy.rego): SBOM 없음 · Trivy critical 1건 이상 · 시크릿 발견 · Dockerfile 오류 · 허용되지 않은 브랜치의 production 배포는 거부
 - **폴백** — OPA 서버가 없으면 같은 규칙을 Core의 로컬 구현으로 적용 (두 구현은 같은 판단을 하도록 함께 관리)
 - **승인** — 승인 레벨 4단계: 자동(1) · 확인(2) · 이중 확인(3) · 차단(4)
+- **다중 서비스** — 서비스마다 Dockerfile과 이미지를 따로 검사하고, 계약 대조에서 다른 서비스의 DB에 직접 접속하거나 계약에 없는 서비스를 부르면 배포를 막음
+
+**공격 테스트 (레드팀)**
+
+- 실행 중인 내 앱을 대상으로 PentAGI가 실제 HTTP 요청을 보내 공격합니다. 대상 주소를 직접 적지 않고, 지금 돌고 있는 이 프로젝트의 앱 중에서 고릅니다.
+- 공격 작업은 내부 전용 Docker 네트워크에서 돌고, 고정 대상 HTTP 중계기만 거칩니다. 범위 밖 경로와 DELETE · PUT · PATCH · CONNECT는 거절합니다.
+- 검사 도구 이미지는 공식 digest로 고정하고, 검사 전후로 엔진 안의 컨테이너 · 네트워크 · 볼륨을 지웁니다.
+- 결과는 직접 관찰한 HTTP 응답과 AI가 추정한 취약점 후보를 구분합니다. 빠진 검사나 부족한 근거는 "안전"으로 바꾸지 않습니다.
+- 공격 테스트는 AI 모델 사용료가 들고, 도구 이미지가 약 17GB라 Docker 여유 공간 50GiB가 필요합니다.
 
 ### AI 에이전트 자체의 보안
 
@@ -372,7 +418,9 @@ AI 에이전트가 사용자 PC에서 코드를 만들고 실행하는 만큼, R
 | 대상 | 결과 |
 |---|---|
 | CI 구성 | Core pytest (Ubuntu · Windows · macOS, Python 3.11 · 3.13), 웹뷰 렌더, 골든패스, Watchdog, Discord, 쇼핑몰 통합, 의존성 감사 |
-| 테스트 (2.0.30) | Core 2,831 · 확장 화면 574 · Watchdog 65 · Discord 112 — 모두 통과 |
+| 테스트 (4.0.1, 2026-11-22) | Core 3,635 통과 · 2 건너뜀 · 확장 화면 930 · Watchdog 65 · Discord 134 — 실패 0 (Linux · Python 3.13) |
+| 다중 서비스 하네스 | 계약 정규화 · compose · Dockerfile 단위 테스트, 가짜 AI · 가짜 Docker로 요청 → 생성 → 실패 → 교정 → 통과 전 과정, 실제 PostgreSQL · Redis와 서버 프로세스로 판정 로직 확인(정상판 13/13, 결함판에서 인증 없이 열린 API를 파일 단위로 지목) |
+| 레드팀 격리 (2026-11-13) | 실제 Docker에서 허용 앱 200, 범위 밖 경로 403, DELETE 405, 인코딩 경로 우회 403, 엔진 API와 다른 대상 포트 차단 |
 | 쇼핑몰 기반 (2026-10-09) | 독립 PostgreSQL · 모의 결제 서버 통합 검사 50개 통과 |
 | 실제 AWS 배포 (2026-10-09) | CloudFront · 내부 ALB · ECS · ECR · RDS · IAM · Secrets Manager 환경에서 업무 · 보안 검사 36개 통과 |
 | DB 복구 | 암호화 RDS 스냅숏 → 새 DB → 재배포 후 회원 · 결제 완료 주문 · 재고 유지 6개 통과 |
@@ -381,7 +429,7 @@ AI 에이전트가 사용자 PC에서 코드를 만들고 실행하는 만큼, R
 | 의존성 감사 | 루트 · 확장 · 쇼핑몰 npm, 세 플랫폼 Python 배포 목록에서 알려진 취약점 0 |
 
 > [!NOTE]
-> 실제 AWS 계정 검증은 2026-10-09 기준입니다. 이후 2.0.25~2.0.36에서 추가한 WAF · CloudFront · ACM · RDS 자동 생성, 원본 잠금, OSV 재검사는 모의 AWS(moto) · 로컬 · 실제 nginx로 검증했습니다. 모의 결제 통과는 실제 결제사 승인을 뜻하지 않습니다. 자세한 범위는 [생성 · 배포 · 보안 검증 범위](docs/verification/production-readiness.md)를 참고하세요.
+> 실제 AWS 계정 검증은 2026-10-09 기준입니다. 이후 2.0.25~2.0.36에서 추가한 WAF · CloudFront · ACM · RDS 자동 생성, 원본 잠금, OSV 재검사는 모의 AWS(moto) · 로컬 · 실제 nginx로 검증했습니다. 모의 결제 통과는 실제 결제사 승인을 뜻하지 않습니다. 실제 AI로 다중 서비스 생성 성공률을 잰 기록과, 유료 모델을 쓴 레드팀 탐지 정확도 재검증은 아직 없습니다. 자세한 범위는 [생성 · 배포 · 보안 검증 범위](docs/verification/production-readiness.md)와 [4.0.0 출시 준비 점검](docs/releases/release-readiness-3.1.md)을 참고하세요.
 
 <br>
 
@@ -392,8 +440,8 @@ AI 에이전트가 사용자 PC에서 코드를 만들고 실행하는 만큼, R
 | **VS Code 확장** | ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=for-the-badge&logo=typescript&logoColor=white) ![React](https://img.shields.io/badge/React-20232A?style=for-the-badge&logo=react&logoColor=61DAFB) ![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-06B6D4?style=for-the-badge&logo=tailwindcss&logoColor=white) ![Webpack](https://img.shields.io/badge/Webpack-8DD6F9?style=for-the-badge&logo=webpack&logoColor=black) |
 | **Local Core** | ![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white) ![Docker](https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white) ![PyInstaller](https://img.shields.io/badge/PyInstaller-4B8BBE?style=for-the-badge) |
 | **AI** | ![Amazon Bedrock](https://img.shields.io/badge/Amazon_Bedrock-232F3E?style=for-the-badge) ![Claude API](https://img.shields.io/badge/Claude_API-D97757?style=for-the-badge&logo=anthropic&logoColor=white) ![OpenAI API](https://img.shields.io/badge/OpenAI_API-412991?style=for-the-badge) ![RAG](https://img.shields.io/badge/RAG_%28BM25_%2B_E5%29-6E40C9?style=for-the-badge) |
-| **보안** | ![OPA](https://img.shields.io/badge/OPA_%28Rego%29-566366?style=for-the-badge) ![Trivy](https://img.shields.io/badge/Trivy-1904DA?style=for-the-badge) ![Hadolint](https://img.shields.io/badge/Hadolint-2F3B45?style=for-the-badge) ![Gitleaks](https://img.shields.io/badge/Gitleaks-C8102E?style=for-the-badge) ![Syft](https://img.shields.io/badge/Syft_%28SBOM%29-0E6E8C?style=for-the-badge) |
-| **클라우드 · 배포** | ![AWS](https://img.shields.io/badge/ECS_Fargate_%C2%B7_ECR_%C2%B7_S3-FF9900?style=for-the-badge) ![CloudFront](https://img.shields.io/badge/CloudFront_%C2%B7_WAF_%C2%B7_RDS-8C4FFF?style=for-the-badge) ![AWS SAM](https://img.shields.io/badge/SAM_%C2%B7_Lambda_%C2%B7_DynamoDB-232F3E?style=for-the-badge) ![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-2088FF?style=for-the-badge&logo=githubactions&logoColor=white) |
+| **보안** | ![OPA](https://img.shields.io/badge/OPA_%28Rego%29-566366?style=for-the-badge) ![Trivy](https://img.shields.io/badge/Trivy-1904DA?style=for-the-badge) ![Hadolint](https://img.shields.io/badge/Hadolint-2F3B45?style=for-the-badge) ![Gitleaks](https://img.shields.io/badge/Gitleaks-C8102E?style=for-the-badge) ![Syft](https://img.shields.io/badge/Syft_%28SBOM%29-0E6E8C?style=for-the-badge) ![PentAGI](https://img.shields.io/badge/PentAGI_%28Red_Team%29-B22222?style=for-the-badge) |
+| **클라우드 · 배포** | ![Docker Compose](https://img.shields.io/badge/Docker_Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white) ![AWS](https://img.shields.io/badge/ECS_Fargate_%C2%B7_Service_Connect_%C2%B7_ECR_%C2%B7_S3-FF9900?style=for-the-badge) ![CloudFront](https://img.shields.io/badge/CloudFront_%C2%B7_WAF_%C2%B7_RDS-8C4FFF?style=for-the-badge) ![AWS SAM](https://img.shields.io/badge/SAM_%C2%B7_Lambda_%C2%B7_DynamoDB-232F3E?style=for-the-badge) ![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-2088FF?style=for-the-badge&logo=githubactions&logoColor=white) |
 | **운영 · 협업** | ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?style=for-the-badge&logo=postgresql&logoColor=white) ![Discord](https://img.shields.io/badge/Discord_API-5865F2?style=for-the-badge&logo=discord&logoColor=white) ![CloudWatch](https://img.shields.io/badge/CloudWatch-E7157B?style=for-the-badge) |
 
 <br>
@@ -441,7 +489,7 @@ npm run build                      # VS Code에서 extension 폴더를 열고 F5
 
 터미널에 포커스가 있을 때는 VS Code 가 키를 셸로 보내므로 Alt+Q 가 휠을 열지 않습니다. 터미널에서도 쓰려면 명령 팔레트에서 `ReCoder: 터미널에서도 Alt+Q 로 빠른 이동` 을 실행하세요(사용자 설정 `terminal.integrated.commandsToSkipShell` 에 휠 명령을 더합니다 — 셸의 Alt+Q 기능 대신 휠이 열리고, 휠이 떠 있을 때만 방향키를 휠이 받습니다).
 
-설치 파일(VSIX)은 `v*` 태그를 push하면 GitHub Actions가 Windows · Linux · macOS용으로 빌드해 GitHub Release에 올립니다. 운영자용 전체 설정(게이트웨이 · Discord 봇 · VSIX 직접 빌드)은 [SETUP.md](SETUP.md)를 참고하세요.
+설치 파일(VSIX)은 `v*` 태그를 push하면 GitHub Actions가 Windows · Linux · macOS용으로 빌드해 GitHub Release에 올립니다. Windows VSIX에는 버전이 같은 네이티브 Core가 들어 있어 Python을 따로 설치하지 않아도 되고, Git · Node.js가 없으면 확장 전용 위치에 공식 배포본을 준비합니다. 운영자용 전체 설정(게이트웨이 · Discord 봇 · VSIX 직접 빌드)은 [SETUP.md](SETUP.md)를 참고하세요.
 
 ### 골든패스 스모크
 
@@ -463,8 +511,14 @@ python scripts/golden_path_smoke.py --live
 
 ## 문서
 
+전체 목록은 [문서 목차](docs/README.md)에 있습니다.
+
 | 문서 | 내용 |
 |---|---|
+| [모델별 비용 · 시간 측정](docs/model-benchmark.md) | 모드 · 모델 조합별 비용과 시간, 측정 방법, 기준별 상위 5개 조합 |
+| [하네스](docs/harness.md) | 다중 서비스 · 다중 DB 앱을 나눠 만들고 함께 띄워 검증하는 방법, 다루는 규모 |
+| [RAG](docs/rag.md) | 문서 근거 오류 수정의 흐름 · 안전장치 · 실험 결과 |
+| [4.0.0 출시 준비 점검](docs/releases/release-readiness-3.1.md) | 4.0.x 기준 검증 상태와 남은 실환경 검증 |
 | [구현 설계서 v2](docs/design/ReCoder_구현설계서_v2.md) | **2.0.36 기준** 컴포넌트 · 파이프라인 · API · 보안 · 검증 · 한계 |
 | [구현 설계서 v1](docs/design/ReCoder_구현설계서_v1.md) | 1학기 MVP 기준 (게이트웨이 · S3 정적 배포) |
 | [설계 확정서 (ADR 20)](docs/design/ReCoder_설계_확정서_ADR.md) | AI-DLC로 확정한 설계 결정 20개 |
@@ -489,6 +543,10 @@ python scripts/golden_path_smoke.py --live
 | 2026.09.24 ~ 10.09 | 1.1.x | Three.js 배포 캔버스 · Drag & Drop, Windows 설치본, RAG 비교 실험, 대규모 개발(팀 모드) |
 | 2026.10.09 ~ 10.13 | 2.0.0 ~ 2.0.22 | DB 구조 확인 · 배포 후 API 확인, AI Village 작업장 화면, 결제 모듈, 생성 직후 실행 점검, 한국어 · 원화 상점 |
 | 2026.10.14 ~ 10.16 | 2.0.23 ~ 2.0.36 | 공급망 보안 · AWS 방패 · HTTPS · 운영 알림 · 에이전트 보안 · 흐름 dry run · 작업별 AI 공급자 |
+| 2026.10.20 ~ 10.24 | 2.0.37 ~ 2.0.50 | RAG 고도화(버전 확인 · 오류 관련 코드 선택 · 재순위화 · 수정안 보안 평가 · 실행 정책), 구조 다이어그램, 명세 · 합격 조건, 빠른 이동 휠, 팀 구성 · 테스트 리코더, Operate 탭 · 상시 감시 |
+| 2026.10.24 ~ 11.09 | 3.0.1 ~ 3.0.8 | 새 화면 디자인, 승인 없는 변경 차단 강화, Security 현황판, AI 소스 감사, 레드팀(PentAGI), Windows 네이티브 Core, Claude ↔ GPT 전환 |
+| 2026.11.15 | 4.0.0 | 엔터프라이즈 하네스(아키텍처 계약 · 함께 띄워 검증 · 다중 서비스 로컬 배포 · 계약 대조), 진행 흐름 표시, 2D 배포 보드, 레드팀 고도화, Discord 배포 요청 |
+| 2026.11.21 | 4.0.1 | 다중 서비스 프로젝트의 AWS ECS 배포(Service Connect), 서비스별 보안 검사, 실사용 화면 점검 수정, Claude 공식 단가 반영 |
 
 <details>
 <summary><b>2.0.23 ~ 2.0.36 상세</b></summary>
