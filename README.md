@@ -198,7 +198,6 @@ AI 코딩 도구로 코드를 만드는 일은 쉬워졌지만, 만든 코드를
 - 배포 직후 5분 동안 헬스 · 오류 로그를 감시하고, 이상이 있으면 이전 버전 롤백을 제안 → 승인 후 실행
 - **Operate 탭** — 배포 후 상태 · 승인 대기 · 최근 기록을 한 화면에. **상시 감시**를 켜면 내 AWS 계정의 작은 Lambda가 VS Code를 꺼도 경보 · ECS 이벤트를 지켜보고 롤백을 준비 (월 약 $0.1 미만)
 - 선택 구성: HTTPS 주소(CloudFront · 내 도메인), 관리형 DB(RDS), 앞단 방패(nginx 속도 제한 · ALB + AWS WAF), 공격 · 장애 감지 알림, AWS 리소스 정리
-- 한계: ECS 다중 서비스 배포에서 DB · Redis는 컨테이너로 돌아 태스크를 다시 띄우면 데이터가 사라집니다. 운영 데이터는 RDS · ElastiCache로 옮겨야 합니다.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/readme/feature-deploy-dark.jpg">
@@ -386,7 +385,7 @@ flowchart LR
 - **판정** — OPA [`deploy.rego`](policies/recoder/deploy.rego): SBOM 없음 · Trivy critical 1건 이상 · 시크릿 발견 · Dockerfile 오류 · 허용되지 않은 브랜치의 production 배포는 거부
 - **폴백** — OPA 서버가 없으면 같은 규칙을 Core의 로컬 구현으로 적용 (두 구현은 같은 판단을 하도록 함께 관리)
 - **승인** — 승인 레벨 4단계: 자동(1) · 확인(2) · 이중 확인(3) · 차단(4)
-- **다중 서비스** — 서비스마다 Dockerfile과 이미지를 따로 검사하고, 계약 대조에서 다른 서비스의 DB에 직접 접속하거나 계약에 없는 서비스를 부르면 배포를 막음
+- **다중 서비스** — 보안 검사 화면과 로컬 배포에서 서비스마다 Dockerfile과 이미지를 따로 검사하고, 계약 대조에서 다른 서비스의 DB에 직접 접속하거나 계약에 없는 서비스를 부르면 배포를 막음
 
 **공격 테스트 (레드팀)**
 
@@ -429,7 +428,7 @@ AI 에이전트가 사용자 PC에서 코드를 만들고 실행하는 만큼, R
 | 의존성 감사 | 루트 · 확장 · 쇼핑몰 npm, 세 플랫폼 Python 배포 목록에서 알려진 취약점 0 |
 
 > [!NOTE]
-> 실제 AWS 계정 검증은 2026-10-09 기준입니다. 이후 2.0.25~2.0.36에서 추가한 WAF · CloudFront · ACM · RDS 자동 생성, 원본 잠금, OSV 재검사는 모의 AWS(moto) · 로컬 · 실제 nginx로 검증했습니다. 모의 결제 통과는 실제 결제사 승인을 뜻하지 않습니다. 실제 AI로 다중 서비스 생성 성공률을 잰 기록과, 유료 모델을 쓴 레드팀 탐지 정확도 재검증은 아직 없습니다. 자세한 범위는 [생성 · 배포 · 보안 검증 범위](docs/verification/production-readiness.md)와 [4.0.0 출시 준비 점검](docs/releases/release-readiness-3.1.md)을 참고하세요.
+> 실제 AWS 계정 검증은 2026-10-09 기준입니다. 이후 2.0.25~2.0.36에서 추가한 WAF · CloudFront · ACM · RDS 자동 생성, 원본 잠금, OSV 재검사는 모의 AWS(moto) · 로컬 · 실제 nginx로 검증했습니다. 모의 결제 통과는 실제 결제사 승인을 뜻하지 않습니다. 자세한 범위는 [생성 · 배포 · 보안 검증 범위](docs/verification/production-readiness.md)와 [4.0.0 출시 준비 점검](docs/releases/release-readiness-3.1.md)을 참고하세요.
 
 <br>
 

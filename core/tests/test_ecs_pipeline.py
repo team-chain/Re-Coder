@@ -3286,7 +3286,7 @@ def test_the_log_driver_does_not_ask_the_execution_role_to_create_the_group():
     AWS 관리형 `AmazonECSTaskExecutionRolePolicy` 에는 logs:CreateLogGroup 이
     없다. 그러면 컨테이너가 기동 중에 죽고, 정작 로그 그룹은 비어 있어서
     "CloudWatch 로그를 보세요"라는 안내가 아무 도움이 안 된다.
-    (우리 문서 docs/aws-minimum-permissions.md 에도 같은 경고가 있다.)
+    (우리 문서 docs/guides/aws-minimum-permissions.md 에도 같은 경고가 있다.)
 
     로그 그룹은 우리가 `ensure_log_group` 으로 직접 만든다.
     """
