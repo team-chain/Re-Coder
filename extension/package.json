@@ -966,7 +966,7 @@
     "@vscode/vsce": "^4.0.0",
     "autoprefixer": "^10.4.20",
     "css-loader": "^7.1.2",
-    "postcss": "^8.4.49",
+    "postcss": "^8.5.28",
     "postcss-loader": "^8.1.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
@@ -978,7 +978,7 @@
     "webpack-cli": "^5.1.0"
   },
   "dependencies": {
-    "ws": "^8.18.0",
+    "ws": "^8.21.0",
     "yauzl": "3.4.0"
   },
   "overrides": {
