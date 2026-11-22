@@ -9,7 +9,7 @@ test('새 저장소 이름 미리보기는 호스트와 같은 규칙',()=>{
  assert.deepEqual(previewRepoName(''),{name:'',error:''});
 });
 test('기본 이름은 프로젝트 폴더 이름',()=>{
- assert.equal(defaultRepoName('C:\\Users\\dy981\\OneDrive\\바탕 화면\\Recoder Demo'),'Recoder-Demo');
- assert.equal(defaultRepoName('C:\\Users\\dy981\\OneDrive\\바탕 화면\\TEMP'),'TEMP');
+ assert.equal(defaultRepoName('C:\\Users\\user\\OneDrive\\바탕 화면\\Recoder Demo'),'Recoder-Demo');
+ assert.equal(defaultRepoName('C:\\Users\\user\\OneDrive\\바탕 화면\\TEMP'),'TEMP');
  assert.equal(defaultRepoName('/home/u/테스트'),'');
 });

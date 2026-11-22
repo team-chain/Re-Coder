@@ -4839,12 +4839,12 @@ def test_the_sbom_mount_path_survives_windows():
 
     with mock.patch("core.sbom.shutil.which", return_value=None):
         cmd = SBOMGenerator._syft_command(
-            "img:1", PureWindowsPath(r"C:\Users\dy981\.recoder\sbom\a.json")
+            "img:1", PureWindowsPath(r"C:\Users\user\.recoder\sbom\a.json")
         )
 
     mounts = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-v"]
     out_mount = next(m for m in mounts if m.endswith(":/out"))
-    assert out_mount == "C:/Users/dy981/.recoder/sbom:/out", out_mount
+    assert out_mount == "C:/Users/user/.recoder/sbom:/out", out_mount
     assert "\\" not in out_mount, "역슬래시가 남아 도커가 경로를 못 읽는다"
 
 

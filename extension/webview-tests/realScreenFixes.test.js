@@ -2,8 +2,8 @@ const test=require('node:test');const assert=require('node:assert/strict');
 const {awsErrorText,awsNotes}=require('../out/webview-test/components/awsErrors');
 const {isPassNote,isIsoTime}=require('../out/webview-test/components/Replay');
 test('AWS 권한 오류는 필요한 권한만 한국어로, 계정 번호·ARN 없이',()=>{
- const raw='User: arn:aws:iam::419784061854:user/recoder-deploy is not authorized to perform: ecs:DescribeServices on resource: arn:aws:ecs:us-east-1:419784061854:service/test/test because no identity-based policy allows the ecs:DescribeServices action';
- const t=awsErrorText(raw);assert.equal(t,'AWS 권한이 없어요 — recoder-deploy 에 ecs:DescribeServices 권한을 추가하세요');assert.doesNotMatch(t,/419784061854|arn:/);
+ const raw='User: arn:aws:iam::123456789012:user/recoder-deploy is not authorized to perform: ecs:DescribeServices on resource: arn:aws:ecs:us-east-1:123456789012:service/test/test because no identity-based policy allows the ecs:DescribeServices action';
+ const t=awsErrorText(raw);assert.equal(t,'AWS 권한이 없어요 — recoder-deploy 에 ecs:DescribeServices 권한을 추가하세요');assert.doesNotMatch(t,/123456789012|arn:/);
  const notes=awsNotes([`서비스 상태를 읽지 못했습니다: ${raw}`,`서비스 상태를 읽지 못했습니다: ${raw}`,'상시 감시 상태를 확인하지 못했습니다: x'],g=>g.startsWith('상시 감시'));
  assert.deepEqual(notes,['서비스 상태를 읽지 못했어요 · AWS 권한이 없어요 — recoder-deploy 에 ecs:DescribeServices 권한을 추가하세요']);
  assert.equal(awsErrorText('something else'),'something else');
@@ -19,6 +19,6 @@ test('ADR 본문: **굵게** 기호가 그대로 보이지 않고, 머리줄과 
  assert.doesNotMatch(html,/\*\*/);assert.match(html,/<strong>키 없이<\/strong>/);assert.match(html,/<code[^>]*>stripe<\/code>/);assert.doesNotMatch(html,/ADR-1: 결제/);
 });
 test('AWS 정리 목록의 권한 오류도 한국어 한 줄(계정 번호 없음)',()=>{
- const g='ECS: 확인하지 못했습니다 — User: arn:aws:iam::419784061854:user/recoder-deploy is not authorized to perform: ecs:ListClusters on resource: * because no identity-based policy allows the ecs:ListClusters action';
+ const g='ECS: 확인하지 못했습니다 — User: arn:aws:iam::123456789012:user/recoder-deploy is not authorized to perform: ecs:ListClusters on resource: * because no identity-based policy allows the ecs:ListClusters action';
  assert.deepEqual(awsNotes([g]),['ECS · AWS 권한이 없어요 — recoder-deploy 에 ecs:ListClusters 권한을 추가하세요']);
 });
